@@ -17,7 +17,7 @@ from .visual_compare_prompt_v02 import VISUAL_COMPARE_SYSTEM, VISUAL_COMPARE_USE
 
 
 STANDARD_ID = "qa_competitor_compare"
-STANDARD_VERSION = "0.2"
+STANDARD_VERSION = "0.2-simplified"
 DIMENSIONS = (
     "understanding",
     "accuracy",

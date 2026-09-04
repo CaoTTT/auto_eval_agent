@@ -37,6 +37,18 @@ from .tasks import Task, retire_task, upsert_result_by_index
 
 logger = logging.getLogger(__name__)
 MAX_PROGRESS_EVENTS_PER_ITEM = 100
+COMPARE_DIMENSIONS = (
+    "understanding",
+    "accuracy",
+    "service_closure",
+    "scenario_fulfillment",
+    "intuitive_efficiency",
+    "evidence_quality",
+    "guided_recommendation",
+)
+COMPARE_AGGREGATION_DIMENSIONS = tuple(
+    dimension for dimension in COMPARE_DIMENSIONS if dimension != "accuracy"
+)
 
 
 # 持久化节流：普通调用走 debounce（默认 2s，环境变量可调）或每 N 题强刷一次，
@@ -118,6 +130,23 @@ def _to_evalitem(item: dict, idx: int) -> EvalItem:
         category=item.get("category", "default"),
         media=item.get("media") or [],
         metadata=meta,
+    )
+
+
+def _compare_product_count(item: dict) -> int:
+    declared = item.get("product_count")
+    if declared in (2, 3) and not isinstance(declared, bool):
+        return declared
+    return 3 if any(
+        item.get(field) not in (None, "", [])
+        for field in ("video3", "frames3", "context3", "answer3")
+    ) else 2
+
+
+def _compare_frames_ready(item: dict) -> bool:
+    return all(
+        bool(item.get(f"frames{product_no}"))
+        for product_no in range(1, _compare_product_count(item) + 1)
     )
 
 
@@ -282,12 +311,28 @@ def _make_item_evaluator(
                 )
                 last_error = None
                 res = None
-                if not item_dict.get("frames") and not item_dict.get("frames1"):
+                needs_video_prepare = (
+                    not _compare_frames_ready(item_dict)
+                    if task.mode == "compare"
+                    else not item_dict.get("frames")
+                )
+                if needs_video_prepare:
                     try:
                         log_event(
                             "视频准备",
                             "校验视频并分析场景",
-                            details={"视频路径": item_dict.get("video_path")},
+                            details={
+                                "视频路径": (
+                                    [
+                                        item_dict.get(f"video{product_no}")
+                                        for product_no in range(
+                                            1, _compare_product_count(item_dict) + 1
+                                        )
+                                    ]
+                                    if task.mode == "compare"
+                                    else item_dict.get("video_path")
+                                )
+                            },
                             progress=3,
                             progress_message="正在校验视频并分析场景",
                         )
@@ -713,41 +758,63 @@ async def _eval_one(
     else:  # compare
         if not compare_judges:
             raise ValueError("没有可用的垂域视觉对比评测裁判")
-        frames1 = item_dict.get("frames1") or []
-        frames2 = item_dict.get("frames2") or []
-        if not frames1 or not frames2:
-            raise ValueError("垂域视觉对比评测缺少关键帧")
+        product_count = _compare_product_count(item_dict)
+        frames_by_product = {
+            product_no: item_dict.get(f"frames{product_no}") or []
+            for product_no in range(1, product_count + 1)
+        }
+        missing_frames = [
+            str(product_no)
+            for product_no, frames in frames_by_product.items()
+            if not frames
+        ]
+        if missing_frames:
+            raise ValueError(
+                f"垂域视觉对比评测产品{'/'.join(missing_frames)}缺少关键帧"
+            )
 
-        answer1 = str(item_dict.get("answer1") or "").strip()
-        answer2 = str(item_dict.get("answer2") or "").strip()
-        context1 = str(item_dict.get("context1") or "").strip()
-        context2 = str(item_dict.get("context2") or "").strip()
-
-        out["answer1"] = answer1
-        out["answer2"] = answer2
-        out["context1"] = context1
-        out["context2"] = context2
+        answers = {
+            product_no: str(item_dict.get(f"answer{product_no}") or "").strip()
+            for product_no in range(1, product_count + 1)
+        }
+        contexts = {
+            product_no: str(item_dict.get(f"context{product_no}") or "").strip()
+            for product_no in range(1, product_count + 1)
+        }
+        out["product_count"] = product_count
+        for product_no in range(1, product_count + 1):
+            out[f"answer{product_no}"] = answers[product_no]
+            out[f"context{product_no}"] = contexts[product_no]
 
         compare_result = await compare_judges[0].evaluate(
             question=item.question,
             context=(item.context or "").strip(),
-            context1=context1,
-            answer1=answer1,
-            frames1=[str(p) for p in frames1],
-            context2=context2,
-            answer2=answer2,
-            frames2=[str(p) for p in frames2],
+            context1=contexts[1],
+            answer1=answers[1],
+            frames1=[str(path) for path in frames_by_product[1]],
+            context2=contexts[2],
+            answer2=answers[2],
+            frames2=[str(path) for path in frames_by_product[2]],
+            context3=contexts.get(3, ""),
+            answer3=answers.get(3, ""),
+            frames3=(
+                [str(path) for path in frames_by_product[3]]
+                if product_count == 3
+                else None
+            ),
+            product_count=product_count,
         )
         out.update(compare_result)
         log_event(
             "结果聚合",
             "视觉对比完成",
             details={
-                "相关性": compare_result.get("relevance"),
-                "安全合规": compare_result.get("safety"),
-                "内容质量": compare_result.get("content_quality"),
-                "需求闭环": compare_result.get("need_closure"),
-                "个性化": compare_result.get("personalization"),
+                "产品数": product_count,
+                "理解需求排名": compare_result.get("understanding_rank_groups"),
+                "服务闭环排名": compare_result.get("service_closure_rank_groups"),
+                "场景化满足排名": compare_result.get("scenario_fulfillment_rank_groups"),
+                "直观高效排名": compare_result.get("intuitive_efficiency_rank_groups"),
+                "需要复核": compare_result.get("needs_human_review"),
                 "内容冲突": compare_result.get("has_conflict"),
             },
             progress=90,
@@ -767,29 +834,91 @@ async def _eval_one(
 def _summarize(task: Task) -> dict:
     if task.mode == "rich_content":
         return _summarize_rich_content(task)
-    # compare：五维胜负 + 内容冲突统计
+    # compare：V0.2 七维绝对分；准确性保留逐题输出但暂不参与汇总。
     res = task.results
     ok = [r for r in res if "error" not in r]
+    valid = [
+        row for row in ok
+        if all(
+            row.get(f"answer{product_no}_input_status") != "failed"
+            for product_no in range(1, int(row.get("product_count") or 2) + 1)
+        )
+    ]
     summary: dict = {
         "total": len(res),
         "done": len(ok),
         "failed": len(res) - len(ok),
+        "input_failed": len(ok) - len(valid),
+        "comparable": len(valid),
         "mode": task.mode,
+        "standard_version": "0.2-simplified",
+        "accuracy_aggregation_enabled": False,
+        "needs_human_review_count": sum(
+            bool(row.get("needs_human_review")) for row in valid
+        ),
     }
-    for dim in ["relevance", "safety", "content_quality", "need_closure", "personalization"]:
-        a_wins = sum(1 for r in ok if r.get(dim) == "answer1")
-        b_wins = sum(1 for r in ok if r.get(dim) == "answer2")
-        ties = sum(1 for r in ok if r.get(dim) == "tie")
-        na = sum(1 for r in ok if r.get(dim) is None)
-        total = a_wins + b_wins + ties
-        summary[f"{dim}_answer1_wins"] = a_wins
-        summary[f"{dim}_answer2_wins"] = b_wins
-        summary[f"{dim}_ties"] = ties
-        summary[f"{dim}_na"] = na
-        summary[f"{dim}_answer1_rate"] = round(a_wins / total, 3) if total else None
-    summary["conflict_yes"] = sum(1 for r in ok if r.get("has_conflict") == "yes")
-    summary["conflict_no"] = sum(1 for r in ok if r.get("has_conflict") == "no")
-    summary["conflict_unclear"] = sum(1 for r in ok if r.get("has_conflict") == "unclear")
+    max_product_count = max(
+        (int(row.get("product_count") or 2) for row in valid),
+        default=2,
+    )
+    summary["product_count"] = max_product_count
+    for product_no in range(1, max_product_count + 1):
+        summary[f"answer{product_no}_response_gate_pass"] = sum(
+            row.get(f"answer{product_no}_response_gate") == "pass"
+            for row in valid
+            if int(row.get("product_count") or 2) >= product_no
+        )
+        summary[f"answer{product_no}_safety_gate_pass"] = sum(
+            row.get(f"answer{product_no}_safety_gate") == "pass"
+            for row in valid
+            if int(row.get("product_count") or 2) >= product_no
+        )
+
+    for dimension in COMPARE_AGGREGATION_DIMENSIONS:
+        applicable = [
+            row for row in valid if row.get(f"{dimension}_applicable") is True
+        ]
+        scored = [
+            row for row in applicable
+            if all(
+                row.get(f"answer{product_no}_{dimension}_score") is not None
+                for product_no in range(1, int(row.get("product_count") or 2) + 1)
+            )
+        ]
+        summary[f"{dimension}_applicable"] = len(applicable)
+        summary[f"{dimension}_na"] = len(valid) - len(applicable)
+        summary[f"{dimension}_coverage"] = (
+            round(len(applicable) / len(valid), 3) if valid else None
+        )
+        summary[f"{dimension}_scored"] = len(scored)
+        summary[f"{dimension}_score_coverage"] = (
+            round(len(scored) / len(applicable), 3) if applicable else None
+        )
+        for product_no in range(1, max_product_count + 1):
+            scores = [
+                row.get(f"answer{product_no}_{dimension}_score")
+                for row in applicable
+                if int(row.get("product_count") or 2) >= product_no
+                and row.get(f"answer{product_no}_{dimension}_score") is not None
+            ]
+            summary[f"{dimension}_answer{product_no}_avg"] = (
+                round(sum(scores) / len(scores), 3) if scores else None
+            )
+            summary[f"{dimension}_answer{product_no}_sole_first"] = sum(
+                row.get(f"{dimension}_rank_groups", [])[:1]
+                == [[f"product{product_no}"]]
+                for row in scored
+            )
+            summary[f"{dimension}_answer{product_no}_tied_first"] = sum(
+                bool(row.get(f"{dimension}_rank_groups"))
+                and f"product{product_no}" in row[f"{dimension}_rank_groups"][0]
+                and len(row[f"{dimension}_rank_groups"][0]) > 1
+                for row in scored
+            )
+
+    summary["conflict_yes"] = sum(1 for r in valid if r.get("has_conflict") == "yes")
+    summary["conflict_no"] = sum(1 for r in valid if r.get("has_conflict") == "no")
+    summary["conflict_unclear"] = sum(1 for r in valid if r.get("has_conflict") == "unclear")
     return summary
 
 

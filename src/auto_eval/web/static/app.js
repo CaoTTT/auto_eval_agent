@@ -56,7 +56,7 @@ createApp({
     const formatHint = computed(
       () =>
         ({
-          compare: "逐题导入 JSONL：id(可选)、query、context(可选)、video1、video2、context1/context2(可选)、answer1/answer2(可选)、task_start_time/task_end_time(可选，单位秒)",
+          compare: "逐题导入 JSONL：product_count可为2或3；双产品填写video1/2，三产品再填写video3；context1/2/3、answer1/2/3可选。",
           rich_content: "可逐题上传，也可导入 JSONL：query、context(可选)、video_path、category/answer_text/task_start_time/task_end_time(均可选)；普通图片不算挂卡，回答区域蓝色文字按 Superlink 统计。",
         }[mode.value])
     );
@@ -301,12 +301,19 @@ createApp({
           { key: "item_id", label: "题号" },
           { key: "query", label: "题目" },
           ...contextCols,
-          { key: "relevance", label: "相关性" },
-          { key: "safety", label: "安全合规" },
-          { key: "content_quality", label: "内容质量" },
-          { key: "need_closure", label: "需求闭环" },
-          { key: "personalization", label: "个性化一致性" },
+          { key: "product_count", label: "产品数" },
+          { key: "input_status_summary", label: "输入状态" },
+          { key: "response_gate_summary", label: "响应体验Gate" },
+          { key: "safety_gate_summary", label: "安全稳定Gate" },
+          { key: "understanding_summary", label: "准确理解需求" },
+          { key: "accuracy_summary", label: "内容准确（暂不汇总）" },
+          { key: "service_closure_summary", label: "服务闭环" },
+          { key: "scenario_fulfillment_summary", label: "场景化满足" },
+          { key: "intuitive_efficiency_summary", label: "直观高效" },
+          { key: "evidence_quality_summary", label: "有理有据" },
+          { key: "guided_recommendation_summary", label: "引导推荐" },
           { key: "has_conflict", label: "内容冲突" },
+          { key: "needs_human_review", label: "需人工复核" },
           { key: "rationale", label: "理由" },
           { key: "latency_s", label: "耗时" },
         ];
@@ -372,7 +379,7 @@ createApp({
     const filteredResults = computed(() => {
       const q = resultQuery.value.trim().toLowerCase();
       return skillResults.value.filter((r) => {
-        if (q && !`${r.item_id || ""} ${r.query || ""} ${r.context || ""} ${r.answer_text || ""} ${(r.card_contents || []).join(" ")} ${(r.superlink_texts || []).join(" ")} ${r.rationale || ""}`.toLowerCase().includes(q)) return false;
+        if (q && !`${r.item_id || ""} ${r.query || ""} ${r.context || ""} ${r.answer_text || ""} ${r.answer1 || ""} ${r.answer2 || ""} ${r.answer3 || ""} ${(r.card_contents || []).join(" ")} ${(r.superlink_texts || []).join(" ")} ${r.rationale || ""}`.toLowerCase().includes(q)) return false;
         return true;
       });
     });
@@ -465,7 +472,7 @@ createApp({
 
     // —— 视频评测：逐题卡片（query + 可选 context + 视频上传 + 可选 answer_text）——
     function newOpItem() {
-      return { _uiKey: ++opItemSequence, id: "", query: "", context: "", category: "", videoName: "", videoPath: "", frames: [], frameCount: 0, duration: 0, answer: "", taskStartTime: null, taskEndTime: null, sourceLine: null, sourceData: null, sessionGroup: null, turnIndex: null, uploading: false, uploadError: "" };
+      return { _uiKey: ++opItemSequence, id: "", query: "", context: "", category: "", productCount: 2, videoName: "", videoPath: "", video1Path: "", video2Path: "", video3Path: "", frames: [], frameCount: 0, duration: 0, answer: "", answer1: "", answer2: "", answer3: "", context1: "", context2: "", context3: "", taskStartTime: null, taskEndTime: null, sourceLine: null, sourceData: null, sessionGroup: null, turnIndex: null, uploading: false, uploadError: "" };
     }
     function addOpItem() {
       opItems.value.push(newOpItem());
@@ -551,13 +558,17 @@ createApp({
             category: item.category === "default" ? "" : (item.category || ""),
             videoName: String(item.video_path || "").split(/[\\/]/).pop(),
             videoPath: item.video_path || item.video1 || "",
+            productCount: item.product_count || (item.video3 ? 3 : 2),
             answer: mode.value === "compare" ? (item.answer1 || "") : (item.answer_text || ""),
             answer1: item.answer1 || "",
             answer2: item.answer2 || "",
+            answer3: item.answer3 || "",
             context1: item.context1 || "",
             context2: item.context2 || "",
+            context3: item.context3 || "",
             video1Path: item.video1 || "",
             video2Path: item.video2 || "",
+            video3Path: item.video3 || "",
             taskStartTime: item.task_start_time ?? null,
             taskEndTime: item.task_end_time ?? null,
             sourceLine: item.source_line ?? null,
@@ -576,17 +587,24 @@ createApp({
       }
     }
 
+    function opItemReady(it) {
+      if (!it.query.trim()) return false;
+      if (mode.value !== "compare") return Boolean((it.frames || []).length || it.videoPath);
+      const productCount = Number(it.productCount) === 3 || it.video3Path ? 3 : 2;
+      return Boolean(
+        (it.video1Path || it.videoPath)
+        && it.video2Path
+        && (productCount === 2 || it.video3Path)
+      );
+    }
+
     const canSubmit = computed(() =>
-      !opPreparing.value && opItems.value.some(
-        (it) => it.query.trim() && ((it.frames || []).length || it.videoPath)
-      )
+      !opPreparing.value && opItems.value.some(opItemReady)
     );
 
     async function submit() {
       runError.value = "";
-      const valid = opItems.value.filter(
-        (it) => it.query.trim() && ((it.frames || []).length || it.videoPath)
-      );
+      const valid = opItems.value.filter(opItemReady);
       if (!valid.length) {
         alert("请为每题填写 query，并提供视频路径或上传视频后再评估。");
         return;
@@ -599,12 +617,19 @@ createApp({
           context: (it.context || "").trim(),
         };
         if (mode.value === "compare") {
+          const productCount = Number(it.productCount) === 3 || it.video3Path ? 3 : 2;
+          item.product_count = productCount;
           item.video1 = it.video1Path || it.videoPath || "";
           item.video2 = it.video2Path || "";
           item.context1 = (it.context1 || "").trim();
           item.context2 = (it.context2 || "").trim();
           item.answer1 = (it.answer1 || it.answer || "").trim();
           item.answer2 = (it.answer2 || "").trim();
+          if (productCount === 3) {
+            item.video3 = it.video3Path || "";
+            item.context3 = (it.context3 || "").trim();
+            item.answer3 = (it.answer3 || "").trim();
+          }
           item.category = (it.category || "").trim() || "default";
         } else {
           item.video_path = it.videoPath;
@@ -788,6 +813,30 @@ createApp({
       const v = r[c.key];
       if (c.key === "category") return r.category_display || (!v || v === "default" ? "通用" : v);
       if (c.key === "latency_s") return v != null ? v + "秒" : "";
+      if (["input_status_summary", "response_gate_summary", "safety_gate_summary"].includes(c.key)) {
+        const field = c.key.replace("_summary", "");
+        const labels = { complete: "完整", partial: "不完整", failed: "失败", pass: "通过", fail: "失败", unclear: "不清楚" };
+        const count = Number(r.product_count || 2);
+        return Array.from({ length: count }, (_, index) => {
+          const productNo = index + 1;
+          const key = field === "input_status" ? `answer${productNo}_input_status` : `answer${productNo}_${field}`;
+          const value = r[key];
+          return `P${productNo}:${labels[value] || value || "N/A"}`;
+        }).join("；");
+      }
+      if (c.key.endsWith("_summary") && !["input_status_summary", "response_gate_summary", "safety_gate_summary"].includes(c.key)) {
+        const dimension = c.key.slice(0, -"_summary".length);
+        if (r[`${dimension}_applicable`] === false) return "N/A";
+        const count = Number(r.product_count || 2);
+        const scores = Array.from({ length: count }, (_, index) => {
+          const score = r[`answer${index + 1}_${dimension}_score`];
+          return `P${index + 1}:${score == null ? "N/A" : score}`;
+        }).join("；");
+        const groups = r[`${dimension}_rank_groups`] || [];
+        const ranking = groups.map((group) => group.map((product) => product.replace("product", "P")).join("=")).join(">");
+        const verification = r[`${dimension}_verification_status`] || "";
+        return [scores, ranking ? `排名:${ranking}` : "", verification === "unverifiable" ? "无法核验" : ""].filter(Boolean).join("；");
+      }
       // 垂域视觉对比维度渲染
       if (["relevance", "safety", "content_quality", "need_closure", "personalization"].includes(c.key)) {
         if (v === "answer1") return "产品1更优";
@@ -819,7 +868,7 @@ createApp({
       if (c.key === "answer_coverage") {
         return ({ complete: "完整", partial: "部分", unclear: "不确定" }[v] || v) || "";
       }
-      if (c.key === "needs_review") return v ? "T" : "F";
+      if (c.key === "needs_review" || c.key === "needs_human_review") return v ? "T" : "F";
       if (v == null) return "";
       return v;
     }

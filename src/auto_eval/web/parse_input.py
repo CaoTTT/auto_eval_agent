@@ -1,8 +1,9 @@
 """输入解析：上传 jsonl / csv → 标准化题目列表。
 
 每题返回 dict：
-  compare:      {query, context?, video1, video2, answer1?, answer2?,
-                 context1?, context2?, task_start_time?, task_end_time?}
+  compare:      {query, context?, product_count?, video1, video2, video3?,
+                 answer1?, answer2?, answer3?, context1?, context2?, context3?,
+                 task_start_time?, task_end_time?}
   rich_content: {id?, query, context?, video_path, answer_text?,
                  task_start_time?, task_end_time?, category?}
 """
@@ -67,6 +68,22 @@ def _rich_content_times(obj: dict) -> dict[str, float]:
     return times
 
 
+def _compare_product_count(obj: dict) -> int:
+    """解析双/三产品模式，并拒绝互相矛盾的声明。"""
+    declared = obj.get("product_count")
+    if declared is not None and (
+        isinstance(declared, bool) or declared not in (2, 3)
+    ):
+        raise ValueError("product_count 只能是整数 2 或 3")
+    has_product3 = any(
+        obj.get(field) not in (None, "")
+        for field in ("video3", "context3", "answer3")
+    )
+    if declared == 2 and has_product3:
+        raise ValueError("product_count=2 时不能提供产品3字段")
+    return 3 if declared == 3 or has_product3 else 2
+
+
 def parse_text(text: str, mode: Mode) -> tuple[list[dict], list[str]]:
     """两种模式均需导入 JSONL/CSV（含视频路径），不支持文本粘贴解析。"""
     label_map = {"rich_content": "垂域视觉评测", "compare": "垂域视觉对比"}
@@ -103,38 +120,57 @@ def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
         if context and context.strip():
             item["context"] = context.strip()
         if mode == "compare":
-            video1 = obj.get("video1")
-            video2 = obj.get("video2")
-            if not isinstance(video1, str) or not video1.strip():
-                errors.append(f"第 {ln} 行 compare 模式缺少 video1")
+            try:
+                product_count = _compare_product_count(obj)
+            except ValueError as exc:
+                errors.append(f"第 {ln} 行 {exc}")
                 continue
-            if not isinstance(video2, str) or not video2.strip():
-                errors.append(f"第 {ln} 行 compare 模式缺少 video2")
+            item["product_count"] = product_count
+            invalid = False
+            for product_no in range(1, product_count + 1):
+                field = f"video{product_no}"
+                value = obj.get(field)
+                if not isinstance(value, str) or not value.strip():
+                    errors.append(f"第 {ln} 行 compare 模式缺少 {field}")
+                    invalid = True
+                    break
+                item[field] = value.strip()
+            if invalid:
                 continue
-            item["video1"] = video1.strip()
-            item["video2"] = video2.strip()
             try:
                 ct = _rich_content_times(obj)
             except ValueError as exc:
                 errors.append(f"第 {ln} 行 {exc}")
                 continue
             item.update(ct)
-            for ctx_field in ("context1", "context2"):
+            for ctx_field in (
+                f"context{product_no}"
+                for product_no in range(1, product_count + 1)
+            ):
                 val = obj.get(ctx_field)
                 if val is not None:
                     if not isinstance(val, str):
                         errors.append(f"第 {ln} 行 {ctx_field} 必须是字符串")
-                        continue
+                        invalid = True
+                        break
                     if val.strip():
                         item[ctx_field] = val.strip()
-            for ans_field in ("answer1", "answer2"):
+            if invalid:
+                continue
+            for ans_field in (
+                f"answer{product_no}"
+                for product_no in range(1, product_count + 1)
+            ):
                 val = obj.get(ans_field)
                 if val is not None:
                     if not isinstance(val, str):
                         errors.append(f"第 {ln} 行 {ans_field} 必须是字符串")
-                        continue
+                        invalid = True
+                        break
                     if val.strip():
                         item[ans_field] = val.strip()
+            if invalid:
+                continue
             if not obj.get("category"):
                 item["category"] = "default"
             item["source_line"] = ln

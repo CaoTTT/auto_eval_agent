@@ -414,10 +414,19 @@ def _aligned_results(snapshot: dict, results: list[dict]) -> list[dict]:
 
 _RUNTIME_ITEM_FIELDS = {
     "frames",
+    "frames1",
+    "frames2",
+    "frames3",
     "frame_count",
     "media",
     "video_name",
+    "video1_path",
+    "video2_path",
+    "video3_path",
     "duration",
+    "duration1",
+    "duration2",
+    "duration3",
     "source_data",
 }
 
@@ -505,6 +514,47 @@ def _source_data_for_item(item: dict) -> dict:
     }
 
 
+def _item_visual_streams(item: dict) -> list[dict[str, Any]]:
+    """统一返回 rich_content 单路或 compare 双/三路视频及关键帧。"""
+    source = _source_data_for_item(item)
+    has_numbered_streams = any(
+        item.get(field) not in (None, "", []) or source.get(field) not in (None, "", [])
+        for field in ("video1", "video2", "video3", "frames1", "frames2", "frames3")
+    )
+    if not has_numbered_streams:
+        media = item.get("media") or []
+        return [{
+            "product_no": None,
+            "source_video": source.get("video_path") or item.get("video_path") or "",
+            "runtime_video": item.get("video_path") or (media[0] if media else ""),
+            "frames": [Path(str(path)) for path in (item.get("frames") or [])],
+            "duration": item.get("duration") or "",
+        }]
+
+    product_count = item.get("product_count")
+    if product_count not in (2, 3):
+        product_count = 3 if any(
+            item.get(field) not in (None, "", []) or source.get(field) not in (None, "", [])
+            for field in ("video3", "frames3", "answer3", "context3")
+        ) else 2
+    media = item.get("media") or []
+    streams: list[dict[str, Any]] = []
+    for product_no in range(1, product_count + 1):
+        streams.append({
+            "product_no": product_no,
+            "source_video": source.get(f"video{product_no}") or "",
+            "runtime_video": item.get(f"video{product_no}_path") or (
+                media[product_no - 1] if len(media) >= product_no else ""
+            ),
+            "frames": [
+                Path(str(path))
+                for path in (item.get(f"frames{product_no}") or [])
+            ],
+            "duration": item.get(f"duration{product_no}") or "",
+        })
+    return streams
+
+
 def _dataset_rows(snapshot: dict) -> list[dict]:
     rows: list[dict] = []
     for index, item in enumerate(snapshot.get("items") or []):
@@ -519,28 +569,28 @@ def _dataset_rows(snapshot: dict) -> list[dict]:
             if key not in row:
                 row[key] = value
 
-        frames = [str(path) for path in (item.get("frames") or [])]
-        video_runtime_path = item.get("video_path") or (
-            (item.get("media") or [""])[0]
-        )
-        frame_project_paths = [
-            path for path in (
-                _project_relative_path(frame)
-                for frame in frames
+        streams = _item_visual_streams(item)
+        for stream in streams:
+            product_no = stream["product_no"]
+            prefix = f"产品{product_no}" if product_no is not None else ""
+            frames = stream["frames"]
+            frame_project_paths = [
+                path for path in (
+                    _project_relative_path(frame) for frame in frames
+                ) if path
+            ]
+            frame_dir = (
+                _project_relative_path(frames[0].parent) if frames else ""
             )
-            if path
-        ]
-        frame_dir = (
-            _project_relative_path(Path(frames[0]).parent)
-            if frames else ""
-        )
-        row.update({
-            "录屏项目相对路径": _project_relative_path(video_runtime_path),
-            "抽帧目录项目相对路径": frame_dir,
-            "帧项目相对路径": "\n".join(frame_project_paths),
-            "抽帧数量": item.get("frame_count") or len(frames),
-            "录屏时长（秒）": item.get("duration") or "",
-        })
+            row.update({
+                f"{prefix}录屏项目相对路径": _project_relative_path(
+                    stream["runtime_video"]
+                ),
+                f"{prefix}抽帧目录项目相对路径": frame_dir,
+                f"{prefix}帧项目相对路径": "\n".join(frame_project_paths),
+                f"{prefix}抽帧数量": len(frames),
+                f"{prefix}录屏时长（秒）": stream["duration"],
+            })
         rows.append(row)
     return rows
 
@@ -565,46 +615,46 @@ def _frame_manifest_rows(snapshot: dict) -> list[dict]:
     """生成一帧一行的导出清单；没有成功抽帧的条目也保留一行。"""
     rows: list[dict] = []
     for item_index, item in enumerate(snapshot.get("items") or []):
-        if not (
-            item.get("video_path")
-            or item.get("media")
-            or item.get("frames")
-            or _source_data_for_item(item).get("video_path")
+        streams = _item_visual_streams(item)
+        if not any(
+            stream["source_video"] or stream["runtime_video"] or stream["frames"]
+            for stream in streams
         ):
             continue
-        frames = [Path(str(path)) for path in (item.get("frames") or [])]
-        selected, _ = _frame_metadata(frames[0].parent) if frames else ({}, {})
-        source = _source_data_for_item(item)
-        source_video = source.get("video_path") or item.get("video_path") or ""
-        base = {
-            "数据集序号": item_index + 1,
-            "id": item.get("id") or f"q{item_index}",
-            "query": item.get("query") or item.get("question") or "",
-            "录屏项目相对路径": _project_relative_path(item.get("video_path")),
-            "原始video_path": source_video,
-        }
-        if not frames:
-            rows.append({
-                **base,
-                "帧序号": "",
-                "帧项目相对路径": "",
-                "时间点": "",
-                "来源": "",
-                "保留原因": "",
-                "抽帧状态": "无抽帧结果",
-            })
-            continue
-        for frame_index, frame in enumerate(frames, start=1):
-            info = selected.get(frame_index) or {}
-            rows.append({
-                **base,
-                "帧序号": frame_index,
-                "帧项目相对路径": _project_relative_path(frame),
-                "时间点": info.get("time", ""),
-                "来源": info.get("source", ""),
-                "保留原因": info.get("keep_reason", ""),
-                "抽帧状态": "已生成" if frame.is_file() else "文件缺失",
-            })
+        for stream in streams:
+            product_no = stream["product_no"]
+            frames = stream["frames"]
+            selected, _ = _frame_metadata(frames[0].parent) if frames else ({}, {})
+            base = {
+                "数据集序号": item_index + 1,
+                "id": item.get("id") or f"q{item_index}",
+                "query": item.get("query") or item.get("question") or "",
+                "产品序号": product_no or "",
+                "录屏项目相对路径": _project_relative_path(stream["runtime_video"]),
+                "原始video_path": stream["source_video"],
+            }
+            if not frames:
+                rows.append({
+                    **base,
+                    "帧序号": "",
+                    "帧项目相对路径": "",
+                    "时间点": "",
+                    "来源": "",
+                    "保留原因": "",
+                    "抽帧状态": "无抽帧结果",
+                })
+                continue
+            for frame_index, frame in enumerate(frames, start=1):
+                info = selected.get(frame_index) or {}
+                rows.append({
+                    **base,
+                    "帧序号": frame_index,
+                    "帧项目相对路径": _project_relative_path(frame),
+                    "时间点": info.get("time", ""),
+                    "来源": info.get("source", ""),
+                    "保留原因": info.get("keep_reason", ""),
+                    "抽帧状态": "已生成" if frame.is_file() else "文件缺失",
+                })
     return rows
 
 
@@ -853,68 +903,71 @@ def write_frames_zip(
             raw_id = str(item.get("id") or f"q{item_index + 1}")
             safe_id = _safe_name(raw_id).strip("_")[:100] or f"q{item_index + 1}"
             item_dir = f"{sequence}_{safe_id}"
-            frames = [Path(str(path)) for path in (item.get("frames") or [])]
-            selected, metadata = (
-                _frame_metadata(frames[0].parent) if frames else ({}, {})
-            )
-            source = _source_data_for_item(item)
-            source_video = source.get("video_path") or ""
-            if not frames:
-                manifest.append({
+            for stream in _item_visual_streams(item):
+                product_no = stream["product_no"]
+                frames = stream["frames"]
+                selected, metadata = (
+                    _frame_metadata(frames[0].parent) if frames else ({}, {})
+                )
+                stream_dir = (
+                    f"{item_dir}/product{product_no}"
+                    if product_no is not None
+                    else item_dir
+                )
+                base_manifest = {
                     "dataset_index": item_index + 1,
                     "id": raw_id,
                     "query": item.get("query") or item.get("question") or "",
-                    "source_video_path": source_video,
+                    "product_no": product_no,
+                    "source_video_path": stream["source_video"],
                     "video_project_path": _project_relative_path(
-                        item.get("video_path"),
+                        stream["runtime_video"],
                         project_root,
                     ),
-                    "frame_index": None,
-                    "frame_path": "",
-                    "source_frame_project_path": "",
-                    "timestamp": None,
-                    "keep_reason": "",
-                    "status": "missing",
-                })
-                continue
+                }
+                if not frames:
+                    manifest.append({
+                        **base_manifest,
+                        "frame_index": None,
+                        "frame_path": "",
+                        "source_frame_project_path": "",
+                        "timestamp": None,
+                        "keep_reason": "",
+                        "status": "missing",
+                    })
+                    continue
 
-            for frame_index, frame in enumerate(frames, start=1):
-                info = selected.get(frame_index) or {}
-                archive_frame = f"{item_dir}/{frame.name}"
-                exists = frame.is_file()
-                if exists:
-                    zf.write(frame, archive_frame)
-                manifest.append({
-                    "dataset_index": item_index + 1,
-                    "id": raw_id,
-                    "query": item.get("query") or item.get("question") or "",
-                    "source_video_path": source_video,
-                    "video_project_path": _project_relative_path(
-                        item.get("video_path"),
-                        project_root,
-                    ),
-                    "frame_index": frame_index,
-                    "frame_path": archive_frame if exists else "",
-                    "source_frame_project_path": _project_relative_path(
-                        frame,
-                        project_root,
-                    ),
-                    "timestamp": info.get("time"),
-                    "source": info.get("source", ""),
-                    "keep_reason": info.get("keep_reason", ""),
-                    "status": "ok" if exists else "missing",
-                })
+                for frame_index, frame in enumerate(frames, start=1):
+                    info = selected.get(frame_index) or {}
+                    archive_frame = f"{stream_dir}/{frame.name}"
+                    exists = frame.is_file()
+                    if exists:
+                        zf.write(frame, archive_frame)
+                    manifest.append({
+                        **base_manifest,
+                        "frame_index": frame_index,
+                        "frame_path": archive_frame if exists else "",
+                        "source_frame_project_path": _project_relative_path(
+                            frame,
+                            project_root,
+                        ),
+                        "timestamp": info.get("time"),
+                        "source": info.get("source", ""),
+                        "keep_reason": info.get("keep_reason", ""),
+                        "status": "ok" if exists else "missing",
+                    })
 
-            if metadata:
-                exported_metadata = dict(metadata)
-                exported_metadata["video"] = _project_relative_path(
-                    item.get("video_path"),
-                    project_root,
-                )
-                zf.writestr(
-                    f"{item_dir}/keyframes.json",
-                    json.dumps(exported_metadata, ensure_ascii=False, indent=2),
-                )
+                if metadata:
+                    exported_metadata = dict(metadata)
+                    exported_metadata["video"] = _project_relative_path(
+                        stream["runtime_video"],
+                        project_root,
+                    )
+                    exported_metadata["product_no"] = product_no
+                    zf.writestr(
+                        f"{stream_dir}/keyframes.json",
+                        json.dumps(exported_metadata, ensure_ascii=False, indent=2),
+                    )
 
         manifest_text = "".join(
             json.dumps(row, ensure_ascii=False) + "\n"

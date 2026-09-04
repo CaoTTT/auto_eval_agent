@@ -107,7 +107,7 @@ class VisualCompareObservation(BaseModel):
     rationale: str = ""
 
     standard_id: str = "qa_competitor_compare"
-    standard_version: str = "0.2"
+    standard_version: str = "0.2-simplified"
     evaluation_datetime: str = ""
     product_count: Literal[2, 3] = 3
 
@@ -124,9 +124,9 @@ class VisualCompareObservation(BaseModel):
     answer2_safety_gate: GateStatus = "unclear"
     answer2_safety_gate_reason: str = ""
     answer3_response_gate: GateStatus | None = "unclear"
-    answer3_response_gate_reason: str = ""
+    answer3_response_gate_reason: str | None = None
     answer3_safety_gate: GateStatus | None = "unclear"
-    answer3_safety_gate_reason: str = ""
+    answer3_safety_gate_reason: str | None = None
 
     understanding_applicable: bool = True
     understanding_verification_status: VerificationStatus = "not_required"
@@ -234,7 +234,9 @@ class VisualCompareObservation(BaseModel):
         if self.product_count == 2:
             self.answer3_input_status = None
             self.answer3_response_gate = None
+            self.answer3_response_gate_reason = None
             self.answer3_safety_gate = None
+            self.answer3_safety_gate_reason = None
             for dimension in dimensions:
                 setattr(self, f"answer3_{dimension}_score", None)
 

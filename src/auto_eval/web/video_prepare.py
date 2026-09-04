@@ -263,36 +263,12 @@ def prepare_session_visual_compare_item(
     probe_fn = probe_duration,
     extract_fn = extract_scene_keyframes,
 ) -> dict:
-    """按 Web 会话准备垂域视觉对比评测的双视频关键帧。
-
-    为两个视频分别抽帧，帧路径存入 frames1 / frames2。
-    """
-    # Video 1
-    raw_path1 = str(item.get("video1") or "").strip()
-    if not raw_path1:
-        raise ValueError("缺少 video1")
-    video_path1 = resolve_operation_video_path(raw_path1, base_dir=base_dir)
-    duration1 = float(probe_fn(video_path1))
-    if duration1 <= 0:
-        raise ValueError(f"无法读取视频1或视频时长为0：{raw_path1}")
-
-    # Video 2
-    raw_path2 = str(item.get("video2") or "").strip()
-    if not raw_path2:
-        raise ValueError("缺少 video2")
-    video_path2 = resolve_operation_video_path(raw_path2, base_dir=base_dir)
-    duration2 = float(probe_fn(video_path2))
-    if duration2 <= 0:
-        raise ValueError(f"无法读取视频2或视频时长为0：{raw_path2}")
-
-    # 使用与 rich_content 相同的抽帧参数；缓存键分别带上各自视频路径，
-    # 同目录换视频后各自独立失效重抽。
-    extract_kwargs, cache_key1 = _rich_content_timing(
-        item, duration1, profile, video_path=str(video_path1)
-    )
-    _, cache_key2 = _rich_content_timing(
-        item, duration1, profile, video_path=str(video_path2)
-    )
+    """按 Web 会话准备双/三产品视觉对比关键帧。"""
+    product_count = item.get("product_count")
+    if product_count is None:
+        product_count = 3 if str(item.get("video3") or "").strip() else 2
+    if product_count not in (2, 3):
+        raise ValueError("product_count 只能是 2 或 3")
 
     width = max(3, len(str(max(total_items, 1))))
     sequence = str(item_index + 1).zfill(width)
@@ -305,39 +281,52 @@ def prepare_session_visual_compare_item(
         runs_dir / "videos" / "imported" / safe_session / f"{sequence}_{item_name}"
     )
 
-    # 抽 video1 帧
-    frame_dir1 = base_frame_dir / "video1"
-    frames1 = _extract_frames(
-        video_path1, frame_dir1,
-        extract_fn=extract_fn,
-        cache_key=cache_key1,
-        extract_kwargs=extract_kwargs,
-    )
-    if not frames1:
-        raise ValueError(f"视频1抽帧失败：{raw_path1}")
-
-    # 抽 video2 帧
-    frame_dir2 = base_frame_dir / "video2"
-    frames2 = _extract_frames(
-        video_path2, frame_dir2,
-        extract_fn=extract_fn,
-        cache_key=cache_key2,
-        extract_kwargs=extract_kwargs,
-    )
-    if not frames2:
-        raise ValueError(f"视频2抽帧失败：{raw_path2}")
-
     prepared = dict(item)
+    prepared["product_count"] = product_count
+    media: list[str] = []
+    total_frame_count = 0
+    first_video_name = ""
+    first_duration = 0.0
+
+    for product_no in range(1, product_count + 1):
+        raw_path = str(item.get(f"video{product_no}") or "").strip()
+        if not raw_path:
+            raise ValueError(f"缺少 video{product_no}")
+        video_path = resolve_operation_video_path(raw_path, base_dir=base_dir)
+        duration = float(probe_fn(video_path))
+        if duration <= 0:
+            raise ValueError(
+                f"无法读取视频{product_no}或视频时长为0：{raw_path}"
+            )
+        extract_kwargs, cache_key = _rich_content_timing(
+            item,
+            duration,
+            profile,
+            video_path=str(video_path),
+        )
+        frame_dir = base_frame_dir / f"video{product_no}"
+        frames = _extract_frames(
+            video_path,
+            frame_dir,
+            extract_fn=extract_fn,
+            cache_key=cache_key,
+            extract_kwargs=extract_kwargs,
+        )
+        if not frames:
+            raise ValueError(f"视频{product_no}抽帧失败：{raw_path}")
+
+        media.append(str(video_path))
+        total_frame_count += len(frames)
+        first_video_name = first_video_name or video_path.name
+        first_duration = first_duration or duration
+        prepared[f"video{product_no}_path"] = str(video_path)
+        prepared[f"frames{product_no}"] = [str(frame) for frame in frames]
+        prepared[f"duration{product_no}"] = round(duration, 2)
+
     prepared.update({
-        "video1_path": str(video_path1),
-        "video2_path": str(video_path2),
-        "video_name": video_path1.name,
-        "media": [str(video_path1), str(video_path2)],
-        "frames1": [str(frame) for frame in frames1],
-        "frames2": [str(frame) for frame in frames2],
-        "frame_count": len(frames1) + len(frames2),
-        "duration": round(duration1, 2),
-        "duration1": round(duration1, 2),
-        "duration2": round(duration2, 2),
+        "video_name": first_video_name,
+        "media": media,
+        "frame_count": total_frame_count,
+        "duration": round(first_duration, 2),
     })
     return prepared
