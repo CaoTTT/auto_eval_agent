@@ -49,7 +49,7 @@ def _observation(**overrides) -> VisualCompareObservation:
 def test_three_product_scores_generate_dimension_rank_groups():
     result = visual_compare_result_fields(_observation())
 
-    assert result["standard_version"] == "0.2"
+    assert result["standard_version"] == "0.2-simplified"
     assert result["understanding_rank_groups"] == [
         ["product1", "product3"],
         ["product2"],
@@ -113,7 +113,7 @@ def test_export_contains_third_product_and_v02_fields():
     })
     row = _visual_compare_export_rows([result])[0]
 
-    assert row["标准版本"] == "0.2"
+    assert row["标准版本"] == "0.2-simplified"
     assert row["产品数量"] == 3
     assert row["产品3回答"] == "回答3"
     assert row["产品3理解需求分"] == 5

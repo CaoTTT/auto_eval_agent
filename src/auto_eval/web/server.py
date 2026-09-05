@@ -41,6 +41,7 @@ from .video_prepare import (
     resolve_operation_video_path,
 )
 from .runner import run_eval, run_update_batch, spawn_background
+from .scheduler import EvalScheduler
 from .tasks import (
     TASKS,
     get_task,
@@ -60,11 +61,18 @@ load_dotenv(BASE_DIR / ".env", override=True)  # 注入 .env 的 key；以 .env 
 
 app = FastAPI(title="auto_eval 评估台")
 _state: dict = {}
+EVAL_SCHEDULER = EvalScheduler()
 
 
 @app.on_event("startup")
-def _load():
+async def _load():
     _state["cfg"] = load_config(CONFIG_DIR)
+    EVAL_SCHEDULER.start()
+
+
+@app.on_event("shutdown")
+async def _shutdown():
+    await EVAL_SCHEDULER.stop()
 
 
 def cfg():
@@ -217,16 +225,31 @@ async def api_eval(req: EvalReq):
         req.options,
         dataset_name=req.dataset_name.strip(),
     )
-    task.active_runs += 1  # R1：提交时同步 pin（spawn 之前，无 await 间隙），消除启动延迟窗口内被 DELETE/LRU 淘汰的竞态
+    queue_position = EVAL_SCHEDULER.enqueue(task, app_cfg, run_eval)
+    return {
+        "task_id": task.id,
+        "status": "queued",
+        "queue_position": queue_position,
+    }
 
-    async def _start_later():
-        # 先把 task_id 响应给前端，再启动可能较重的评估任务；
-        # 避免后台裁判/工具调用抢占事件循环，导致 /api/eval 本身迟迟不返回。
-        await asyncio.sleep(0.05)
-        await run_eval(task, app_cfg)
 
-    spawn_background(_start_later())
-    return {"task_id": task.id}
+@app.get("/api/queue")
+async def api_queue():
+    """查看当前全量批跑任务及 FIFO 等待队列。"""
+    return EVAL_SCHEDULER.snapshot()
+
+
+@app.delete("/api/queue/{task_id}")
+async def api_queue_cancel(task_id: str):
+    """取消仍在等待队列中的全量评测任务。"""
+    task_id = _validate_param_id(task_id, "task_id")
+    task = EVAL_SCHEDULER.cancel(task_id)
+    if task is not None:
+        return {"task_id": task.id, "status": "cancelled"}
+    running = EVAL_SCHEDULER.snapshot().get("running")
+    if running and running.get("task_id") == task_id:
+        raise HTTPException(409, "任务已经开始运行，不能按排队任务取消")
+    raise HTTPException(404, "排队任务不存在")
 
 
 @app.post("/api/eval/items")
@@ -412,11 +435,14 @@ async def api_stream(task_id: str):
             if task.status == "error" and task.active_runs <= 0:
                 yield _sse("error", {"message": task.error})
                 return
+            if task.status == "cancelled" and task.active_runs <= 0:
+                yield _sse("cancelled", {"message": "排队任务已取消"})
+                return
             # 实时跟进
             while True:
                 msg = await q.get()
                 yield _sse(msg["event"], msg["data"])
-                if msg["event"] in ("done", "error"):
+                if msg["event"] in ("done", "error", "cancelled"):
                     break
         finally:
             task.unsubscribe(q)
@@ -425,8 +451,19 @@ async def api_stream(task_id: str):
 
 
 @app.get("/api/history")
-def api_history(limit: int = 50):
-    return {"items": list_snapshots(limit=limit)}
+async def api_history(limit: int = 50):
+    rows = await asyncio.to_thread(list_snapshots, limit=limit)
+    # 磁盘历史会把 pending/running/queued 视为上次服务中断；当前进程中的活
+    # 对象需覆盖回来，避免历史列表把正在排队或运行的任务误显示为 error。
+    for row in rows:
+        task = TASKS.get(row.get("task_id"))
+        if task is None or task.active_runs <= 0:
+            continue
+        row["status"] = task.status
+        row["error"] = task.error
+        row["done"] = task.done_total
+        row["total"] = len(task.items)
+    return {"items": rows}
 
 
 @app.get("/api/history/{task_id}")

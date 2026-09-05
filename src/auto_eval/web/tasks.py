@@ -23,7 +23,7 @@ class Task:
     session_name: str = ""
     dataset_name: str = ""
     note: str = ""
-    status: str = "pending"  # pending | running | done | error
+    status: str = "pending"  # pending | queued | running | done | error | cancelled
     results: list[dict] = field(default_factory=list)
     item_progress: dict[str, dict] = field(default_factory=dict)
     progress_events: dict[str, list[dict]] = field(default_factory=dict)
@@ -87,7 +87,7 @@ def _enforce_capacity() -> None:
     """LRU 容量兜底：从最旧开始淘汰空闲终态任务；全是运行中则不强制。"""
     while len(TASKS) > TASKS_CAPACITY:
         for tid, t in TASKS.items():
-            if t.active_runs <= 0 and t.status in {"done", "error"}:
+            if t.active_runs <= 0 and t.status in {"done", "error", "cancelled"}:
                 TASKS.pop(tid, None)
                 break
         else:
@@ -166,7 +166,7 @@ def _task_from_snapshot(snapshot: dict, task_id: str) -> Task:
     """从磁盘快照构建 Task 对象（含 pending/running→error 的中断修正）。"""
     status = snapshot.get("status") or "done"
     error = snapshot.get("error")
-    if status in {"pending", "running"}:
+    if status in {"pending", "queued", "running"}:
         status = "error"
         error = error or "服务中断，已保留中断前完成的评估结果"
     return Task(
@@ -267,7 +267,7 @@ def retire_task(task: Task) -> None:
 
     身份校验防止误删同 id 的新对象（删除历史后重建等场景）。
     """
-    if task.active_runs > 0 or task.status not in {"done", "error"}:
+    if task.active_runs > 0 or task.status not in {"done", "error", "cancelled"}:
         return
     if TASKS.get(task.id) is task:
         TASKS.pop(task.id, None)

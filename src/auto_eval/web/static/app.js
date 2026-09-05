@@ -24,6 +24,7 @@ createApp({
     const visibleJudges = computed(() => judges.value);
     const concurrency = ref(4);
     const evalTimeout = ref(300);
+    const submitting = ref(false);
     const running = ref(false);
     const progress = ref(0);
     const total = ref(0);
@@ -46,12 +47,27 @@ createApp({
     const historyNoteDrafts = ref({});
     const historyNoteEditing = ref({});
     const loadingHistory = ref(false);
+    const queueState = ref({ running: null, queued: [] });
+    const selectedTaskStatus = ref("");
+    const queueNotice = ref("");
     const clockNow = ref(Date.now());
     let tooltipHideTimer = null;
     let progressClockTimer = null;
+    let queueRefreshTimer = null;
+    let activeEventSource = null;
     const pageSize = 10;
     const opPageSize = 10;
     const progressStages = ["排队", "分类", "模型/裁判", "聚合", "完成"];
+    const queueEntries = computed(() => {
+      const entries = [];
+      if (queueState.value.running) entries.push(queueState.value.running);
+      entries.push(...(queueState.value.queued || []));
+      return entries;
+    });
+
+    function taskStatusLabel(status) {
+      return ({ queued: "排队中", running: "运行中", done: "已完成", error: "失败", cancelled: "已取消" })[status] || status;
+    }
 
     const formatHint = computed(
       () =>
@@ -603,13 +619,14 @@ createApp({
     );
 
     async function submit() {
+      if (submitting.value) return;
       runError.value = "";
       const valid = opItems.value.filter(opItemReady);
       if (!valid.length) {
         alert("请为每题填写 query，并提供视频路径或上传视频后再评估。");
         return;
       }
-      items.value = valid.map((it, idx) => {
+      const submittedItems = valid.map((it, idx) => {
         const prefix = mode.value === "compare" ? "cmp" : "rich";
         const item = {
           id: it.id || `${prefix}${idx + 1}`,
@@ -648,32 +665,9 @@ createApp({
         if (it.turnIndex != null) item.turn_index = it.turnIndex;
         return item;
       });
-      errors.value = [];
-      results.value = [];
-      summary.value = null;
-      progressEvents.value = {};
-      activeSkill.value = "";
-      resultQuery.value = "";
-      resultPage.value = 1;
-      progress.value = 0;
-      total.value = items.value.length;
-      itemProgress.value = Object.fromEntries(
-        items.value.map((item, index) => [
-          index,
-          {
-            item_index: index,
-            item_id: item.id || `q${index}`,
-            status: "pending",
-            percent: 0,
-            message: "排队中",
-            stage_rank: 0,
-          },
-        ])
-      );
-      running.value = true;
       const body = {
         mode: mode.value,
-        items: items.value,
+        items: submittedItems,
         dataset_name: datasetName.value || "手动录入",
         options: {
           judges: selectedJudges.value,
@@ -682,6 +676,7 @@ createApp({
         },
       };
       let r;
+      submitting.value = true;
       try {
         r = await fetch("/api/eval", {
           method: "POST",
@@ -689,21 +684,50 @@ createApp({
           body: JSON.stringify(body),
         });
       } catch (error) {
-        running.value = false;
-        itemProgress.value = {};
+        submitting.value = false;
         runError.value = "无法启动评估：" + (error?.message || "网络错误");
         return;
       }
       const d = await r.json().catch(() => ({}));
+      submitting.value = false;
       if (!r.ok || !d.task_id) {
-        running.value = false;
-        itemProgress.value = {};
         const detail = typeof d.detail === "string" ? d.detail : "服务端拒绝了评估请求";
         runError.value = "无法启动评估：" + detail;
         return;
       }
+      closeActiveStream();
+      items.value = submittedItems;
+      errors.value = [];
+      results.value = [];
+      summary.value = null;
+      progressEvents.value = {};
+      activeSkill.value = "";
+      resultQuery.value = "";
+      resultPage.value = 1;
+      progress.value = 0;
+      total.value = submittedItems.length;
+      itemProgress.value = Object.fromEntries(
+        submittedItems.map((item, index) => [
+          index,
+          {
+            item_index: index,
+            item_id: item.id || `q${index}`,
+            status: "pending",
+            percent: 0,
+            message: "等待前序任务完成",
+            stage_rank: 0,
+          },
+        ])
+      );
+      running.value = true;
       taskId.value = d.task_id;
-      connectSSE();
+      selectedTaskStatus.value = d.status || "queued";
+      queueNotice.value = d.queue_position > 1
+        ? `已加入队列，当前排在第 ${d.queue_position} 位。`
+        : "任务已提交，等待调度器启动。";
+      connectSSE(taskId.value);
+      loadQueue();
+      loadHistory();
     }
 
     async function reconcileTaskAfterError(message) {
@@ -748,16 +772,34 @@ createApp({
       if (snapshot?.summary) summary.value = snapshot.summary;
     }
 
-    function connectSSE() {
-      const es = new EventSource(`/api/eval/${taskId.value}/stream`);
+    function closeActiveStream() {
+      if (activeEventSource) activeEventSource.close();
+      activeEventSource = null;
+    }
+
+    function connectSSE(streamTaskId = taskId.value) {
+      closeActiveStream();
+      const es = new EventSource(`/api/eval/${streamTaskId}/stream`);
+      activeEventSource = es;
+      const isSelected = () => taskId.value === streamTaskId;
+      es.addEventListener("start", () => {
+        if (!isSelected()) return;
+        selectedTaskStatus.value = "running";
+        queueNotice.value = "";
+        running.value = true;
+        loadQueue();
+      });
       es.addEventListener("item_progress", (e) => {
+        if (!isSelected()) return;
         const d = JSON.parse(e.data);
         mergeItemProgress(d);
       });
       es.addEventListener("progress_event", (e) => {
+        if (!isSelected()) return;
         appendProgressEvent(JSON.parse(e.data));
       });
       es.addEventListener("result", (e) => {
+        if (!isSelected()) return;
         const d = JSON.parse(e.data);
         const result = d.result;
         const index = result && result.index;
@@ -787,25 +829,50 @@ createApp({
         }
       });
       es.addEventListener("done", (e) => {
+        if (!isSelected()) return;
         summary.value = JSON.parse(e.data).summary;
         if (mode.value !== "compare" && skillTabs.value.length) activeSkill.value = skillTabs.value[0].key;
         resultPage.value = 1;
         running.value = false;
+        selectedTaskStatus.value = "done";
+        queueNotice.value = "";
         es.close();
+        if (activeEventSource === es) activeEventSource = null;
+        loadQueue();
         loadHistory();
       });
       es.addEventListener("error", async (e) => {
         // 原生 EventSource 网络错误没有 data，让浏览器按协议自动重连并回放状态。
         if (!e.data) return;
+        if (!isSelected()) return;
         let message = "未知错误";
         try {
           const d = JSON.parse(e.data);
           message = d.message || message;
         } catch (_) {}
         running.value = false;
+        selectedTaskStatus.value = "error";
+        queueNotice.value = "";
         es.close();
+        if (activeEventSource === es) activeEventSource = null;
         await reconcileTaskAfterError(message);
         runError.value = "评估出错：" + message;
+        loadQueue();
+        loadHistory();
+      });
+      es.addEventListener("cancelled", (e) => {
+        if (!isSelected()) return;
+        let message = "排队任务已取消";
+        try {
+          message = JSON.parse(e.data).message || message;
+        } catch (_) {}
+        running.value = false;
+        selectedTaskStatus.value = "cancelled";
+        queueNotice.value = message;
+        es.close();
+        if (activeEventSource === es) activeEventSource = null;
+        loadQueue();
+        loadHistory();
       });
     }
 
@@ -928,6 +995,40 @@ createApp({
       }
     }
 
+    async function loadQueue() {
+      try {
+        const response = await fetch("/api/queue");
+        if (!response.ok) return;
+        const data = await response.json();
+        queueState.value = {
+          running: data.running || null,
+          queued: data.queued || [],
+        };
+      } catch (_) {}
+    }
+
+    async function cancelQueuedTask(entry) {
+      if (!entry || entry.status !== "queued") return;
+      if (!confirm(`确认取消排队任务“${entry.dataset_name || entry.task_id}”？`)) return;
+      const response = await fetch(`/api/queue/${encodeURIComponent(entry.task_id)}`, {
+        method: "DELETE",
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        alert("取消失败：" + (data.detail || "任务状态已变化"));
+        await loadQueue();
+        return;
+      }
+      if (taskId.value === entry.task_id) {
+        running.value = false;
+        selectedTaskStatus.value = "cancelled";
+        queueNotice.value = "排队任务已取消";
+        closeActiveStream();
+      }
+      await loadQueue();
+      await loadHistory();
+    }
+
     function editHistoryNote(item) {
       historyNoteDrafts.value[item.task_id] = item.note || "";
       historyNoteEditing.value[item.task_id] = true;
@@ -985,6 +1086,7 @@ createApp({
         alert("该历史记录使用已下线的评测模式，无法加载。");
         return;
       }
+      closeActiveStream();
       taskId.value = d.task_id || id;
       mode.value = d.mode;
       datasetName.value = d.dataset_name || "";
@@ -995,12 +1097,15 @@ createApp({
       summary.value = d.summary || null;
       total.value = items.value.length || results.value.length;
       progress.value = results.value.length;
-      running.value = false;
+      selectedTaskStatus.value = d.status || "";
+      running.value = ["pending", "queued", "running"].includes(selectedTaskStatus.value);
+      queueNotice.value = selectedTaskStatus.value === "queued" ? "该任务正在等待前序任务完成。" : "";
       activeSkill.value = "";
       resultQuery.value = "";
       resultPage.value = 1;
       progressPage.value = 1;
       if (mode.value !== "compare" && skillTabs.value.length) activeSkill.value = skillTabs.value[0].key;
+      if (running.value) connectSSE(taskId.value);
       nextTick(() => resultBrowser.value && resultBrowser.value.scrollIntoView({ behavior: "smooth", block: "start" }));
     }
 
@@ -1031,15 +1136,20 @@ createApp({
       judges.value = d.judges || [];
       selectedJudges.value = defaultJudgeSelection();
       loadHistory();
+      loadQueue();
+      queueRefreshTimer = window.setInterval(loadQueue, 2000);
     });
 
     onUnmounted(() => {
       if (progressClockTimer != null) window.clearInterval(progressClockTimer);
+      if (queueRefreshTimer != null) window.clearInterval(queueRefreshTimer);
+      closeActiveStream();
     });
 
     return {
       modes, mode, modeLabel, isVideoMode, items, errors, judges, visibleJudges, selectedJudges, datasetName,
-      concurrency, evalTimeout, running, progress, total, results, summary, taskId, runError,
+      concurrency, evalTimeout, submitting, running, progress, total, results, summary, taskId, runError,
+      queueState, queueEntries, selectedTaskStatus, queueNotice, taskStatusLabel,
       itemProgress, progressEvents, progressRows, pagedProgressRows, progressStages,
       historyItems, historyNoteDrafts, historyNoteEditing, loadingHistory, pageSize,
       opPage, opPageSize, opPageCount, opJumpPage,
@@ -1050,7 +1160,7 @@ createApp({
       skillTabs, filteredResults, pagedResults, pageCount, resultTableWidth,
       formatHint, resultCols, opItems, pagedOpItems, opPreparing, canSubmit,
       switchMode, onOpManifestFile, submit, cell, columnWidth, exportCsv, exportJson, exportXlsx, exportFrames, itemArtifactUrl, addOpItem, removeOpItem, onOpVideo, onOpDrop,
-      loadHistory, loadHistoryTask, delHistory, editHistoryNote, cancelHistoryNote, saveHistoryNote, formatTime,
+      loadHistory, loadQueue, cancelQueuedTask, loadHistoryTask, delHistory, editHistoryNote, cancelHistoryNote, saveHistoryNote, formatTime,
       selectSkill, resetResultPage, changePage,
       changeProgressPage, changeOpPage, changeResultPageSize, paginationPages, setTablePage, jumpTablePage,
       progressStageClass, progressDisplay, progressStageLabel, progressStatusClass,

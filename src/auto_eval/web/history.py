@@ -189,8 +189,8 @@ def _meta_path(path: Path) -> Path:
 
 
 def _apply_interrupted_status(status, error):
-    """盘上停在 pending/running 只可能是服务中断，列表统一改写为 error。"""
-    if status in {"pending", "running"}:
+    """盘上停在 pending/queued/running 只可能是服务中断，统一改写为 error。"""
+    if status in {"pending", "queued", "running"}:
         return "error", error or "服务中断，已保留中断前完成的评估结果"
     return status, error
 

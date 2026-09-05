@@ -40,6 +40,13 @@ button.btn-danger:hover:not(:disabled) { background: #fef2f2; }
 .ok { color: #059669; font-size: 13px; }
 .err { color: #dc2626; font-size: 13px; }
 .running { color: #2563eb; font-size: 14px; margin-left: 8px; }
+.queue-notice { color: #475569; font-size: 13px; margin-left: 8px; }
+.queue-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.queue-heading h2 { margin: 0; }
+.queue-table th, .queue-table td { white-space: nowrap; }
+.queue-status { display: inline-flex; padding: 3px 9px; border-radius: 999px; font-size: 12px; }
+.status-queued { color: #92400e; background: #fef3c7; }
+.status-cancelled { color: #6b7280; background: #f3f4f6; }
 .run-error {
   margin: 10px 0 0; padding: 8px 10px; border: 1px solid #fecaca;
   border-radius: 7px; color: #b91c1c; background: #fef2f2; font-size: 13px;
