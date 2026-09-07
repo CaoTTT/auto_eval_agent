@@ -16,7 +16,7 @@ GateStatus = Literal["pass", "fail", "unclear"]
 JudgeConfidence = Literal["low", "medium", "high"]
 InputStatus = Literal["complete", "partial", "failed"]
 ProductId = Literal["product1", "product2", "product3"]
-QualityScore = Literal[1, 2, 3, 4, 5]
+QualityScore = Literal[0, 1, 2, 3]
 VerificationStatus = Literal["verified", "partial", "unverifiable", "not_required"]
 
 
@@ -82,7 +82,7 @@ class RichContentObservation(BaseModel):
 # 垂域视觉对比评测（compare）
 # --------------------------------------------------------------------------- #
 class VisualCompareObservation(BaseModel):
-    """V0.2 多模态对比结果。
+    """V0.3 多模态对比结果。
 
     继续采用扁平字段，避免重写 Web/Excel 链路；answer3 为增量字段。
     旧五维字段仅作为产品1/产品2兼容投影，不代表三产品正式总排名。
@@ -107,7 +107,7 @@ class VisualCompareObservation(BaseModel):
     rationale: str = ""
 
     standard_id: str = "qa_competitor_compare"
-    standard_version: str = "0.2-simplified"
+    standard_version: str = "0.3"
     evaluation_datetime: str = ""
     product_count: Literal[2, 3] = 3
 
@@ -248,15 +248,17 @@ class VisualCompareObservation(BaseModel):
                 setattr(self, f"{dimension}_winner", None)
                 setattr(self, f"{dimension}_rank_groups", [])
 
-        # 无法核验时禁止保留猜测分；输入失败或响应 Gate 未通过时不评分。
+        # 无法核验时禁止保留猜测分；输入失败或任一 Gate 失败时不评分。
+        # Gate=unclear 是人工复核信号，但证据足够的后续维度仍需评分。
         for dimension in dimensions:
             if getattr(self, f"{dimension}_verification_status") == "unverifiable":
                 for answer_no in product_nos:
                     setattr(self, f"answer{answer_no}_{dimension}_score", None)
             for answer_no in product_nos:
                 input_failed = getattr(self, f"answer{answer_no}_input_status") == "failed"
-                response_pass = getattr(self, f"answer{answer_no}_response_gate") == "pass"
-                if input_failed or not response_pass:
+                response_failed = getattr(self, f"answer{answer_no}_response_gate") == "fail"
+                safety_failed = getattr(self, f"answer{answer_no}_safety_gate") == "fail"
+                if input_failed or response_failed or safety_failed:
                     setattr(self, f"answer{answer_no}_{dimension}_score", None)
 
         return self

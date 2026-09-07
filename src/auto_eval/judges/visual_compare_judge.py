@@ -1,4 +1,4 @@
-"""V0.2 垂域视觉对比裁判：兼容双产品，增量支持三产品。"""
+"""V0.3 垂域视觉对比裁判：兼容双产品，增量支持三产品。"""
 from __future__ import annotations
 
 import time
@@ -17,7 +17,7 @@ from .visual_compare_prompt_v02 import VISUAL_COMPARE_SYSTEM, VISUAL_COMPARE_USE
 
 
 STANDARD_ID = "qa_competitor_compare"
-STANDARD_VERSION = "0.2-simplified"
+STANDARD_VERSION = "0.3"
 DIMENSIONS = (
     "understanding",
     "accuracy",
@@ -82,8 +82,9 @@ def _normalize_observation_state(observation: VisualCompareObservation) -> None:
                 setattr(observation, f"answer{answer_no}_{dimension}_score", None)
                 continue
             input_failed = getattr(observation, f"answer{answer_no}_input_status") == "failed"
-            response_pass = getattr(observation, f"answer{answer_no}_response_gate") == "pass"
-            if not applicable or unverifiable or input_failed or not response_pass:
+            response_failed = getattr(observation, f"answer{answer_no}_response_gate") == "fail"
+            safety_failed = getattr(observation, f"answer{answer_no}_safety_gate") == "fail"
+            if not applicable or unverifiable or input_failed or response_failed or safety_failed:
                 setattr(observation, f"answer{answer_no}_{dimension}_score", None)
 
 
@@ -98,7 +99,10 @@ def _score_is_required(
         return False
     if getattr(observation, f"answer{answer_no}_input_status") == "failed":
         return False
-    return getattr(observation, f"answer{answer_no}_response_gate") == "pass"
+    return (
+        getattr(observation, f"answer{answer_no}_response_gate") != "fail"
+        and getattr(observation, f"answer{answer_no}_safety_gate") != "fail"
+    )
 
 
 def _finalize_observation(observation: VisualCompareObservation) -> None:
@@ -118,7 +122,7 @@ def _finalize_observation(observation: VisualCompareObservation) -> None:
             ) if getattr(observation, f"{dimension}_applicable") else None,
         )
 
-    # V0.2 尚无正式权重；禁止擅自计算总分和整体第一名。
+    # V0.3 尚无正式权重；禁止擅自计算总分和整体第一名。
     observation.answer1_total_score = None
     observation.answer2_total_score = None
     observation.answer3_total_score = None
@@ -137,7 +141,7 @@ def _finalize_observation(observation: VisualCompareObservation) -> None:
         observation.answer2_safety_gate_reason,
     ]))
     observation.content_quality = None
-    observation.content_quality_reason = "V0.2未定义正式维度权重，不生成综合内容质量胜方"
+    observation.content_quality_reason = "V0.3未定义正式维度权重，不生成综合内容质量胜方"
     observation.need_closure = observation.service_closure_winner
     observation.need_closure_reason = observation.service_closure_reason
     observation.personalization = observation.scenario_fulfillment_winner
