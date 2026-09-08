@@ -60,6 +60,8 @@ async def test_scheduler_runs_tasks_fifo_without_overlap(monkeypatch):
     assert snapshot["running"]["concurrency"] == 15
     assert snapshot["queued"] == [
         {
+            "job_id": "b",
+            "kind": "initial",
             "task_id": "b",
             "dataset_name": "dataset-b",
             "mode": "rich_content",
@@ -174,4 +176,75 @@ def test_frontend_allows_submit_while_another_task_is_active():
     assert 'fetch("/api/queue")' in js
     assert "activeEventSource" in js
     assert "cancelQueuedTask" in js
+    assert "reprioritizeQueuedTask" in js
+    assert "move_to_front" in html
     assert "取消排队" in html
+    assert "置顶" in html
+
+
+@pytest.mark.asyncio
+async def test_scheduler_can_promote_only_waiting_jobs(monkeypatch):
+    monkeypatch.setattr(scheduler_module, "save_task", lambda task: True)
+    monkeypatch.setattr(scheduler_module, "retire_task", lambda task: None)
+    scheduler = EvalScheduler()
+    release = asyncio.Event()
+    started = asyncio.Event()
+
+    async def runner(task, _cfg):
+        task.status = "running"
+        started.set()
+        try:
+            await release.wait()
+            task.status = "done"
+        finally:
+            task.active_runs -= 1
+
+    tasks = [_task(name, 1) for name in ("a", "b", "c", "d")]
+    for task in tasks:
+        scheduler.enqueue(task, object(), runner)
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    assert scheduler.reprioritize("a", "move_to_front") is None
+    assert scheduler.reprioritize("d", "move_up") == 2
+    assert [row["job_id"] for row in scheduler.snapshot()["queued"]] == ["b", "d", "c"]
+    assert scheduler.reprioritize("d", "move_to_front") == 1
+    assert [row["job_id"] for row in scheduler.snapshot()["queued"]] == ["d", "b", "c"]
+
+    for name in ("d", "b", "c"):
+        assert scheduler.cancel(name) is not None
+    release.set()
+    await scheduler.stop()
+
+
+@pytest.mark.asyncio
+async def test_retry_job_uses_same_queue_without_reopening_parent(monkeypatch):
+    monkeypatch.setattr(scheduler_module, "save_task", lambda task: True)
+    monkeypatch.setattr(scheduler_module, "retire_task", lambda task: None)
+    scheduler = EvalScheduler()
+    parent = _task("parent", 2)
+    parent.status = "done"
+    parent.retry_runs["retry_1"] = {"retry_id": "retry_1", "status": "queued", "completed": 0}
+    release = asyncio.Event()
+    started = asyncio.Event()
+
+    async def retry_runner(task, _cfg):
+        started.set()
+        await release.wait()
+        task.retry_runs["retry_1"]["status"] = "completed"
+        task.active_runs -= 1
+
+    assert scheduler.enqueue_retry(
+        parent, object(), retry_runner, retry_id="retry_1", total=1
+    ) == 1
+    await asyncio.wait_for(started.wait(), timeout=1)
+    assert parent.status == "done"
+    snapshot = scheduler.snapshot()
+    assert snapshot["running"]["kind"] == "retry"
+    release.set()
+    for _ in range(20):
+        if scheduler.snapshot() == {"running": None, "queued": []}:
+            break
+        await asyncio.sleep(0)
+    assert parent.status == "done"
+    assert parent.retry_runs["retry_1"]["status"] == "completed"
+    await scheduler.stop()

@@ -108,6 +108,8 @@ def task_to_snapshot(task) -> dict:
         "updated_at": time.time(),
         "done_total": task.done_total,
         "error": task.error,
+        "repair_status": getattr(task, "repair_status", "idle"),
+        "retry_runs": getattr(task, "retry_runs", {}),
     }
 
 
@@ -204,6 +206,13 @@ def _snapshot_meta_row(data: dict, path: Path) -> dict:
         if path.stem != _safe_name(str(task_id))
         else make_session_name(float(created_at or 0), data.get("mode") or "unknown", str(task_id))
     )
+    latest_results: dict[int, dict] = {}
+    for position, result in enumerate(data.get("results") or []):
+        try:
+            index = int(result.get("index", position))
+        except (TypeError, ValueError):
+            continue
+        latest_results[index] = result
     return {
         "task_id": task_id,
         "session_name": session_name,
@@ -212,10 +221,11 @@ def _snapshot_meta_row(data: dict, path: Path) -> dict:
         "mode": data.get("mode"),
         "status": data.get("status"),
         "total": len(data.get("items") or []),
-        "done": len([r for r in (data.get("results") or []) if "error" not in r]),
+        "done": len([r for r in latest_results.values() if not r.get("error")]),
         "created_at": created_at,
         "updated_at": data.get("updated_at") or data.get("created_at"),
         "error": data.get("error"),
+        "repair_status": data.get("repair_status") or "idle",
         "preview": _preview(data),
         "meta_version": 1,
     }
@@ -263,6 +273,8 @@ def _load_meta_row(path: Path) -> dict | None:
     status, error = _apply_interrupted_status(row.get("status"), row.get("error"))
     row["status"] = status
     row["error"] = error
+    if row.get("repair_status") in {"queued", "running"}:
+        row["repair_status"] = "error"
     return row
 
 
@@ -303,6 +315,8 @@ def snapshot_payload(data: dict) -> dict:
         "created_at": data.get("created_at"),
         "updated_at": data.get("updated_at"),
         "error": data.get("error"),
+        "repair_status": data.get("repair_status") or "idle",
+        "retry_runs": data.get("retry_runs") or {},
     }
 
 

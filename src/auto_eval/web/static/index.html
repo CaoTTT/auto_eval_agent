@@ -36,10 +36,11 @@
     <p class="hint">任务之间按提交顺序串行；当前任务内部仍按各自并发数批跑。</p>
     <div class="table-scroll" v-if="queueEntries.length">
       <table class="grid queue-table">
-        <thead><tr><th>数据集</th><th>模式</th><th>状态</th><th>队列位置</th><th>内部并发</th><th>进度</th><th>操作</th></tr></thead>
+        <thead><tr><th>数据集</th><th>类型</th><th>模式</th><th>状态</th><th>队列位置</th><th>内部并发</th><th>进度</th><th>操作</th></tr></thead>
         <tbody>
-          <tr v-for="entry in queueEntries" :key="entry.task_id">
+          <tr v-for="entry in queueEntries" :key="entry.job_id || entry.task_id">
             <td>{{ entry.dataset_name || entry.task_id }}</td>
+            <td>{{ queueKindLabel(entry.kind) }}</td>
             <td>{{ modeLabel(entry.mode) }}</td>
             <td><span :class="['queue-status', 'status-' + entry.status]">{{ taskStatusLabel(entry.status) }}</span></td>
             <td>{{ entry.status === 'running' ? '—' : entry.queue_position }}</td>
@@ -47,6 +48,8 @@
             <td>{{ entry.done }}/{{ entry.total }}</td>
             <td>
               <button @click="loadHistoryTask(entry.task_id)">查看</button>
+              <button v-if="entry.status === 'queued' && entry.queue_position > 1" @click="reprioritizeQueuedTask(entry, 'move_up')">上移</button>
+              <button v-if="entry.status === 'queued' && entry.queue_position > 1" @click="reprioritizeQueuedTask(entry, 'move_to_front')">置顶</button>
               <button v-if="entry.status === 'queued'" @click="cancelQueuedTask(entry)" class="btn-danger">取消排队</button>
             </td>
           </tr>
@@ -67,7 +70,7 @@
             <td>{{ formatTime(h.updated_at || h.created_at) }}</td>
             <td>{{ h.dataset_name || '未记录' }}</td>
             <td>{{ modeLabel(h.mode) }}</td>
-            <td>{{ h.status }}</td>
+            <td>{{ h.status }}<small v-if="retryStatusLabel(h.repair_status)" class="running"> · {{ retryStatusLabel(h.repair_status) }}</small></td>
             <td class="history-progress-cell">{{ h.done }}/{{ h.total }}</td>
             <td>{{ h.preview }}</td>
             <td style="white-space:nowrap">
@@ -274,6 +277,13 @@
       <button @click="exportJson" :disabled="!taskId">导出 JSON</button>
       <button @click="exportXlsx" :disabled="!taskId">导出 XLSX（完整）</button>
       <button v-if="isVideoMode" @click="exportFrames" :disabled="!taskId">导出抽帧 ZIP</button>
+      <button v-if="summary && summary.failed" @click="retryFailedCases(null)" :disabled="retrySubmitting || ['queued','running'].includes(repairStatus)">
+        {{ retrySubmitting ? '提交中…' : '重跑全部失败项' }}
+      </button>
+      <button v-if="selectedRetryIndexes.length" @click="retryFailedCases(selectedRetryIndexes)" :disabled="retrySubmitting || ['queued','running'].includes(repairStatus)">
+        重跑所选（{{ selectedRetryIndexes.length }}）
+      </button>
+      <span v-if="retryStatusLabel(repairStatus)" class="running">{{ retryStatusLabel(repairStatus) }}</span>
     </h2>
     <div class="summary" v-if="summary">
       <span>样本量 {{ summary.total }}</span>
@@ -302,6 +312,7 @@
         <table class="grid results compact-results" :style="{ width: resultTableWidth + 'px' }">
           <colgroup>
             <col style="width:48px">
+            <col style="width:42px">
             <col v-for="c in resultCols" :key="'col-'+c.key" :style="{ width: columnWidth(c) + 'px' }">
             <col v-if="isVideoMode" style="width:100px">
             <col v-if="isVideoMode" style="width:100px">
@@ -309,7 +320,7 @@
           </colgroup>
           <thead>
             <tr>
-              <th>#</th>
+              <th>#</th><th>补跑</th>
               <th v-for="c in resultCols" :key="c.key">{{ c.label }}</th>
               <th v-if="isVideoMode">原视频（MP4）</th>
               <th v-if="isVideoMode">抽帧结果（ZIP）</th>
@@ -320,6 +331,9 @@
             <template v-for="(r,i) in pagedResults" :key="r.index ?? i">
               <tr :class="{'result-error':r.error}">
                 <td><div class="cell-clamp cell-center">{{ (resultPage-1)*resultPageSize+i+1 }}</div></td>
+                <td class="cell-center">
+                  <input v-if="r.error" type="checkbox" :checked="retryIndexSelected(r.index)" @change="toggleRetryIndex(r.index)" :disabled="['queued','running'].includes(repairStatus)">
+                </td>
                 <td
                   v-for="c in resultCols"
                   :key="c.key"

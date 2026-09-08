@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
 from pathlib import Path
 from typing import Literal
@@ -40,7 +41,7 @@ from .video_prepare import (
     VIDEO_EXTENSIONS,
     resolve_operation_video_path,
 )
-from .runner import run_eval, run_update_batch, spawn_background
+from .runner import run_eval, run_retry, run_update_batch, spawn_background
 from .scheduler import EvalScheduler
 from .tasks import (
     TASKS,
@@ -48,6 +49,7 @@ from .tasks import (
     get_task_async,
     merge_items_by_id,
     new_task,
+    latest_results_by_index,
     peek_task,
     peek_task_async,
 )
@@ -105,6 +107,19 @@ class EvalItemsReq(BaseModel):
 
 class HistoryNoteReq(BaseModel):
     note: str = ""
+
+
+class RetryReq(BaseModel):
+    """人工失败补跑；indexes 为空时选择当前全部技术失败/未完成项。"""
+
+    indexes: list[int] | None = None
+    include_unfinished: bool = True
+    options: dict = {}
+    idempotency_key: str = ""
+
+
+class QueuePositionReq(BaseModel):
+    action: Literal["move_up", "move_down", "move_to_front"]
 
 
 _VIDEO_EXTENSIONS = VIDEO_EXTENSIONS
@@ -247,9 +262,150 @@ async def api_queue_cancel(task_id: str):
     if task is not None:
         return {"task_id": task.id, "status": "cancelled"}
     running = EVAL_SCHEDULER.snapshot().get("running")
-    if running and running.get("task_id") == task_id:
+    if running and running.get("job_id") == task_id:
         raise HTTPException(409, "任务已经开始运行，不能按排队任务取消")
     raise HTTPException(404, "排队任务不存在")
+
+
+@app.patch("/api/queue/{job_id}/position")
+async def api_queue_position(job_id: str, req: QueuePositionReq):
+    """人工调整等待项位置；运行中的任务不被抢占。"""
+    job_id = _validate_param_id(job_id, "job_id")
+    position = EVAL_SCHEDULER.reprioritize(job_id, req.action)
+    if position is not None:
+        return {"job_id": job_id, "queue_position": position}
+    running = EVAL_SCHEDULER.snapshot().get("running")
+    if running and running.get("job_id") == job_id:
+        raise HTTPException(409, "运行中的任务不能调整优先级")
+    raise HTTPException(404, "等待任务不存在")
+
+
+@app.post("/api/eval/{task_id}/retries", status_code=202)
+async def api_retry_failed(task_id: str, req: RetryReq):
+    """手动创建失败补跑，并作为独立 job 加入全局 FIFO 队列。"""
+    task_id = _validate_param_id(task_id, "task_id")
+    task = await get_task_async(task_id)
+    if not task:
+        raise HTTPException(404, "task not found")
+    if task.status != "done":
+        raise HTTPException(409, "仅已完成任务可以发起失败补跑")
+    idem = req.idempotency_key.strip()
+    if idem:
+        for old in task.retry_runs.values():
+            if old.get("idempotency_key") == idem:
+                return {
+                    "task_id": task.id,
+                    "retry_id": old.get("retry_id"),
+                    "status": old.get("status"),
+                    "selected": len(old.get("indexes") or []),
+                    "queue_position": None,
+                    "idempotent_replay": True,
+                }
+    if task.active_runs > 0:
+        active = next(
+            (row for row in task.retry_runs.values() if row.get("status") in {"queued", "running"}),
+            None,
+        )
+        if active:
+            raise HTTPException(409, f"已有失败补跑进行中：{active.get('retry_id')}")
+        raise HTTPException(409, "任务仍有运行中的评测，暂不能补跑")
+
+    latest = latest_results_by_index(task)
+    requested = list(dict.fromkeys(req.indexes or range(len(task.items))))
+    accepted: set[int] = set()
+    reasons: dict[int, str] = {}
+    skipped: list[dict] = []
+    for index in requested:
+        if index < 0 or index >= len(task.items):
+            skipped.append({"index": index, "reason": "index_out_of_range"})
+            continue
+        result = latest.get(index)
+        if result is None and req.include_unfinished:
+            accepted.add(index)
+            reasons[index] = "unfinished"
+        elif result is not None and result.get("error"):
+            accepted.add(index)
+            reasons[index] = "failed"
+        else:
+            skipped.append({"index": index, "reason": "latest_result_is_success"})
+
+    # 会话中某轮失败会影响后续上下文；从最早目标轮起成组补跑。
+    groups: dict[str, list[int]] = {}
+    for index, item in enumerate(task.items):
+        if item.get("session_group"):
+            groups.setdefault(str(item["session_group"]), []).append(index)
+    for indexes in groups.values():
+        indexes.sort(key=lambda i: task.items[i].get("turn_index", 0))
+        selected_positions = [pos for pos, idx in enumerate(indexes) if idx in accepted]
+        if not selected_positions:
+            continue
+        first = min(selected_positions)
+        earlier_failed = [
+            pos for pos in range(first)
+            if latest.get(indexes[pos]) is None or (latest.get(indexes[pos]) or {}).get("error")
+        ]
+        if earlier_failed:
+            first = min(earlier_failed)
+        for idx in indexes[first:]:
+            if idx not in accepted:
+                accepted.add(idx)
+                reasons[idx] = "session_dependency"
+
+    if not accepted:
+        raise HTTPException(409, {"message": "没有可补跑的失败项", "skipped": skipped})
+
+    retry_id = f"retry_{uuid.uuid4().hex[:10]}"
+    accepted_indexes = sorted(accepted)
+    retry = {
+        "retry_id": retry_id,
+        "idempotency_key": idem,
+        "status": "queued",
+        "created_at": time.time(),
+        "indexes": accepted_indexes,
+        "reasons": {str(index): reasons[index] for index in accepted_indexes},
+        "options": req.options,
+        "total": len(accepted_indexes),
+        "completed": 0,
+        "succeeded": 0,
+        "failed": 0,
+        "skipped": 0,
+        "items": {
+            str(index): {"status": "queued", "reason": reasons[index]}
+            for index in accepted_indexes
+        },
+    }
+    task.retry_runs[retry_id] = retry
+
+    async def _retry_runner(parent, app_cfg):
+        await run_retry(parent, app_cfg, retry_id)
+
+    queue_position = EVAL_SCHEDULER.enqueue_retry(
+        task,
+        cfg(),
+        _retry_runner,
+        retry_id=retry_id,
+        total=len(accepted_indexes),
+    )
+    return {
+        "task_id": task.id,
+        "retry_id": retry_id,
+        "status": "queued",
+        "selected": len(accepted_indexes),
+        "accepted_indexes": accepted_indexes,
+        "skipped": skipped,
+        "queue_position": queue_position,
+    }
+
+
+@app.get("/api/eval/{task_id}/retries/{retry_id}")
+async def api_retry_status(task_id: str, retry_id: str):
+    task = await peek_task_async(_validate_param_id(task_id, "task_id"))
+    if not task:
+        raise HTTPException(404, "task not found")
+    retry = task.retry_runs.get(_validate_param_id(retry_id, "retry_id"))
+    if not retry:
+        raise HTTPException(404, "retry not found")
+    return retry
 
 
 @app.post("/api/eval/items")
@@ -267,6 +423,8 @@ async def api_eval_items(req: EvalItemsReq):
     app_cfg = cfg()
     task = get_task(task_id)
     created = task is None
+    if task is not None and task.repair_status in {"queued", "running"}:
+        raise HTTPException(409, "任务正在失败补跑，暂不能同时更新 items")
     mode = req.mode if created else task.mode
     if created:
         if req.mode is None:
@@ -430,7 +588,13 @@ async def api_stream(task_id: str):
             # status=done，仅看 status 会在批运行中立即下发伪 done；批结束时
             # 由 run_update_batch 补发终态事件驱动下方实时循环退出。
             if task.status == "done" and task.active_runs <= 0:
-                yield _sse("done", {"summary": task.summary, "total": len(task.items)})
+                payload = {"summary": task.summary, "total": len(task.items)}
+                if task.retry_runs and task.repair_status != "idle":
+                    payload["retry"] = max(
+                        task.retry_runs.values(),
+                        key=lambda row: float(row.get("created_at") or 0),
+                    )
+                yield _sse("done", payload)
                 return
             if task.status == "error" and task.active_runs <= 0:
                 yield _sse("error", {"message": task.error})
@@ -442,7 +606,7 @@ async def api_stream(task_id: str):
             while True:
                 msg = await q.get()
                 yield _sse(msg["event"], msg["data"])
-                if msg["event"] in ("done", "error", "cancelled"):
+                if msg["event"] in ("done", "error", "cancelled", "retry_cancelled"):
                     break
         finally:
             task.unsubscribe(q)
@@ -461,6 +625,7 @@ async def api_history(limit: int = 50):
             continue
         row["status"] = task.status
         row["error"] = task.error
+        row["repair_status"] = task.repair_status
         row["done"] = task.done_total
         row["total"] = len(task.items)
     return {"items": rows}

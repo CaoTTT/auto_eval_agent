@@ -50,6 +50,10 @@ createApp({
     const queueState = ref({ running: null, queued: [] });
     const selectedTaskStatus = ref("");
     const queueNotice = ref("");
+    const repairStatus = ref("idle");
+    const retrySubmitting = ref(false);
+    const selectedRetryIndexes = ref([]);
+    const activeRetry = ref(null);
     const clockNow = ref(Date.now());
     let tooltipHideTimer = null;
     let progressClockTimer = null;
@@ -64,9 +68,33 @@ createApp({
       entries.push(...(queueState.value.queued || []));
       return entries;
     });
+    const failedResultIndexes = computed(() =>
+      results.value
+        .filter((result) => result && result.error && Number.isInteger(Number(result.index)))
+        .map((result) => Number(result.index))
+    );
+
+    function retryStatusLabel(status) {
+      return ({ idle: "", queued: "补跑排队中", running: "补跑中", completed: "补跑完成", partial: "补跑后仍有失败", error: "补跑异常", cancelled: "补跑已取消" })[status] || status;
+    }
+
+    function retryIndexSelected(index) {
+      return selectedRetryIndexes.value.includes(Number(index));
+    }
+
+    function toggleRetryIndex(index) {
+      const value = Number(index);
+      selectedRetryIndexes.value = retryIndexSelected(value)
+        ? selectedRetryIndexes.value.filter((item) => item !== value)
+        : [...selectedRetryIndexes.value, value];
+    }
 
     function taskStatusLabel(status) {
       return ({ queued: "排队中", running: "运行中", done: "已完成", error: "失败", cancelled: "已取消" })[status] || status;
+    }
+
+    function queueKindLabel(kind) {
+      return kind === "retry" ? "失败补跑" : "全量评测";
     }
 
     const formatHint = computed(
@@ -721,6 +749,9 @@ createApp({
       );
       running.value = true;
       taskId.value = d.task_id;
+      repairStatus.value = "idle";
+      activeRetry.value = null;
+      selectedRetryIndexes.value = [];
       selectedTaskStatus.value = d.status || "queued";
       queueNotice.value = d.queue_position > 1
         ? `已加入队列，当前排在第 ${d.queue_position} 位。`
@@ -728,6 +759,49 @@ createApp({
       connectSSE(taskId.value);
       loadQueue();
       loadHistory();
+    }
+
+    async function retryFailedCases(indexes = null) {
+      if (!taskId.value || retrySubmitting.value) return;
+      const selected = indexes == null ? null : [...new Set(indexes.map(Number))];
+      if (selected && !selected.length) return;
+      retrySubmitting.value = true;
+      runError.value = "";
+      const idempotencyKey = globalThis.crypto?.randomUUID?.()
+        || `retry-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      let response;
+      try {
+        response = await fetch(`/api/eval/${encodeURIComponent(taskId.value)}/retries`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            indexes: selected,
+            include_unfinished: true,
+            idempotency_key: idempotencyKey,
+            options: {},
+          }),
+        });
+      } catch (error) {
+        retrySubmitting.value = false;
+        runError.value = "无法提交失败补跑：" + (error?.message || "网络错误");
+        return;
+      }
+      const data = await response.json().catch(() => ({}));
+      retrySubmitting.value = false;
+      if (!response.ok) {
+        const detail = typeof data.detail === "string"
+          ? data.detail
+          : (data.detail?.message || "服务端拒绝了补跑请求");
+        runError.value = "无法提交失败补跑：" + detail;
+        return;
+      }
+      selectedRetryIndexes.value = [];
+      activeRetry.value = data;
+      repairStatus.value = data.status || "queued";
+      queueNotice.value = `已提交 ${data.selected} 条失败补跑，当前排在第 ${data.queue_position} 位。`;
+      connectSSE(taskId.value);
+      await loadQueue();
+      await loadHistory();
     }
 
     async function reconcileTaskAfterError(message) {
@@ -798,6 +872,13 @@ createApp({
         if (!isSelected()) return;
         appendProgressEvent(JSON.parse(e.data));
       });
+      es.addEventListener("retry_start", (e) => {
+        if (!isSelected()) return;
+        activeRetry.value = JSON.parse(e.data);
+        repairStatus.value = "running";
+        queueNotice.value = "失败补跑正在执行。";
+        loadQueue();
+      });
       es.addEventListener("result", (e) => {
         if (!isSelected()) return;
         const d = JSON.parse(e.data);
@@ -828,14 +909,38 @@ createApp({
           };
         }
       });
+      es.addEventListener("retry_result", (e) => {
+        if (!isSelected()) return;
+        const data = JSON.parse(e.data);
+        const index = Number(data.index);
+        if (!Number.isInteger(index)) return;
+        const previous = itemProgress.value[index] || {};
+        const status = data.status === "succeeded" ? "done" : (data.status === "failed" ? "error" : previous.status);
+        itemProgress.value = {
+          ...itemProgress.value,
+          [index]: {
+            ...previous,
+            status,
+            percent: 100,
+            message: data.status === "succeeded" ? "补跑成功" : (data.status === "failed" ? "补跑仍失败" : "补跑已跳过"),
+            finished_at: Date.now(),
+          },
+        };
+      });
       es.addEventListener("done", (e) => {
         if (!isSelected()) return;
-        summary.value = JSON.parse(e.data).summary;
+        const doneData = JSON.parse(e.data);
+        summary.value = doneData.summary;
+        if (doneData.retry) {
+          activeRetry.value = doneData.retry;
+          repairStatus.value = doneData.retry.status || "completed";
+          queueNotice.value = `失败补跑完成：成功 ${doneData.retry.succeeded || 0}，仍失败 ${doneData.retry.failed || 0}，跳过 ${doneData.retry.skipped || 0}。`;
+        }
         if (mode.value !== "compare" && skillTabs.value.length) activeSkill.value = skillTabs.value[0].key;
         resultPage.value = 1;
         running.value = false;
         selectedTaskStatus.value = "done";
-        queueNotice.value = "";
+        if (!doneData.retry) queueNotice.value = "";
         es.close();
         if (activeEventSource === es) activeEventSource = null;
         loadQueue();
@@ -869,6 +974,15 @@ createApp({
         running.value = false;
         selectedTaskStatus.value = "cancelled";
         queueNotice.value = message;
+        es.close();
+        if (activeEventSource === es) activeEventSource = null;
+        loadQueue();
+        loadHistory();
+      });
+      es.addEventListener("retry_cancelled", () => {
+        if (!isSelected()) return;
+        repairStatus.value = "cancelled";
+        queueNotice.value = "失败补跑已取消";
         es.close();
         if (activeEventSource === es) activeEventSource = null;
         loadQueue();
@@ -1010,7 +1124,8 @@ createApp({
     async function cancelQueuedTask(entry) {
       if (!entry || entry.status !== "queued") return;
       if (!confirm(`确认取消排队任务“${entry.dataset_name || entry.task_id}”？`)) return;
-      const response = await fetch(`/api/queue/${encodeURIComponent(entry.task_id)}`, {
+      const jobId = entry.job_id || entry.task_id;
+      const response = await fetch(`/api/queue/${encodeURIComponent(jobId)}`, {
         method: "DELETE",
       });
       const data = await response.json().catch(() => ({}));
@@ -1019,7 +1134,7 @@ createApp({
         await loadQueue();
         return;
       }
-      if (taskId.value === entry.task_id) {
+      if (entry.kind !== "retry" && taskId.value === entry.task_id) {
         running.value = false;
         selectedTaskStatus.value = "cancelled";
         queueNotice.value = "排队任务已取消";
@@ -1027,6 +1142,21 @@ createApp({
       }
       await loadQueue();
       await loadHistory();
+    }
+
+    async function reprioritizeQueuedTask(entry, action) {
+      if (!entry || entry.status !== "queued") return;
+      const jobId = entry.job_id || entry.task_id;
+      const response = await fetch(`/api/queue/${encodeURIComponent(jobId)}/position`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        alert("调整优先级失败：" + (data.detail || "任务状态已变化"));
+      }
+      await loadQueue();
     }
 
     function editHistoryNote(item) {
@@ -1095,6 +1225,11 @@ createApp({
       itemProgress.value = d.item_progress || {};
       progressEvents.value = d.progress_events || {};
       summary.value = d.summary || null;
+      repairStatus.value = d.repair_status || "idle";
+      const retryRuns = Object.values(d.retry_runs || {});
+      activeRetry.value = retryRuns.sort(
+        (a, b) => Number(b.created_at || 0) - Number(a.created_at || 0)
+      )[0] || null;
       total.value = items.value.length || results.value.length;
       progress.value = results.value.length;
       selectedTaskStatus.value = d.status || "";
@@ -1105,7 +1240,7 @@ createApp({
       resultPage.value = 1;
       progressPage.value = 1;
       if (mode.value !== "compare" && skillTabs.value.length) activeSkill.value = skillTabs.value[0].key;
-      if (running.value) connectSSE(taskId.value);
+      if (running.value || ["queued", "running"].includes(repairStatus.value)) connectSSE(taskId.value);
       nextTick(() => resultBrowser.value && resultBrowser.value.scrollIntoView({ behavior: "smooth", block: "start" }));
     }
 
@@ -1149,7 +1284,9 @@ createApp({
     return {
       modes, mode, modeLabel, isVideoMode, items, errors, judges, visibleJudges, selectedJudges, datasetName,
       concurrency, evalTimeout, submitting, running, progress, total, results, summary, taskId, runError,
-      queueState, queueEntries, selectedTaskStatus, queueNotice, taskStatusLabel,
+      queueState, queueEntries, selectedTaskStatus, queueNotice, taskStatusLabel, queueKindLabel,
+      repairStatus, retryStatusLabel, retrySubmitting, selectedRetryIndexes, activeRetry,
+      failedResultIndexes, retryIndexSelected, toggleRetryIndex, retryFailedCases,
       itemProgress, progressEvents, progressRows, pagedProgressRows, progressStages,
       historyItems, historyNoteDrafts, historyNoteEditing, loadingHistory, pageSize,
       opPage, opPageSize, opPageCount, opJumpPage,
@@ -1160,7 +1297,7 @@ createApp({
       skillTabs, filteredResults, pagedResults, pageCount, resultTableWidth,
       formatHint, resultCols, opItems, pagedOpItems, opPreparing, canSubmit,
       switchMode, onOpManifestFile, submit, cell, columnWidth, exportCsv, exportJson, exportXlsx, exportFrames, itemArtifactUrl, addOpItem, removeOpItem, onOpVideo, onOpDrop,
-      loadHistory, loadQueue, cancelQueuedTask, loadHistoryTask, delHistory, editHistoryNote, cancelHistoryNote, saveHistoryNote, formatTime,
+      loadHistory, loadQueue, cancelQueuedTask, reprioritizeQueuedTask, loadHistoryTask, delHistory, editHistoryNote, cancelHistoryNote, saveHistoryNote, formatTime,
       selectSkill, resetResultPage, changePage,
       changeProgressPage, changeOpPage, changeResultPageSize, paginationPages, setTablePage, jumpTablePage,
       progressStageClass, progressDisplay, progressStageLabel, progressStatusClass,

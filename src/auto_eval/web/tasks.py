@@ -31,6 +31,9 @@ class Task:
     created_at: float = field(default_factory=time.time)
     done_total: int = 0
     error: str | None = None
+    # 失败补跑是原任务的子运行，不改变主任务终态；状态和审计信息单独保存。
+    repair_status: str = "idle"  # idle | queued | running | completed | partial | error | cancelled
+    retry_runs: dict[str, dict] = field(default_factory=dict)
     # 更新批正在评测的 items 下标（运行时状态，不进快照），供单条查询给 evaluating 标志
     in_flight_indexes: set[int] = field(default_factory=set)
     # SSE 订阅者（每连接独立有界队列）与丢帧计数。订阅制取代旧的单条共享
@@ -169,6 +172,14 @@ def _task_from_snapshot(snapshot: dict, task_id: str) -> Task:
     if status in {"pending", "queued", "running"}:
         status = "error"
         error = error or "服务中断，已保留中断前完成的评估结果"
+    repair_status = snapshot.get("repair_status") or "idle"
+    retry_runs = snapshot.get("retry_runs") or {}
+    if repair_status in {"queued", "running"}:
+        repair_status = "error"
+        for retry in retry_runs.values():
+            if retry.get("status") in {"queued", "running"}:
+                retry["status"] = "error"
+                retry["error"] = retry.get("error") or "服务中断，失败补跑未完成"
     return Task(
         id=snapshot.get("task_id") or task_id,
         mode=snapshot.get("mode") or "rich_content",
@@ -191,7 +202,22 @@ def _task_from_snapshot(snapshot: dict, task_id: str) -> Task:
             else len(snapshot.get("results") or [])
         ),
         error=error,
+        repair_status=repair_status,
+        retry_runs=retry_runs,
     )
+
+
+def latest_results_by_index(task: Task) -> dict[int, dict]:
+    """返回每个输入下标的最新结果；兼容历史快照里的字符串 index/重复行。"""
+    latest: dict[int, dict] = {}
+    for position, result in enumerate(task.results):
+        raw_index = result.get("index", position)
+        try:
+            index = int(raw_index)
+        except (TypeError, ValueError):
+            continue
+        latest[index] = result
+    return latest
 
 
 def get_task(task_id: str) -> Task | None:

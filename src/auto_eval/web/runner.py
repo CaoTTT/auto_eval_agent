@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -32,7 +33,12 @@ from .video_prepare import (
     prepare_session_rich_content_item,
     prepare_session_visual_compare_item,
 )
-from .tasks import Task, retire_task, upsert_result_by_index
+from .tasks import (
+    Task,
+    latest_results_by_index,
+    retire_task,
+    upsert_result_by_index,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -261,6 +267,9 @@ def _make_item_evaluator(
 
     async def one(idx: int, item_dict: dict) -> dict:
         request_id = make_request_id(task.created_at, task.id, idx)
+        retry_id = str(runtime_options.get("_retry_id") or "")
+        if retry_id:
+            request_id = f"{request_id}_r{retry_id[-6:]}"
         pending_judge_traces: list[tuple[str, dict]] = []
 
         def publish_progress(payload: dict) -> None:
@@ -518,6 +527,177 @@ async def _run(task: Task, cfg: AppConfig) -> None:
         await asyncio.gather(*coros)
     finally:
         await _aclose_judge_clients(clients)
+
+
+_PREPARED_ITEM_FIELDS = {
+    "frames", "frames1", "frames2", "frames3", "frame_count", "media",
+    "video_name", "video1_path", "video2_path", "video3_path",
+    "duration", "duration1", "duration2", "duration3",
+}
+
+
+def _base_context(item: dict) -> str:
+    """移除旧运行注入的会话总结，防止补跑时重复叠加。"""
+    return str(item.get("context") or "").split("\n\n历史对话总结：\n", 1)[0].strip()
+
+
+async def run_retry(task: Task, cfg: AppConfig, retry_id: str) -> None:
+    """执行人工失败补跑；候选成功才写回原任务，失败仅进入 attempt 审计。"""
+    retry = task.retry_runs[retry_id]
+    retry["status"] = "running"
+    retry["started_at"] = time.time()
+    task.repair_status = "running"
+    _persist_task(task, force=True)
+    task._fanout("retry_start", {"retry_id": retry_id, "total": len(retry.get("indexes") or [])})
+
+    indexes = [int(index) for index in retry.get("indexes") or []]
+    target_set = set(indexes)
+    reasons = {int(k): v for k, v in (retry.get("reasons") or {}).items()}
+    working_items: dict[int, dict] = {}
+    runtime_options = {
+        **task.options,
+        **(retry.get("options") or {}),
+        "_retry_id": retry_id,
+    }
+    clients: list[JudgeClient] = []
+
+    async def on_result(idx: int, res: dict, started: float) -> None:
+        item_state = retry["items"].setdefault(str(idx), {})
+        retry["completed"] = int(retry.get("completed", 0)) + 1
+        item_state["finished_at"] = time.time()
+        item_state["latency_s"] = round(time.perf_counter() - started, 3)
+        item_state["request_id"] = make_request_id(task.created_at, task.id, idx) + f"_r{retry_id[-6:]}"
+        if res.get("error"):
+            retry["failed"] = int(retry.get("failed", 0)) + 1
+            item_state.update({"status": "failed", "error": res.get("error")})
+        else:
+            current = latest_results_by_index(task).get(idx)
+            may_replace_success = reasons.get(idx) == "session_dependency"
+            if current is not None and not current.get("error") and not may_replace_success:
+                retry["skipped"] = int(retry.get("skipped", 0)) + 1
+                item_state.update({"status": "skipped", "reason": "already_succeeded"})
+            else:
+                res["retry_id"] = retry_id
+                res["recovered_at"] = time.time()
+                upsert_result_by_index(task, res)
+                prepared = working_items.get(idx) or {}
+                for field in _PREPARED_ITEM_FIELDS:
+                    if field in prepared:
+                        task.items[idx][field] = prepared[field]
+                retry["succeeded"] = int(retry.get("succeeded", 0)) + 1
+                item_state.update({"status": "succeeded", "error": None})
+                await task.publish(
+                    "result",
+                    {"progress": task.done_total, "total": len(task.items), "result": res,
+                     "retry_id": retry_id},
+                )
+        task._fanout(
+            "retry_result",
+            {"retry_id": retry_id, "index": idx, **item_state},
+        )
+        _persist_task(task, force=True)
+
+    async def mark_dependency_skipped(indices: list[int], reason: str) -> None:
+        for idx in indices:
+            retry["completed"] = int(retry.get("completed", 0)) + 1
+            retry["skipped"] = int(retry.get("skipped", 0)) + 1
+            state = retry["items"].setdefault(str(idx), {})
+            state.update({"status": "skipped", "reason": reason, "finished_at": time.time()})
+            task._fanout("retry_result", {"retry_id": retry_id, "index": idx, **state})
+
+    try:
+        one, clients = _make_item_evaluator(
+            task,
+            cfg,
+            options=runtime_options,
+            on_result=on_result,
+        )
+
+        current_results = latest_results_by_index(task)
+        grouped: dict[str, list[int]] = {}
+        standalone: list[int] = []
+        for idx, item in enumerate(task.items):
+            group = item.get("session_group")
+            if group:
+                grouped.setdefault(str(group), []).append(idx)
+            elif idx in target_set:
+                standalone.append(idx)
+        for group_indexes in grouped.values():
+            group_indexes.sort(key=lambda i: task.items[i].get("turn_index", 0))
+
+        async def run_one(idx: int, prior_summary: str = "") -> dict:
+            working = copy.deepcopy(task.items[idx])
+            base_ctx = _base_context(working)
+            if prior_summary:
+                working["context"] = (
+                    f"{base_ctx}\n\n历史对话总结：\n{prior_summary}" if base_ctx
+                    else f"历史对话总结：\n{prior_summary}"
+                )
+            else:
+                working["context"] = base_ctx
+            working_items[idx] = working
+            task.in_flight_indexes.add(idx)
+            retry["items"].setdefault(str(idx), {})["status"] = "running"
+            try:
+                return await one(idx, working)
+            finally:
+                task.in_flight_indexes.discard(idx)
+
+        async def run_session(group_indexes: list[int]) -> None:
+            prior_summary = ""
+            selected = [idx for idx in group_indexes if idx in target_set]
+            if not selected:
+                return
+            first_selected = group_indexes.index(selected[0])
+            for idx in group_indexes[:first_selected]:
+                previous = current_results.get(idx) or {}
+                summary = str(previous.get("turn_summary") or "").strip()
+                prior_summary += f"【前序轮次】{summary or '（未生成总结）'}\n"
+            for position, idx in enumerate(group_indexes[first_selected:]):
+                if idx not in target_set:
+                    continue
+                res = await run_one(idx, prior_summary)
+                if res.get("error"):
+                    remaining = [
+                        other for other in group_indexes[first_selected + position + 1:]
+                        if other in target_set
+                    ]
+                    await mark_dependency_skipped(remaining, "previous_turn_retry_failed")
+                    break
+                summary = str(res.get("turn_summary") or "").strip()
+                prior_summary += f"【补跑轮次】{summary or '（未生成总结）'}\n"
+
+        coros = [run_one(idx) for idx in standalone]
+        coros.extend(
+            run_session(group_indexes)
+            for group_indexes in grouped.values()
+            if any(idx in target_set for idx in group_indexes)
+        )
+        if coros:
+            await asyncio.gather(*coros)
+        retry["status"] = "completed" if not retry.get("failed") else "partial"
+        task.repair_status = retry["status"]
+    except asyncio.CancelledError:
+        retry["status"] = "error"
+        retry["error"] = "服务中断，失败补跑未完成"
+        task.repair_status = "error"
+        raise
+    except Exception as exc:
+        logger.exception("失败补跑异常: task_id=%s retry_id=%s", task.id, retry_id)
+        retry["status"] = "error"
+        retry["error"] = f"{type(exc).__name__}: {exc}"
+        task.repair_status = "error"
+    finally:
+        if clients:
+            await _aclose_judge_clients(clients)
+        retry["finished_at"] = time.time()
+        task.active_runs = max(0, task.active_runs - 1)
+        _persist_task(task, force=True)
+        task._fanout(
+            "done",
+            {"summary": task.summary, "total": len(task.items), "retry": retry},
+        )
+        retire_task(task)
 
 
 # 登记后台更新批任务引用：避免协程被 GC，也便于测试等待完成。
@@ -835,8 +1015,11 @@ def _summarize(task: Task) -> dict:
     if task.mode == "rich_content":
         return _summarize_rich_content(task)
     # compare：V0.2 七维绝对分；准确性保留逐题输出但暂不参与汇总。
-    res = task.results
-    ok = [r for r in res if "error" not in r]
+    res = [
+        result for index, result in latest_results_by_index(task).items()
+        if 0 <= index < len(task.items)
+    ]
+    ok = [r for r in res if not r.get("error")]
     valid = [
         row for row in ok
         if all(
@@ -845,9 +1028,9 @@ def _summarize(task: Task) -> dict:
         )
     ]
     summary: dict = {
-        "total": len(res),
+        "total": len(task.items),
         "done": len(ok),
-        "failed": len(res) - len(ok),
+        "failed": len(task.items) - len(ok),
         "input_failed": len(ok) - len(valid),
         "comparable": len(valid),
         "mode": task.mode,
@@ -924,8 +1107,11 @@ def _summarize(task: Task) -> dict:
 
 def _summarize_rich_content(task: Task) -> dict:
     """汇总视觉发现与整体评价，不使用问答类 correctness/准确率口径。"""
-    results = task.results
-    ok = [row for row in results if "error" not in row]
+    results = [
+        result for index, result in latest_results_by_index(task).items()
+        if 0 <= index < len(task.items)
+    ]
+    ok = [row for row in results if not row.get("error")]
     card_cases = [row for row in ok if row.get("card_presence") == "present"]
     superlink_cases = [
         row for row in ok if row.get("superlink_presence") == "present"
@@ -968,9 +1154,9 @@ def _summarize_rich_content(task: Task) -> dict:
         entry["solved_review"] += int(row.get("problem_solved") == "need_review")
 
     return {
-        "total": len(results),
+        "total": len(task.items),
         "done": len(ok),
-        "failed": len(results) - len(ok),
+        "failed": len(task.items) - len(ok),
         "mode": task.mode,
         "card_case_count": len(card_cases),
         "card_presence_rate": (
