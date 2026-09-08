@@ -22,6 +22,11 @@ createApp({
     const judges = ref([]);
     const selectedJudges = ref([]);
     const visibleJudges = computed(() => judges.value);
+    const evaluationProfiles = ref([]);
+    const selectedEvaluationProfile = ref("");
+    const compareProfiles = computed(() =>
+      evaluationProfiles.value.filter((profile) => (profile.modes || []).includes("compare"))
+    );
     const concurrency = ref(4);
     const evalTimeout = ref(300);
     const submitting = ref(false);
@@ -502,9 +507,21 @@ createApp({
       return judges.value.length ? [judges.value[0].name] : [];
     }
 
+    function defaultEvaluationProfile() {
+      return compareProfiles.value.find((profile) => profile.status === "stable")?.id
+        || compareProfiles.value[0]?.id
+        || "";
+    }
+
+    function evaluationProfileLabel(id) {
+      if (!id) return "—";
+      return evaluationProfiles.value.find((profile) => profile.id === id)?.display || id;
+    }
+
     function switchMode(k) {
       mode.value = k;
       selectedJudges.value = defaultJudgeSelection();
+      if (k === "compare") selectedEvaluationProfile.value = defaultEvaluationProfile();
       items.value = [];
       progressPage.value = 1;
       errors.value = [];
@@ -697,6 +714,7 @@ createApp({
         mode: mode.value,
         items: submittedItems,
         dataset_name: datasetName.value || "手动录入",
+        evaluation_profile: mode.value === "compare" ? selectedEvaluationProfile.value : null,
         options: {
           judges: selectedJudges.value,
           concurrency: concurrency.value,
@@ -1219,6 +1237,9 @@ createApp({
       closeActiveStream();
       taskId.value = d.task_id || id;
       mode.value = d.mode;
+      if (d.mode === "compare") {
+        selectedEvaluationProfile.value = d.evaluation_profile || defaultEvaluationProfile();
+      }
       datasetName.value = d.dataset_name || "";
       items.value = d.items || [];
       results.value = d.results || [];
@@ -1269,6 +1290,8 @@ createApp({
       const r = await fetch("/api/config");
       const d = await r.json();
       judges.value = d.judges || [];
+      evaluationProfiles.value = d.evaluation_profiles || [];
+      selectedEvaluationProfile.value = defaultEvaluationProfile();
       selectedJudges.value = defaultJudgeSelection();
       loadHistory();
       loadQueue();
@@ -1283,6 +1306,7 @@ createApp({
 
     return {
       modes, mode, modeLabel, isVideoMode, items, errors, judges, visibleJudges, selectedJudges, datasetName,
+      evaluationProfiles, compareProfiles, selectedEvaluationProfile, evaluationProfileLabel,
       concurrency, evalTimeout, submitting, running, progress, total, results, summary, taskId, runError,
       queueState, queueEntries, selectedTaskStatus, queueNotice, taskStatusLabel, queueKindLabel,
       repairStatus, retryStatusLabel, retrySubmitting, selectedRetryIndexes, activeRetry,

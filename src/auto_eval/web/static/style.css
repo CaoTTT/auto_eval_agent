@@ -32,6 +32,7 @@ button {
   border-radius: 8px; cursor: pointer; font-size: 14px;
 }
 button:hover:not(:disabled) { background: #f3f4f6; }
+.tabs button.active:hover:not(:disabled) { background: #1d4ed8; }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
 button.primary { background: #2563eb; color: #fff; border-color: #2563eb; font-size: 15px; padding: 9px 20px; }
 button.primary:hover:not(:disabled) { background: #1d4ed8; }

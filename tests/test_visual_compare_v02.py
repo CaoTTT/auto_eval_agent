@@ -1,9 +1,9 @@
 from auto_eval.judges.visual_compare_judge import visual_compare_result_fields
-from auto_eval.schema import VisualCompareObservation
+from auto_eval.judges.compare_protocols import VisualCompareObservationV02
 from auto_eval.web.history import _visual_compare_export_rows
 
 
-def _observation(**overrides) -> VisualCompareObservation:
+def _observation(**overrides) -> VisualCompareObservationV02:
     data = {
         "product_count": 3,
         "answer1_input_status": "complete",
@@ -43,7 +43,7 @@ def _observation(**overrides) -> VisualCompareObservation:
     data.update(overrides)
     if "content_conflict" in data:
         data["has_conflict"] = data.pop("content_conflict")
-    return VisualCompareObservation.model_validate(data)
+    return VisualCompareObservationV02.model_validate(data)
 
 
 def test_three_product_scores_generate_dimension_rank_groups():

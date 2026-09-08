@@ -7,7 +7,7 @@
 | 模式 | 说明 | 裁判 |
 | --- | --- | --- |
 | **垂域视觉评测**（`rich_content`） | 识别回答中的挂卡（天气/音乐等垂域卡片）与 Superlink，统计数量、判定适用性，标记需人工复核的条目 | 终端用户（`judge_2`） |
-| **垂域视觉对比评测**（`compare`） | 同一问题的两个回答视频，五维对比（相关性/安全/内容质量/需求闭环/个性化）+ 内容冲突检测 | 终端用户（`judge_2`） |
+| **垂域视觉对比评测**（`compare`） | 同一问题的两个或三个回答视频；任务级选择 V0.2 简化版或 V0.3 标准 | 终端用户（`judge_2`） |
 
 裁判「终端用户」为单轮直出的多模态模型：`Qwen/Qwen3.5-397B-A17B`（SiliconFlow），`temperature=0 + seed=42` 保证复跑一致；一次生成 `<analysis>` 思考链 + 结论 JSON，不联网、不调工具。
 
@@ -53,7 +53,9 @@ python -m uvicorn auto_eval.web.server:app --host 0.0.0.0 --port 8503
 
 看到 `Uvicorn running on http://0.0.0.0:8503` 后，浏览器打开 **http://localhost:8503** 。
 
-界面操作：选择评测模式 → 导入 JSONL（多轮会话可导入 CSV，按 `session_group` 串行、`turn_index` 排序）→ 选择裁判与并发数 → 开始评测，SSE 实时出结果，完成后可导出。
+界面操作：选择评测模式 → 导入 JSONL（多轮会话可导入 CSV，按 `session_group` 串行、`turn_index` 排序）→ 选择裁判、评测标准与并发数 → 开始评测，SSE 实时出结果，完成后可导出。
+
+垂域视觉对比提供两个可并存的评测协议：`qa_competitor_compare@0.2-simplified`（稳定默认，1–5 分）和 `qa_competitor_compare@0.3`（实验版，0–3 分）。协议不仅冻结 Prompt，还冻结输出 Schema、Gate 规则和分数范围。任务一旦创建就不能更换协议；失败补跑强制继承原任务协议。若要用另一标准重评同一数据，应新建任务，避免不同口径的结果写入同一任务。
 
 运行中仍可继续提交新的全量评测任务。后端按 FIFO 队列逐个启动任务，任意时刻只运行一个队列项；每个任务开始后，仍按它提交时设置的 `concurrency` 并发评测内部题目。页面顶部的“任务队列”会显示当前运行项、等待顺序和进度，尚未开始的任务可取消、上移或置顶（不会打断当前运行项）。`GET /api/queue` 可获取队列状态，`DELETE /api/queue/{job_id}` 可取消等待项，`PATCH /api/queue/{job_id}/position` 可调整等待位置。队列驻留在当前服务进程中，服务关闭时尚未开始的排队任务会标记为中断。
 
@@ -80,7 +82,7 @@ python -m uvicorn auto_eval.web.server:app --host 0.0.0.0 --port 8503
 ## 目录
 
 - `schema.py` 数据模型（EvalItem / RichContentObservation / VisualCompareObservation）
-- `judges/` 评测引擎：`base.py`（单轮直出 LLM 客户端 + JSON 定向修复）｜`rich_content_judge.py`｜`visual_compare_judge.py`｜`prompts.py`（两套 SYSTEM/USER 模板）
+- `judges/` 评测引擎：`base.py`（单轮直出 LLM 客户端 + JSON 定向修复）｜`rich_content_judge.py`｜`visual_compare_judge.py`｜`compare_protocols.py`（版本注册、Schema 和 Gate 语义）｜`visual_compare_prompt_v02_simplified.py` / `visual_compare_prompt_v03.py`（版本化 Prompt）
 - `web/` 评估台：`server.py`（FastAPI 路由）｜`runner.py`（评测编排：抽帧→逐题评判→汇总）｜`parse_input.py`（JSONL/CSV 解析）｜`video_prepare.py` + `media.py`（抽帧）｜`history.py`（快照与导出）｜`static/`（前端）
 - `config/` `judges.yaml`｜`visual_modes/rich_content.yaml`（含 category_display 垂域显示名）
 - `tests/` pytest 单元测试（不访问真实模型/网络）

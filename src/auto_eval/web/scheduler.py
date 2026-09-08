@@ -220,6 +220,8 @@ class EvalScheduler:
                 if job.kind == "retry" else task.created_at
             ),
         }
+        if task.evaluation_profile:
+            entry["evaluation_profile"] = task.evaluation_profile
         if job.kind == "retry":
             entry["retry_id"] = job.job_id
         return entry

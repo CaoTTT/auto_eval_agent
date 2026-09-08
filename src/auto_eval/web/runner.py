@@ -20,6 +20,7 @@ from ..judges import (
     VisualCompareJudge,
 )
 from ..judges.base import flush_web_trace_records
+from ..judges.compare_protocols import resolve_compare_protocol
 from ..llm_stream import is_retriable_llm_error
 from ..observability import (
     bind_chain_context,
@@ -210,6 +211,13 @@ def _make_item_evaluator(
     内）被 await，负责 append/merge、完成日志、SSE、持久化；缺省为完整跑批的原有行为。
     """
     runtime_options = options if options is not None else task.options
+    compare_protocol = (
+        resolve_compare_protocol(
+            task.evaluation_profile or runtime_options.get("evaluation_profile")
+        )
+        if task.mode == "compare"
+        else None
+    )
     selected = runtime_options.get("judges") or [cfg.judges[0].name]
     judges_cfg = [j for j in cfg.judges if j.name in selected] or cfg.judges[:1]
     # R3：构造中途失败（如某个 judge 缺 base_url）时，已建客户端的连接池会
@@ -230,7 +238,7 @@ def _make_item_evaluator(
     )
     # 垂域视觉对比：双视频多模态对比裁判（复用同一视觉配置）
     compare_judges = (
-        [VisualCompareJudge(client, rich_profile) for client in clients]
+        [VisualCompareJudge(client, rich_profile, compare_protocol) for client in clients]
         if rich_profile is not None
         else []
     )
@@ -1014,7 +1022,7 @@ async def _eval_one(
 def _summarize(task: Task) -> dict:
     if task.mode == "rich_content":
         return _summarize_rich_content(task)
-    # compare：V0.2 七维绝对分；准确性保留逐题输出但暂不参与汇总。
+    # compare：协议定义七维绝对分；准确性保留逐题输出但暂不参与汇总。
     res = [
         result for index, result in latest_results_by_index(task).items()
         if 0 <= index < len(task.items)
@@ -1034,7 +1042,12 @@ def _summarize(task: Task) -> dict:
         "input_failed": len(ok) - len(valid),
         "comparable": len(valid),
         "mode": task.mode,
-        "standard_version": "0.2-simplified",
+        "standard_version": (
+            task.protocol_manifest.get("standard_version")
+            or next((row.get("standard_version") for row in ok if row.get("standard_version")), None)
+            or resolve_compare_protocol(task.evaluation_profile or None).standard_version
+        ),
+        "evaluation_profile": task.evaluation_profile,
         "accuracy_aggregation_enabled": False,
         "needs_human_review_count": sum(
             bool(row.get("needs_human_review")) for row in valid

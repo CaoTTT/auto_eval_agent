@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <title>auto_eval 评估台</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260729_page_sizes">
+  <link rel="stylesheet" href="/static/style.css?v=20260908_protocol_versions">
   <style>
     .op-cards { display:flex; flex-direction:column; gap:12px; }
     .op-card { border:1px solid #e2e8f0; border-radius:8px; padding:12px; background:#fafbfc; }
@@ -36,12 +36,13 @@
     <p class="hint">任务之间按提交顺序串行；当前任务内部仍按各自并发数批跑。</p>
     <div class="table-scroll" v-if="queueEntries.length">
       <table class="grid queue-table">
-        <thead><tr><th>数据集</th><th>类型</th><th>模式</th><th>状态</th><th>队列位置</th><th>内部并发</th><th>进度</th><th>操作</th></tr></thead>
+        <thead><tr><th>数据集</th><th>类型</th><th>模式</th><th>评测标准</th><th>状态</th><th>队列位置</th><th>内部并发</th><th>进度</th><th>操作</th></tr></thead>
         <tbody>
           <tr v-for="entry in queueEntries" :key="entry.job_id || entry.task_id">
             <td>{{ entry.dataset_name || entry.task_id }}</td>
             <td>{{ queueKindLabel(entry.kind) }}</td>
             <td>{{ modeLabel(entry.mode) }}</td>
+            <td>{{ evaluationProfileLabel(entry.evaluation_profile) }}</td>
             <td><span :class="['queue-status', 'status-' + entry.status]">{{ taskStatusLabel(entry.status) }}</span></td>
             <td>{{ entry.status === 'running' ? '—' : entry.queue_position }}</td>
             <td>{{ entry.concurrency }}</td>
@@ -64,12 +65,13 @@
     <p class="hint">历史结果保存在本地 runs/web_history，服务重启后仍可加载；运行中断时会保留已完成的题目。</p>
     <div class="table-scroll" v-if="historyItems.length">
       <table class="grid history-table auto-table">
-        <thead><tr><th>时间</th><th>数据集</th><th>模式</th><th>状态</th><th class="history-progress-cell">进度</th><th>预览</th><th>操作</th><th>批跑备注</th></tr></thead>
+        <thead><tr><th>时间</th><th>数据集</th><th>模式</th><th>评测标准</th><th>状态</th><th class="history-progress-cell">进度</th><th>预览</th><th>操作</th><th>批跑备注</th></tr></thead>
         <tbody>
           <tr v-for="h in historyItems" :key="h.task_id">
             <td>{{ formatTime(h.updated_at || h.created_at) }}</td>
             <td>{{ h.dataset_name || '未记录' }}</td>
             <td>{{ modeLabel(h.mode) }}</td>
+            <td>{{ evaluationProfileLabel(h.evaluation_profile) }}</td>
             <td>{{ h.status }}<small v-if="retryStatusLabel(h.repair_status)" class="running"> · {{ retryStatusLabel(h.repair_status) }}</small></td>
             <td class="history-progress-cell">{{ h.done }}/{{ h.total }}</td>
             <td>{{ h.preview }}</td>
@@ -168,6 +170,15 @@
       <label v-for="j in visibleJudges" class="chip">
         <input type="checkbox" :value="j.name" v-model="selectedJudges"> {{ j.display || j.name }}
       </label>
+    </div>
+    <div v-if="mode==='compare'" class="row">
+      <span class="lbl">评测标准：</span>
+      <select v-model="selectedEvaluationProfile">
+        <option v-for="profile in compareProfiles" :key="profile.id" :value="profile.id">
+          {{ profile.display }} · {{ profile.score_range[0] }}–{{ profile.score_range[1] }}分
+        </option>
+      </select>
+      <span class="hint">任务创建后版本冻结；失败补跑沿用原版本。</span>
     </div>
     <div class="row">
       <span class="lbl">并发：</span>
@@ -397,6 +408,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20260901_compare_v02_3p"></script>
+  <script type="module" src="/static/app.js?v=20260908_protocol_versions"></script>
 </body>
 </html>

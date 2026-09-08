@@ -99,6 +99,8 @@ def task_to_snapshot(task) -> dict:
         "note": getattr(task, "note", ""),
         "items": task.items,
         "options": task.options,
+        "evaluation_profile": getattr(task, "evaluation_profile", ""),
+        "protocol_manifest": getattr(task, "protocol_manifest", {}),
         "status": task.status,
         "results": task.results,
         "item_progress": task.item_progress,
@@ -197,6 +199,26 @@ def _apply_interrupted_status(status, error):
     return status, error
 
 
+def _snapshot_evaluation_profile(data: dict) -> str:
+    explicit = data.get("evaluation_profile") or (data.get("options") or {}).get(
+        "evaluation_profile"
+    )
+    if explicit or data.get("mode") != "compare":
+        return explicit or ""
+    versions = [
+        str((data.get("summary") or {}).get("standard_version") or ""),
+        *[
+            str(result.get("standard_version") or "")
+            for result in (data.get("results") or [])
+        ],
+    ]
+    return (
+        "qa_competitor_compare@0.3"
+        if "0.3" in versions
+        else "qa_competitor_compare@0.2-simplified"
+    )
+
+
 def _snapshot_meta_row(data: dict, path: Path) -> dict:
     """从完整快照 dict 计算历史列表行（摘要字段），存原始 status/error。"""
     task_id = data.get("task_id") or path.stem
@@ -226,6 +248,7 @@ def _snapshot_meta_row(data: dict, path: Path) -> dict:
         "updated_at": data.get("updated_at") or data.get("created_at"),
         "error": data.get("error"),
         "repair_status": data.get("repair_status") or "idle",
+        "evaluation_profile": _snapshot_evaluation_profile(data),
         "preview": _preview(data),
         "meta_version": 1,
     }
@@ -307,6 +330,8 @@ def snapshot_payload(data: dict) -> dict:
         "mode": data.get("mode"),
         "items": data.get("items") or [],
         "options": data.get("options") or {},
+        "evaluation_profile": _snapshot_evaluation_profile(data),
+        "protocol_manifest": data.get("protocol_manifest") or {},
         "status": data.get("status"),
         "results": data.get("results") or [],
         "item_progress": data.get("item_progress") or {},
@@ -686,6 +711,8 @@ def _run_info(snapshot: dict) -> dict:
         "created_at": _format_ts(created),
         "updated_at": _format_ts(updated),
         "options": snapshot.get("options") or {},
+        "evaluation_profile": snapshot.get("evaluation_profile") or "",
+        "protocol_manifest": snapshot.get("protocol_manifest") or {},
         "error": snapshot.get("error") or "",
     }
 
@@ -717,6 +744,9 @@ def _visual_compare_export_rows(results: list[dict]) -> list[dict]:
         ("rationale", "理由"),
         ("standard_id", "标准ID"),
         ("standard_version", "标准版本"),
+        ("evaluation_profile", "评测协议"),
+        ("bundle_revision", "协议包修订"),
+        ("prompt_sha256", "Prompt SHA256"),
         ("product_count", "产品数量"),
         ("answer1_input_status", "产品1输入状态"),
         ("answer2_input_status", "产品2输入状态"),
@@ -796,7 +826,7 @@ def _visual_compare_export_rows(results: list[dict]) -> list[dict]:
         ("answer2_guided_recommendation_score", "产品2引导推荐分"),
         ("answer3_guided_recommendation_score", "产品3引导推荐分"),
         ("guided_recommendation_rank_groups", "引导推荐排名组"),
-        ("overall_ranking", "整体排名（V0.2暂不生成）"),
+        ("overall_ranking", "整体排名（当前版本暂不生成）"),
         ("evidence", "证据"),
         ("confidence", "置信度"),
         ("needs_human_review", "是否需要人工复核"),

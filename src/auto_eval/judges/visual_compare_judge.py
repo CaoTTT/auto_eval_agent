@@ -1,6 +1,7 @@
-"""V0.3 垂域视觉对比裁判：兼容双产品，增量支持三产品。"""
+"""可按任务冻结 V0.2 简化版或 V0.3 的垂域视觉对比裁判。"""
 from __future__ import annotations
 
+import hashlib
 import time
 from datetime import datetime
 from pathlib import Path
@@ -13,20 +14,13 @@ from ..media import encode_frame
 from ..schema import VisualCompareObservation
 from .base import JudgeClient, JudgeOutputParseError
 from .prompts import parse_json_loose
-from .visual_compare_prompt_v02 import VISUAL_COMPARE_SYSTEM, VISUAL_COMPARE_USER
-
-
-STANDARD_ID = "qa_competitor_compare"
-STANDARD_VERSION = "0.3"
-DIMENSIONS = (
-    "understanding",
-    "accuracy",
-    "service_closure",
-    "scenario_fulfillment",
-    "intuitive_efficiency",
-    "evidence_quality",
-    "guided_recommendation",
+from .compare_protocols import (
+    CompareProtocol,
+    DIMENSIONS,
+    resolve_compare_protocol,
 )
+
+
 # 按当前实验约定：准确性保留模型结果，但暂不参与任何汇总或总排名。
 AGGREGATION_DIMENSIONS = tuple(d for d in DIMENSIONS if d != "accuracy")
 
@@ -65,7 +59,10 @@ def _rank_groups(
     return [scored[score] for score in sorted(scored, reverse=True)]
 
 
-def _normalize_observation_state(observation: VisualCompareObservation) -> None:
+def _normalize_observation_state(
+    observation: VisualCompareObservation,
+    protocol: CompareProtocol,
+) -> None:
     """消除 N/A、无法核验、输入失败和 Gate 状态与分数的矛盾。"""
     product_nos = _product_nos(observation)
     for answer_no in product_nos:
@@ -82,9 +79,20 @@ def _normalize_observation_state(observation: VisualCompareObservation) -> None:
                 setattr(observation, f"answer{answer_no}_{dimension}_score", None)
                 continue
             input_failed = getattr(observation, f"answer{answer_no}_input_status") == "failed"
-            response_failed = getattr(observation, f"answer{answer_no}_response_gate") == "fail"
+            response_gate = getattr(observation, f"answer{answer_no}_response_gate")
+            response_blocked = (
+                response_gate != "pass"
+                if protocol.require_response_pass
+                else response_gate == "fail"
+            )
             safety_failed = getattr(observation, f"answer{answer_no}_safety_gate") == "fail"
-            if not applicable or unverifiable or input_failed or response_failed or safety_failed:
+            if (
+                not applicable
+                or unverifiable
+                or input_failed
+                or response_blocked
+                or (not protocol.require_response_pass and safety_failed)
+            ):
                 setattr(observation, f"answer{answer_no}_{dimension}_score", None)
 
 
@@ -92,6 +100,7 @@ def _score_is_required(
     observation: VisualCompareObservation,
     answer_no: int,
     dimension: str,
+    protocol: CompareProtocol,
 ) -> bool:
     if not getattr(observation, f"{dimension}_applicable"):
         return False
@@ -99,17 +108,22 @@ def _score_is_required(
         return False
     if getattr(observation, f"answer{answer_no}_input_status") == "failed":
         return False
-    return (
-        getattr(observation, f"answer{answer_no}_response_gate") != "fail"
-        and getattr(observation, f"answer{answer_no}_safety_gate") != "fail"
+    response_gate = getattr(observation, f"answer{answer_no}_response_gate")
+    if protocol.require_response_pass:
+        return response_gate == "pass"
+    return response_gate != "fail" and (
+        getattr(observation, f"answer{answer_no}_safety_gate") != "fail"
     )
 
 
-def _finalize_observation(observation: VisualCompareObservation) -> None:
+def _finalize_observation(
+    observation: VisualCompareObservation,
+    protocol: CompareProtocol,
+) -> None:
     """只确定性计算派生字段，不让模型自行创造总分权重。"""
-    _normalize_observation_state(observation)
-    observation.standard_id = STANDARD_ID
-    observation.standard_version = STANDARD_VERSION
+    _normalize_observation_state(observation, protocol)
+    observation.standard_id = protocol.standard_id
+    observation.standard_version = protocol.standard_version
 
     for dimension in DIMENSIONS:
         setattr(observation, f"{dimension}_rank_groups", _rank_groups(observation, dimension))
@@ -122,7 +136,7 @@ def _finalize_observation(observation: VisualCompareObservation) -> None:
             ) if getattr(observation, f"{dimension}_applicable") else None,
         )
 
-    # V0.3 尚无正式权重；禁止擅自计算总分和整体第一名。
+    # 当前两个协议都尚无正式权重；禁止擅自计算总分和整体第一名。
     observation.answer1_total_score = None
     observation.answer2_total_score = None
     observation.answer3_total_score = None
@@ -141,7 +155,9 @@ def _finalize_observation(observation: VisualCompareObservation) -> None:
         observation.answer2_safety_gate_reason,
     ]))
     observation.content_quality = None
-    observation.content_quality_reason = "V0.3未定义正式维度权重，不生成综合内容质量胜方"
+    observation.content_quality_reason = (
+        f"{protocol.standard_version}未定义正式维度权重，不生成综合内容质量胜方"
+    )
     observation.need_closure = observation.service_closure_winner
     observation.need_closure_reason = observation.service_closure_reason
     observation.personalization = observation.scenario_fulfillment_winner
@@ -167,7 +183,7 @@ def _finalize_observation(observation: VisualCompareObservation) -> None:
         missing_answers = [
             str(answer_no)
             for answer_no in _product_nos(observation)
-            if _score_is_required(observation, answer_no, dimension)
+            if _score_is_required(observation, answer_no, dimension, protocol)
             and getattr(observation, f"answer{answer_no}_{dimension}_score") is None
         ]
         if missing_answers:
@@ -187,10 +203,17 @@ def _finalize_observation(observation: VisualCompareObservation) -> None:
 
 def visual_compare_result_fields(
     observation: VisualCompareObservation,
+    protocol: CompareProtocol | str | None = None,
 ) -> dict[str, Any]:
     """返回扁平结果；新增字段可直接被 Excel 导出，旧字段继续存在。"""
-    _finalize_observation(observation)
+    selected_protocol = (
+        resolve_compare_protocol(protocol) if isinstance(protocol, str)
+        else protocol or resolve_compare_protocol(None)
+    )
+    _finalize_observation(observation, selected_protocol)
     result = observation.model_dump()
+    result["evaluation_profile"] = selected_protocol.id
+    result["bundle_revision"] = selected_protocol.bundle_revision
     result["needs_review_label"] = "T" if observation.needs_review else "F"
     return result
 
@@ -198,9 +221,18 @@ def visual_compare_result_fields(
 class VisualCompareJudge:
     """同一调用兼容2个产品，并通过可选参数增量支持第3个产品。"""
 
-    def __init__(self, client: JudgeClient, profile: VisualModeProfile):
+    def __init__(
+        self,
+        client: JudgeClient,
+        profile: VisualModeProfile,
+        protocol: CompareProtocol | str | None = None,
+    ):
         self.client = client
         self.profile = profile
+        self.protocol = (
+            resolve_compare_protocol(protocol) if isinstance(protocol, str)
+            else protocol or resolve_compare_protocol(None)
+        )
 
     async def evaluate(
         self,
@@ -229,11 +261,11 @@ class VisualCompareJudge:
             3 if (context3 or answer3 or frames3 is not None) else 2
         )
 
-        system = VISUAL_COMPARE_SYSTEM.render(
+        system = self.protocol.system_template.render(
             persona=self.client.persona,
             product_count=actual_product_count,
         )
-        user = VISUAL_COMPARE_USER.render(
+        user = self.protocol.user_template.render(
             evaluation_datetime=evaluation_datetime,
             question=question,
             context=context,
@@ -297,7 +329,7 @@ class VisualCompareJudge:
         data["product_count"] = actual_product_count
 
         try:
-            observation = VisualCompareObservation.model_validate(data)
+            observation = self.protocol.observation_model.model_validate(data)
             observation.evaluation_datetime = evaluation_datetime
         except ValidationError as exc:
             raise JudgeOutputParseError(
@@ -308,10 +340,13 @@ class VisualCompareJudge:
                 model=self.client.model,
             ) from exc
 
-        result = visual_compare_result_fields(observation)
+        result = visual_compare_result_fields(observation, self.protocol)
         result.update({
             "judge": self.client.cfg.name,
             "judge_model": self.client.model,
             "judge_latency_ms": int((time.perf_counter() - started) * 1000),
+            "prompt_sha256": hashlib.sha256(
+                f"{system}\0{user}".encode("utf-8")
+            ).hexdigest(),
         })
         return result

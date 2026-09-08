@@ -20,6 +20,8 @@ class Task:
     mode: str
     items: list[dict]
     options: dict
+    evaluation_profile: str = ""
+    protocol_manifest: dict = field(default_factory=dict)
     session_name: str = ""
     dataset_name: str = ""
     note: str = ""
@@ -104,6 +106,8 @@ def new_task(
     dataset_name: str = "",
     *,
     task_id: str = "",
+    evaluation_profile: str = "",
+    protocol_manifest: dict | None = None,
 ) -> Task:
     task_id = task_id or uuid.uuid4().hex[:12]
     created_at = time.time()
@@ -112,6 +116,8 @@ def new_task(
         mode=mode,
         items=items,
         options=options,
+        evaluation_profile=evaluation_profile,
+        protocol_manifest=dict(protocol_manifest or {}),
         dataset_name=dataset_name,
         session_name=make_session_name(created_at, mode, task_id),
         created_at=created_at,
@@ -180,11 +186,28 @@ def _task_from_snapshot(snapshot: dict, task_id: str) -> Task:
             if retry.get("status") in {"queued", "running"}:
                 retry["status"] = "error"
                 retry["error"] = retry.get("error") or "服务中断，失败补跑未完成"
+    options = snapshot.get("options") or {}
+    evaluation_profile = snapshot.get("evaluation_profile") or options.get("evaluation_profile") or ""
+    if not evaluation_profile and (snapshot.get("mode") or "") == "compare":
+        versions = [
+            str((snapshot.get("summary") or {}).get("standard_version") or ""),
+            *[
+                str(result.get("standard_version") or "")
+                for result in (snapshot.get("results") or [])
+            ],
+        ]
+        evaluation_profile = (
+            "qa_competitor_compare@0.3"
+            if "0.3" in versions
+            else "qa_competitor_compare@0.2-simplified"
+        )
     return Task(
         id=snapshot.get("task_id") or task_id,
         mode=snapshot.get("mode") or "rich_content",
         items=snapshot.get("items") or [],
-        options=snapshot.get("options") or {},
+        options=options,
+        evaluation_profile=evaluation_profile,
+        protocol_manifest=snapshot.get("protocol_manifest") or {},
         dataset_name=snapshot.get("dataset_name") or "",
         note=snapshot.get("note") or "",
         session_name=snapshot.get("session_name") or "",

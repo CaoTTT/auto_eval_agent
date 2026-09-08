@@ -20,6 +20,10 @@ from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
 from ..config import load_config
+from ..judges.compare_protocols import (
+    list_compare_protocols,
+    resolve_compare_protocol,
+)
 from ..media import probe_duration
 from ..paths import RUNS_DIR
 from .parse_input import Mode, parse_csv, parse_jsonl, parse_text
@@ -93,6 +97,7 @@ class EvalReq(BaseModel):
     items: list[dict]
     options: dict = {}
     dataset_name: str = ""
+    evaluation_profile: str | None = None
 
 
 class EvalItemsReq(BaseModel):
@@ -103,6 +108,7 @@ class EvalItemsReq(BaseModel):
     items: list[dict]
     options: dict = {}
     dataset_name: str = ""  # 仅新建时生效，更新时忽略
+    evaluation_profile: str | None = None
 
 
 class HistoryNoteReq(BaseModel):
@@ -125,6 +131,35 @@ class QueuePositionReq(BaseModel):
 _VIDEO_EXTENSIONS = VIDEO_EXTENSIONS
 
 
+def _compare_protocol_or_422(protocol_id: str | None):
+    try:
+        return resolve_compare_protocol(protocol_id)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+def _protocol_manifest(protocol, app_cfg, options: dict) -> dict:
+    """Freeze non-secret runtime facts needed to interpret/reproduce a task."""
+    manifest = protocol.public_metadata()
+    visual_profile = app_cfg.visual_modes.get("rich_content")
+    if visual_profile is not None:
+        manifest["media_algorithm_version"] = visual_profile.extraction.algorithm_version
+    selected = options.get("judges") or (
+        [app_cfg.judges[0].name] if app_cfg.judges else []
+    )
+    manifest["judges"] = [
+        {
+            "name": judge.name,
+            "model": judge.model,
+            "temperature": judge.temperature,
+            "seed": judge.seed,
+        }
+        for judge in app_cfg.judges
+        if judge.name in selected
+    ]
+    return manifest
+
+
 def _resolve_operation_video_path(raw_path: str) -> Path:
     return resolve_operation_video_path(raw_path, base_dir=BASE_DIR)
 
@@ -139,6 +174,7 @@ def _validate_eval_request(req: EvalReq, app_cfg) -> None:
         selected_judges = app_cfg.judges[:1]
     if req.mode != "compare" or not selected_judges:
         return
+    _compare_protocol_or_422(req.evaluation_profile)
     invalid: list[str] = []
     for index, item in enumerate(req.items, 1):
         declared = item.get("product_count")
@@ -212,6 +248,9 @@ def api_config():
             {"name": j.name, "display": j.display or j.name}
             for j in c.judges
         ],
+        "evaluation_profiles": [
+            profile.public_metadata() for profile in list_compare_protocols()
+        ],
     }
 
 
@@ -234,17 +273,27 @@ async def api_eval(req: EvalReq):
         raise HTTPException(400, "items 为空")
     app_cfg = cfg()
     _validate_eval_request(req, app_cfg)
+    protocol = (
+        _compare_protocol_or_422(req.evaluation_profile)
+        if req.mode == "compare"
+        else None
+    )
     task = new_task(
         req.mode,
         req.items,
         req.options,
         dataset_name=req.dataset_name.strip(),
+        evaluation_profile=protocol.id if protocol else "",
+        protocol_manifest=(
+            _protocol_manifest(protocol, app_cfg, req.options) if protocol else {}
+        ),
     )
     queue_position = EVAL_SCHEDULER.enqueue(task, app_cfg, run_eval)
     return {
         "task_id": task.id,
         "status": "queued",
         "queue_position": queue_position,
+        "evaluation_profile": task.evaluation_profile,
     }
 
 
@@ -435,8 +484,27 @@ async def api_eval_items(req: EvalItemsReq):
         )
     # compare 模式校验只针对本次批次 items（命中替换的条目也全部重评），
     # 放在 new_task 之前，避免校验失败留下空任务。
+    requested_profile = req.evaluation_profile
+    if not created and requested_profile and requested_profile != task.evaluation_profile:
+        raise HTTPException(
+            422,
+            "已有任务的评测协议不可变；请新建任务后使用另一版本评测",
+        )
+    protocol = (
+        _compare_protocol_or_422(
+            requested_profile if created else task.evaluation_profile
+        )
+        if mode == "compare"
+        else None
+    )
     _validate_eval_request(
-        EvalReq(mode=mode, items=req.items, options=req.options), app_cfg
+        EvalReq(
+            mode=mode,
+            items=req.items,
+            options=req.options,
+            evaluation_profile=protocol.id if protocol else None,
+        ),
+        app_cfg,
     )
     if created:
         task = new_task(
@@ -445,6 +513,10 @@ async def api_eval_items(req: EvalItemsReq):
             dict(req.options),
             dataset_name=req.dataset_name.strip(),
             task_id=task_id,
+            evaluation_profile=protocol.id if protocol else "",
+            protocol_manifest=(
+                _protocol_manifest(protocol, app_cfg, req.options) if protocol else {}
+            ),
         )
     batch, replaced_ids, added_ids = merge_items_by_id(task, req.items)
     save_task(task)  # items 定义立即落快照；结果仍在各题完成后才覆盖合并
@@ -469,6 +541,7 @@ async def api_eval_items(req: EvalItemsReq):
         "replaced_ids": replaced_ids,
         "added_ids": added_ids,
         "total_items": len(task.items),
+        "evaluation_profile": task.evaluation_profile,
     }
 
 
