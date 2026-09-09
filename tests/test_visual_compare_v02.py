@@ -1,6 +1,9 @@
+from io import BytesIO
+import zipfile
+
 from auto_eval.judges.visual_compare_judge import visual_compare_result_fields
 from auto_eval.judges.compare_protocols import VisualCompareObservationV02
-from auto_eval.web.history import _visual_compare_export_rows
+from auto_eval.web.history import _visual_compare_export_rows, build_xlsx
 
 
 def _observation(**overrides) -> VisualCompareObservationV02:
@@ -118,3 +121,77 @@ def test_export_contains_third_product_and_v02_fields():
     assert row["产品3回答"] == "回答3"
     assert row["产品3理解需求分"] == 5
     assert row["理解需求排名组"] == [["product1", "product3"], ["product2"]]
+
+
+def _xlsx_worksheet_xml(snapshot: dict) -> str:
+    with zipfile.ZipFile(BytesIO(build_xlsx(snapshot))) as archive:
+        return "\n".join(
+            archive.read(name).decode("utf-8")
+            for name in archive.namelist()
+            if name.startswith("xl/worksheets/sheet")
+        )
+
+
+def test_two_product_xlsx_omits_all_product3_columns():
+    result = visual_compare_result_fields(_observation(
+        product_count=2,
+        answer3_input_status=None,
+        answer3_response_gate=None,
+        answer3_safety_gate=None,
+    ))
+    result.update({
+        "index": 0,
+        "item_id": "q1",
+        "query": "示例问题",
+        "answer1": "回答1",
+        "answer2": "回答2",
+    })
+    snapshot = {
+        "mode": "compare",
+        "items": [{
+            "id": "q1",
+            "query": "示例问题",
+            "product_count": 2,
+            "source_data": {
+                "answer1": "回答1",
+                "answer2": "回答2",
+                "answer3": "",
+                "context3": "",
+                "video3": "",
+            },
+        }],
+        "results": [result],
+    }
+
+    worksheet_xml = _xlsx_worksheet_xml(snapshot)
+
+    assert "产品3" not in worksheet_xml
+    assert "answer3" not in worksheet_xml
+    assert "context3" not in worksheet_xml
+    assert "video3" not in worksheet_xml
+
+
+def test_three_product_xlsx_keeps_product3_columns():
+    result = visual_compare_result_fields(_observation())
+    result.update({
+        "index": 0,
+        "item_id": "q1",
+        "query": "示例问题",
+        "answer1": "回答1",
+        "answer2": "回答2",
+        "answer3": "回答3",
+    })
+    snapshot = {
+        "mode": "compare",
+        "items": [{
+            "id": "q1",
+            "query": "示例问题",
+            "product_count": 3,
+        }],
+        "results": [result],
+    }
+
+    worksheet_xml = _xlsx_worksheet_xml(snapshot)
+
+    assert "产品3回答" in worksheet_xml
+    assert "产品3理解需求分" in worksheet_xml

@@ -1128,6 +1128,30 @@ def load_item_judge_calls(
     }
 
 
+_PRODUCT3_XLSX_COLUMN_PREFIXES = (
+    "产品3", "answer3", "context3", "video3", "frames3", "duration3",
+)
+
+
+def _compare_snapshot_uses_product3(snapshot: dict) -> bool:
+    """按任务输入/结果判断 XLSX 是否需要保留产品3列。"""
+    for record in [
+        *(snapshot.get("items") or []),
+        *(snapshot.get("results") or []),
+    ]:
+        if record.get("product_count") == 3:
+            return True
+        source = record.get("source_data")
+        candidates = [record, source] if isinstance(source, dict) else [record]
+        if any(
+            candidate.get(field) not in (None, "", [])
+            for candidate in candidates
+            for field in ("answer3", "context3", "video3", "frames3", "duration3")
+        ):
+            return True
+    return False
+
+
 def build_xlsx(snapshot: dict) -> bytes:
     """生成 xlsx（纯数据 sheet，不含图表）。
 
@@ -1135,6 +1159,17 @@ def build_xlsx(snapshot: dict) -> bytes:
     如需图表，用导出的汇总数据在 Excel 中自行插入。
     """
     sheets = {name: rows for name, rows in export_rows(snapshot).items() if rows}
+    if snapshot.get("mode") == "compare" and not _compare_snapshot_uses_product3(snapshot):
+        for sheet_name in ("数据集明细", "逐题结果"):
+            if sheet_name in sheets:
+                sheets[sheet_name] = [
+                    {
+                        key: value
+                        for key, value in row.items()
+                        if not str(key).startswith(_PRODUCT3_XLSX_COLUMN_PREFIXES)
+                    }
+                    for row in sheets[sheet_name]
+                ]
     if not sheets:
         sheets = {"逐题结果": []}
 
