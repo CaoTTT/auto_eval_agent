@@ -17,6 +17,7 @@ from ..media import (
 )
 from ..config import VisualModeProfile
 from ..paths import PROJECT_ROOT, RUNS_DIR
+from ..preparation import check_preparation
 
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"}
@@ -89,6 +90,7 @@ def _extract_frames(
     cache_key: str = KEYFRAME_ALGORITHM_VERSION,
     extract_kwargs: dict | None = None,
 ) -> list[Path]:
+    check_preparation()
     frames = _cached_frames(frame_dir, cache_key)
     if frames:
         return frames
@@ -98,6 +100,7 @@ def _extract_frames(
     (frame_dir / ".complete").unlink(missing_ok=True)
     (frame_dir / "keyframes.json").unlink(missing_ok=True)
     frames = list(extract_fn(video_path, frame_dir, **(extract_kwargs or {})))
+    check_preparation()  # Never mark an interrupted extraction as a complete cache.
     if frames:
         (frame_dir / ".complete").write_text(
             json.dumps(
@@ -289,6 +292,7 @@ def prepare_session_visual_compare_item(
     first_duration = 0.0
 
     for product_no in range(1, product_count + 1):
+        check_preparation()
         raw_path = str(item.get(f"video{product_no}") or "").strip()
         if not raw_path:
             raise ValueError(f"缺少 video{product_no}")
@@ -355,6 +359,7 @@ def prepare_session_long_screenshot_item(
     prepared = dict(item)
     prepared.update(product_count=count, evidence_mode=mode, frame_count=0, media=[])
     for product_no in range(1, count + 1):
+        check_preparation()
         path = Path(item[f"screenshot{product_no}"]).expanduser()
         path = (path if path.is_absolute() else base_dir / path).resolve()
         if not any(path.is_relative_to(allowed) for allowed in operation_video_roots(base_dir)):

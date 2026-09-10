@@ -145,6 +145,8 @@ async def test_scheduler_cancels_only_queued_task_and_compacts_positions(monkeyp
     assert scheduler.cancel("b") is task_b
     assert task_b.status == "cancelled"
     assert task_b.active_runs == 0
+    await scheduler_module.drain_task_saves()
+    await asyncio.sleep(0)
     assert retired == ["b"]
     assert [entry["task_id"] for entry in scheduler.snapshot()["queued"]] == ["c"]
     assert scheduler.snapshot()["queued"][0]["queue_position"] == 1

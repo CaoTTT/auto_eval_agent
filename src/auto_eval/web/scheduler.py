@@ -109,9 +109,17 @@ class EvalScheduler:
             task.error = None
             event = "cancelled"
             message = "排队任务已取消"
-        queue_task_save(task, save=save_task)
+        saved = queue_task_save(task, save=save_task)
         task._fanout(event, {"message": message, "job_id": job.job_id})
-        retire_task(task)
+        if saved is None:
+            retire_task(task)
+        else:
+            # Saving pins the task; retry retirement only after the write ends.
+            # On disk failure retain the in-memory result for recovery.
+            saved.add_done_callback(
+                lambda future: retire_task(task)
+                if not future.cancelled() and future.result() else None
+            )
         return task
 
     def reprioritize(self, job_id: str, action: str) -> int | None:
@@ -198,6 +206,8 @@ class EvalScheduler:
                         retire_task(job.task)
                     finally:
                         self._running = None
+                        job = None  # The idle worker otherwise retains the last task.
+                        retry = None
                 self._wake.clear()
         finally:
             self._running = None

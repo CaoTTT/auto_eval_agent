@@ -12,6 +12,7 @@ import numpy as np
 from PIL import Image
 
 from .config import LongScreenshotConfig
+from .preparation import check_preparation
 
 
 ALGORITHM_VERSION = "long-screenshot-v1"
@@ -34,12 +35,14 @@ def image_tokens(width: int, height: int) -> int:
 
 
 def _read_image(path: Path) -> tuple[bytes, Image.Image, str]:
+    check_preparation()
     raw = path.read_bytes()
     with Image.open(io.BytesIO(raw)) as source:
         if source.format not in MIME_TYPES or getattr(source, "n_frames", 1) != 1:
             raise ValueError("长截图只支持静态 PNG/JPEG/WebP")
         mime = MIME_TYPES[source.format]
         source.load()  # 完整解码，损坏图片不得发送给裁判。
+        check_preparation()
         image = source.copy()
     return raw, image, mime
 
@@ -89,6 +92,8 @@ def boundary_signals(image: Image.Image) -> tuple[np.ndarray, np.ndarray]:
     statuses = np.full(height + 1, "risky", dtype="<U8")
     risks = np.full(height + 1, RISK_WEIGHTS["text"], dtype=np.float64)
     for y in range(1, height):
+        if y % 128 == 0:
+            check_preparation()
         lo, hi = max(0, y - 2), min(height, y + 2)
         edge = float(density[lo:hi].max())
         crossed = foreground[y - 1] & foreground[y]
@@ -111,6 +116,8 @@ def boundary_signals(image: Image.Image) -> tuple[np.ndarray, np.ndarray]:
     changes = np.diff(np.r_[False, safe, False].astype(np.int8))
     for start, end in zip(np.flatnonzero(changes == 1), np.flatnonzero(changes == -1)):
         for y in range(start, end):
+            if y % 128 == 0:
+                check_preparation()
             clearance = min(y - start + 1, end - y)
             risks[y] = -RISK_WEIGHTS["blank"] * min(clearance, 32) / 32
     risks[0] = risks[height] = 0
@@ -135,11 +142,14 @@ def _optimal_path(
     def boundary_order(index: int) -> tuple[int, ...]:
         path = []
         while index > 0:
+            check_preparation()
             path.append(index)
             index = int(previous[index])
         return tuple(reversed(path))
 
     for end in range(min_height, height + 1):
+        if end % 128 == 0:
+            check_preparation()
         low, high = max(0, end - max_height), end - min_height + 1
         if high <= low:
             continue
@@ -169,6 +179,7 @@ def _optimal_path(
 
 
 def _png_bytes(image: Image.Image, start: int, end: int) -> bytes:
+    check_preparation()
     with image.crop((0, start, image.width, end)) as part:
         buffer = io.BytesIO()
         part.save(buffer, format="PNG")
@@ -210,6 +221,7 @@ def prepare_long_screenshot(
             blocked: dict[int, set[int]] = {}
             valid_sizes: dict[tuple[int, int], int] = {}
             while True:
+                check_preparation()
                 cuts = _optimal_path(height, min_height, max_height, risks, blocked)
                 if cuts is None:
                     raise ValueError("原始宽度及编码大小限制下不存在合法的连续水平切片")
@@ -229,8 +241,11 @@ def prepare_long_screenshot(
             count = len(cuts) - 1
             paths, sizes = [], []
             for part_no, (start, end) in enumerate(zip(cuts, cuts[1:]), 1):
+                check_preparation()
                 part_path = output_dir / f"part_{part_no:03d}_of_{count:03d}.png"
-                part_path.write_bytes(_png_bytes(image, start, end))
+                data = _png_bytes(image, start, end)
+                check_preparation()
+                part_path.write_bytes(data)
                 paths.append(part_path)
                 sizes.append(valid_sizes[start, end])
             for y in cuts[1:-1]:
@@ -246,6 +261,7 @@ def prepare_long_screenshot(
             status_set = {b["status"] for b in meta["boundaries"]}
             meta["split_status"] = "risky" if "risky" in status_set else (
                 "fallback" if "fallback" in status_set else "safe")
+        check_preparation()
         meta["split_count"] = len(paths)
         meta["slices"] = [
             {"path": str(part_path), "start_y": start, "end_y": end,

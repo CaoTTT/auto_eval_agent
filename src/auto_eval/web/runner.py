@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 from ..paths import RUNS_DIR
+from ..preparation import run_preparation
 from ..config import AppConfig
 from ..judges import (
     JudgeClient,
@@ -375,15 +376,13 @@ def _make_item_evaluator(
                             if task.mode == "compare"
                             else prepare_session_rich_content_item
                         )
-                        prepared = await asyncio.wait_for(
-                            asyncio.to_thread(
-                                prepare_call,
-                                item_dict,
-                                session_name=task.session_name,
-                                item_index=idx,
-                                total_items=len(task.items),
-                                profile=rich_profile,
-                            ),
+                        prepared = await run_preparation(
+                            prepare_call,
+                            item_dict,
+                            session_name=task.session_name,
+                            item_index=idx,
+                            total_items=len(task.items),
+                            profile=rich_profile,
                             timeout=float(runtime_options.get("video_prepare_timeout_s") or 300),
                         )
                         item_dict.clear()
