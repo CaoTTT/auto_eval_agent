@@ -22,6 +22,7 @@ from ..judges import (
 from ..judges.base import flush_web_trace_records
 from ..judges.compare_protocols import resolve_compare_protocol
 from ..llm_stream import is_retriable_llm_error
+from ..long_screenshot import ContextBudgetExceeded, RISKY_REVIEW_REASON
 from ..observability import (
     bind_chain_context,
     error_details,
@@ -33,6 +34,7 @@ from .history import save_task
 from .video_prepare import (
     prepare_session_rich_content_item,
     prepare_session_visual_compare_item,
+    prepare_session_long_screenshot_item,
 )
 from .tasks import (
     Task,
@@ -146,7 +148,7 @@ def _compare_product_count(item: dict) -> int:
         return declared
     return 3 if any(
         item.get(field) not in (None, "", [])
-        for field in ("video3", "frames3", "context3", "answer3")
+        for field in ("video3", "screenshot3", "frames3", "context3", "answer3")
     ) else 2
 
 
@@ -328,20 +330,23 @@ def _make_item_evaluator(
                 )
                 last_error = None
                 res = None
-                needs_video_prepare = (
+                is_screenshot = task.mode == "compare" and (
+                    item_dict.get("evidence_mode") == "long_screenshot" or bool(item_dict.get("screenshot1"))
+                )
+                needs_visual_prepare = is_screenshot or (
                     not _compare_frames_ready(item_dict)
                     if task.mode == "compare"
                     else not item_dict.get("frames")
                 )
-                if needs_video_prepare:
+                if needs_visual_prepare:
                     try:
                         log_event(
-                            "视频准备",
-                            "校验视频并分析场景",
+                            "视觉证据准备" if is_screenshot else "视频准备",
+                            "校验长截图并选择切片边界" if is_screenshot else "校验视频并分析场景",
                             details={
-                                "视频路径": (
+                                "视觉证据路径": (
                                     [
-                                        item_dict.get(f"video{product_no}")
+                                        item_dict.get(f"{'screenshot' if is_screenshot else 'video'}{product_no}")
                                         for product_no in range(
                                             1, _compare_product_count(item_dict) + 1
                                         )
@@ -351,12 +356,12 @@ def _make_item_evaluator(
                                 )
                             },
                             progress=3,
-                            progress_message="正在校验视频并分析场景",
+                            progress_message="正在准备长截图视觉证据" if is_screenshot else "正在校验视频并分析场景",
                         )
                         if rich_profile is None:
                             raise ValueError("缺少 rich_content 视觉模式配置")
                         prepare_call = (
-                            prepare_session_visual_compare_item
+                            prepare_session_long_screenshot_item if is_screenshot else prepare_session_visual_compare_item
                             if task.mode == "compare"
                             else prepare_session_rich_content_item
                         )
@@ -380,24 +385,25 @@ def _make_item_evaluator(
                         elif item_dict.get("frames1"):
                             _frame_dir = str(Path(item_dict["frames1"][0]).parent)
                         log_event(
-                            "视频准备",
-                            "关键帧提取完成",
+                            "视觉证据准备" if is_screenshot else "视频准备",
+                            "长截图准备完成" if is_screenshot else "关键帧提取完成",
                             details={
-                                "关键帧数": item_dict.get("frame_count"),
-                                "抽帧目录": _frame_dir,
+                                "视觉证据图片数": item_dict.get("frame_count"),
+                                "证据目录": _frame_dir,
+                                **({"长截图预处理": [item_dict.get(f"screenshot_meta{n}") for n in range(1, _compare_product_count(item_dict) + 1)]} if is_screenshot else {}),
                             },
                             progress=12,
-                            progress_message=f"关键帧提取完成（{item_dict.get('frame_count', 0)} 帧）",
+                            progress_message=f"长截图准备完成（{item_dict.get('frame_count', 0)} 张）" if is_screenshot else f"关键帧提取完成（{item_dict.get('frame_count', 0)} 帧）",
                         )
                     except Exception as e:
                         last_error = e
                         log_event(
-                            "视频准备",
+                            "视觉证据准备" if is_screenshot else "视频准备",
                             "失败",
                             level=logging.ERROR,
                             details=error_details(e),
                             progress=12,
-                            progress_message="视频校验或抽帧失败",
+                            progress_message="长截图准备失败" if is_screenshot else "视频校验或抽帧失败",
                             progress_status="error",
                         )
                 if last_error is None:
@@ -458,6 +464,19 @@ def _make_item_evaluator(
                     }
                     if item_dict.get("context"):
                         res["context"] = item_dict["context"]
+                    if isinstance(last_error, ContextBudgetExceeded):
+                        res.update(
+                            error_type=last_error.code, needs_human_review=True,
+                            needs_review=True, needs_review_label="T",
+                            review_reasons=[str(last_error)], review_reason=str(last_error),
+                        )
+                    if is_screenshot and any(
+                        (item_dict.get(f"screenshot_meta{n}") or {}).get("split_status") == "risky"
+                        for n in range(1, _compare_product_count(item_dict) + 1)
+                    ):
+                        reasons = list(dict.fromkeys([*res.get("review_reasons", []), RISKY_REVIEW_REASON]))
+                        res.update(needs_human_review=True, needs_review=True, needs_review_label="T",
+                                   review_reasons=reasons, review_reason="；".join(reasons))
                     _write_eval_error(
                         task.id,
                         idx,
@@ -538,6 +557,7 @@ async def _run(task: Task, cfg: AppConfig) -> None:
 
 
 _PREPARED_ITEM_FIELDS = {
+    "evidence_mode", "screenshot_meta1", "screenshot_meta2", "screenshot_meta3",
     "frames", "frames1", "frames2", "frames3", "frame_count", "media",
     "video_name", "video1_path", "video2_path", "video3_path",
     "duration", "duration1", "duration2", "duration3",
@@ -991,6 +1011,10 @@ async def _eval_one(
                 else None
             ),
             product_count=product_count,
+            **({
+                "evidence_mode": "long_screenshot",
+                "screenshot_metas": [item_dict[f"screenshot_meta{n}"] for n in range(1, product_count + 1)],
+            } if item_dict.get("evidence_mode") == "long_screenshot" else {}),
         )
         out.update(compare_result)
         log_event(
@@ -1051,7 +1075,7 @@ def _summarize(task: Task) -> dict:
         "accuracy_aggregation_enabled": False,
         "needs_human_review_count": sum(
             bool(row.get("needs_human_review")) for row in valid
-        ),
+        ) + sum(bool(row.get("needs_human_review")) for row in res if row.get("error_type") == "context_budget_exceeded"),
     }
     max_product_count = max(
         (int(row.get("product_count") or 2) for row in valid),

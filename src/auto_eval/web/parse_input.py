@@ -77,11 +77,35 @@ def _compare_product_count(obj: dict) -> int:
         raise ValueError("product_count 只能是整数 2 或 3")
     has_product3 = any(
         obj.get(field) not in (None, "")
-        for field in ("video3", "context3", "answer3")
+        for field in ("video3", "screenshot3", "context3", "answer3")
     )
     if declared == 2 and has_product3:
         raise ValueError("product_count=2 时不能提供产品3字段")
     return 3 if declared == 3 or has_product3 else 2
+
+
+def compare_evidence_mode(obj: dict) -> tuple[int, str]:
+    """JSONL 与直接 API 共用校验，避免绕过互斥和产品数量约束。"""
+    count = _compare_product_count(obj)
+    modes = set()
+    for product_no in range(1, count + 1):
+        video = obj.get(f"video{product_no}")
+        screenshot = obj.get(f"screenshot{product_no}")
+        has_video = video not in (None, "")
+        has_screenshot = screenshot not in (None, "")
+        if has_video and has_screenshot:
+            raise ValueError(f"产品{product_no}不能同时提供 video 和 screenshot")
+        field = f"screenshot{product_no}" if has_screenshot else f"video{product_no}"
+        value = screenshot if has_screenshot else video
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"compare 模式缺少 {field} 或路径不是非空字符串")
+        modes.add("long_screenshot" if has_screenshot else "video_frames")
+    if len(modes) != 1:
+        raise ValueError("同一 Case 不能混用视频和长截图")
+    mode = modes.pop()
+    if obj.get("evidence_mode") not in (None, "", mode):
+        raise ValueError("evidence_mode 与输入证据类型不一致")
+    return count, mode
 
 
 def parse_text(text: str, mode: Mode) -> tuple[list[dict], list[str]]:
@@ -121,14 +145,15 @@ def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
             item["context"] = context.strip()
         if mode == "compare":
             try:
-                product_count = _compare_product_count(obj)
+                product_count, evidence_mode = compare_evidence_mode(obj)
             except ValueError as exc:
                 errors.append(f"第 {ln} 行 {exc}")
                 continue
             item["product_count"] = product_count
+            item["evidence_mode"] = evidence_mode
             invalid = False
             for product_no in range(1, product_count + 1):
-                field = f"video{product_no}"
+                field = f"{'screenshot' if evidence_mode == 'long_screenshot' else 'video'}{product_no}"
                 value = obj.get(field)
                 if not isinstance(value, str) or not value.strip():
                     errors.append(f"第 {ln} 行 compare 模式缺少 {field}")

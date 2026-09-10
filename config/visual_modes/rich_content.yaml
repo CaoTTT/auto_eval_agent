@@ -1,6 +1,16 @@
 name: rich_content
 display: 垂域视觉评测
 
+# 百炼单图限制；实际部署还需在裁判配置开启 vl_high_resolution_images。
+long_screenshot:
+  max_pixels: 16777216
+  max_data_url_bytes: 10485760
+  min_edge: 11
+  max_aspect_ratio: 200
+  max_input_tokens: 260096
+  context_window: 262144
+  output_reserve_tokens: 8192
+
 card_types:
   music: 音乐
   film_tv: 影视

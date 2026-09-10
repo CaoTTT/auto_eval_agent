@@ -26,7 +26,7 @@ from ..judges.compare_protocols import (
 )
 from ..media import probe_duration
 from ..paths import RUNS_DIR
-from .parse_input import Mode, parse_csv, parse_jsonl, parse_text
+from .parse_input import Mode, compare_evidence_mode, parse_csv, parse_jsonl, parse_text
 from .history import (
     build_xlsx,
     delete_snapshot,
@@ -165,7 +165,7 @@ def _resolve_operation_video_path(raw_path: str) -> Path:
 
 
 def _validate_eval_request(req: EvalReq, app_cfg) -> None:
-    """提交前校验：compare 模式支持完整的2或3产品视频输入。"""
+    """提交前校验：compare 模式支持完整的2或3产品同类视觉证据。"""
     selected = req.options.get("judges") or (
         [app_cfg.judges[0].name] if app_cfg.judges else []
     )
@@ -177,27 +177,11 @@ def _validate_eval_request(req: EvalReq, app_cfg) -> None:
     _compare_protocol_or_422(req.evaluation_profile)
     invalid: list[str] = []
     for index, item in enumerate(req.items, 1):
-        declared = item.get("product_count")
-        has_product3 = any(
-            item.get(field) not in (None, "")
-            for field in ("video3", "context3", "answer3")
-        )
-        if declared is not None and (
-            isinstance(declared, bool) or declared not in (2, 3)
-        ):
-            invalid.append(f"第{index}条 product_count 不是2或3")
-            continue
-        if declared == 2 and has_product3:
-            invalid.append(f"第{index}条 product_count=2 但提供了产品3字段")
-            continue
-        product_count = 3 if declared == 3 or has_product3 else 2
-        missing = [
-            f"video{product_no}"
-            for product_no in range(1, product_count + 1)
-            if not str(item.get(f"video{product_no}") or "").strip()
-        ]
-        if missing:
-            invalid.append(f"第{index}条缺少{'/'.join(missing)}")
+        try:
+            product_count, evidence_mode = compare_evidence_mode(item)
+            item.update(product_count=product_count, evidence_mode=evidence_mode)
+        except ValueError as exc:
+            invalid.append(f"第{index}条 {exc}")
     if invalid:
         preview = "；".join(invalid[:8])
         suffix = "……" if len(invalid) > 8 else ""

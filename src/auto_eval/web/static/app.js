@@ -105,7 +105,7 @@ createApp({
     const formatHint = computed(
       () =>
         ({
-          compare: "逐题导入 JSONL：product_count可为2或3；双产品填写video1/2，三产品再填写video3；context1/2/3、answer1/2/3可选。",
+          compare: "逐题导入 JSONL：product_count可为2或3；每题统一填写screenshot1/2/3长截图路径，或video1/2/3录屏路径；context1/2/3、answer1/2/3可选。",
           rich_content: "可逐题上传，也可导入 JSONL：query、context(可选)、video_path、category/answer_text/task_start_time/task_end_time(均可选)；普通图片不算挂卡，回答区域蓝色文字按 Superlink 统计。",
         }[mode.value])
     );
@@ -619,7 +619,11 @@ createApp({
             category: item.category === "default" ? "" : (item.category || ""),
             videoName: String(item.video_path || "").split(/[\\/]/).pop(),
             videoPath: item.video_path || item.video1 || "",
-            productCount: item.product_count || (item.video3 ? 3 : 2),
+            productCount: item.product_count || (item.video3 || item.screenshot3 ? 3 : 2),
+            evidenceMode: item.evidence_mode || (item.screenshot1 ? "long_screenshot" : "video_frames"),
+            screenshot1Path: item.screenshot1 || "",
+            screenshot2Path: item.screenshot2 || "",
+            screenshot3Path: item.screenshot3 || "",
             answer: mode.value === "compare" ? (item.answer1 || "") : (item.answer_text || ""),
             answer1: item.answer1 || "",
             answer2: item.answer2 || "",
@@ -651,7 +655,10 @@ createApp({
     function opItemReady(it) {
       if (!it.query.trim()) return false;
       if (mode.value !== "compare") return Boolean((it.frames || []).length || it.videoPath);
-      const productCount = Number(it.productCount) === 3 || it.video3Path ? 3 : 2;
+      const productCount = Number(it.productCount) === 3 || it.video3Path || it.screenshot3Path ? 3 : 2;
+      if (it.evidenceMode === "long_screenshot") {
+        return Boolean(it.screenshot1Path && it.screenshot2Path && (productCount === 2 || it.screenshot3Path));
+      }
       return Boolean(
         (it.video1Path || it.videoPath)
         && it.video2Path
@@ -668,7 +675,7 @@ createApp({
       runError.value = "";
       const valid = opItems.value.filter(opItemReady);
       if (!valid.length) {
-        alert("请为每题填写 query，并提供视频路径或上传视频后再评估。");
+        alert("请为每题填写 query，并导入完整的长截图或录屏路径后再评估。");
         return;
       }
       const submittedItems = valid.map((it, idx) => {
@@ -679,16 +686,23 @@ createApp({
           context: (it.context || "").trim(),
         };
         if (mode.value === "compare") {
-          const productCount = Number(it.productCount) === 3 || it.video3Path ? 3 : 2;
+          const productCount = Number(it.productCount) === 3 || it.video3Path || it.screenshot3Path ? 3 : 2;
           item.product_count = productCount;
-          item.video1 = it.video1Path || it.videoPath || "";
-          item.video2 = it.video2Path || "";
+          if (it.evidenceMode === "long_screenshot") {
+            item.evidence_mode = "long_screenshot";
+            item.screenshot1 = it.screenshot1Path;
+            item.screenshot2 = it.screenshot2Path;
+            if (productCount === 3) item.screenshot3 = it.screenshot3Path;
+          } else {
+            item.video1 = it.video1Path || it.videoPath || "";
+            item.video2 = it.video2Path || "";
+            if (productCount === 3) item.video3 = it.video3Path || "";
+          }
           item.context1 = (it.context1 || "").trim();
           item.context2 = (it.context2 || "").trim();
           item.answer1 = (it.answer1 || it.answer || "").trim();
           item.answer2 = (it.answer2 || "").trim();
           if (productCount === 3) {
-            item.video3 = it.video3Path || "";
             item.context3 = (it.context3 || "").trim();
             item.answer3 = (it.answer3 || "").trim();
           }

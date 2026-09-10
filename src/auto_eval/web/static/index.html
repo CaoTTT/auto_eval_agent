@@ -116,11 +116,12 @@
             导入{{ mode==='compare' ? '垂域视觉对比' : '垂域视觉评测' }} JSONL / CSV
           </label>
           <span v-if="opPreparing" class="running">正在解析…</span>
-          <span v-else-if="items.length" class="ok">✓ 已导入 {{ items.length }} 条（开始评估时抽帧）</span>
+          <span v-else-if="items.length" class="ok">✓ 已导入 {{ items.length }} 条（开始评估时准备视觉证据）</span>
           <span v-if="datasetName" class="hint">数据集：{{ datasetName }}</span>
           <span v-if="errors.length" class="err">⚠ {{ errors.length }} 条未导入</span>
         </div>
         <p v-if="mode==='compare'" class="hint">双产品示例：{"id":"c001","query":"查询天气","product_count":2,"video1":"./video_a.mp4","video2":"./video_b.mp4","answer1":"今天多云","answer2":"今天晴"}<br>三产品示例再增加："product_count":3、"video3"、"context3"、"answer3"。</p>
+        <p v-if="mode==='compare'" class="hint">长截图示例：{"id":"c002","query":"查询天气","screenshot1":"./product1.png","screenshot2":"./product2.png","answer1":"今天多云","answer2":"今天晴"}；三产品增加 screenshot3。路径须为服务可读取的本地文件，同一题不可混用截图与录屏。</p>
         <p v-else class="hint">示例：{"id":"rich_001","query":"北京明天天气怎么样","context":"当前地点北京","video_path":"data/rich_content/weather.mp4","category":"weather","answer_text":"北京明天晴","task_start_time":0,"task_end_time":18.5}</p>
         <details v-if="errors.length"><summary>导入错误明细</summary><pre>{{ errors.join('\n') }}</pre></details>
       </div>

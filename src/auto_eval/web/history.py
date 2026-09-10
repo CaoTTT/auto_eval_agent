@@ -372,7 +372,8 @@ def export_rows(snapshot: dict) -> dict[str, list[dict]]:
     }
     frame_rows = _frame_manifest_rows(snapshot)
     if frame_rows:
-        rows["抽帧清单"] = frame_rows
+        has_screenshots = any(item.get("evidence_mode") == "long_screenshot" for item in snapshot.get("items", []))
+        rows["视觉证据清单" if has_screenshots else "抽帧清单"] = frame_rows
     rows["运行信息"] = [_run_info(snapshot)]
     if summary:
         rows["汇总指标"] = [_flatten_dict(summary, skip_keys={"by_category"})]
@@ -452,6 +453,7 @@ def _aligned_results(snapshot: dict, results: list[dict]) -> list[dict]:
 
 
 _RUNTIME_ITEM_FIELDS = {
+    "evidence_mode", "screenshot_meta1", "screenshot_meta2", "screenshot_meta3",
     "frames",
     "frames1",
     "frames2",
@@ -556,6 +558,20 @@ def _source_data_for_item(item: dict) -> dict:
 def _item_visual_streams(item: dict) -> list[dict[str, Any]]:
     """统一返回 rich_content 单路或 compare 双/三路视频及关键帧。"""
     source = _source_data_for_item(item)
+    if item.get("evidence_mode") == "long_screenshot" or item.get("screenshot1") or source.get("screenshot1"):
+        count = item.get("product_count") or (3 if item.get("screenshot3") or source.get("screenshot3") else 2)
+        streams = []
+        for product_no in range(1, count + 1):
+            meta = item.get(f"screenshot_meta{product_no}") or {}
+            original = meta.get("original_path") or item.get(f"screenshot{product_no}") or source.get(f"screenshot{product_no}") or ""
+            streams.append({
+                "product_no": product_no, "evidence_mode": "long_screenshot",
+                "source_video": "", "runtime_video": "", "duration": "",
+                "original_path": str(PROJECT_ROOT / original) if original else "",
+                "screenshot_meta": meta,
+                "frames": [PROJECT_ROOT / str(path) for path in item.get(f"frames{product_no}", [])],
+            })
+        return streams
     has_numbered_streams = any(
         item.get(field) not in (None, "", []) or source.get(field) not in (None, "", [])
         for field in ("video1", "video2", "video3", "frames1", "frames2", "frames3")
@@ -563,6 +579,7 @@ def _item_visual_streams(item: dict) -> list[dict[str, Any]]:
     if not has_numbered_streams:
         media = item.get("media") or []
         return [{
+            "evidence_mode": "video_frames",
             "product_no": None,
             "source_video": source.get("video_path") or item.get("video_path") or "",
             "runtime_video": item.get("video_path") or (media[0] if media else ""),
@@ -580,6 +597,7 @@ def _item_visual_streams(item: dict) -> list[dict[str, Any]]:
     streams: list[dict[str, Any]] = []
     for product_no in range(1, product_count + 1):
         streams.append({
+            "evidence_mode": "video_frames",
             "product_no": product_no,
             "source_video": source.get(f"video{product_no}") or "",
             "runtime_video": item.get(f"video{product_no}_path") or (
@@ -613,6 +631,15 @@ def _dataset_rows(snapshot: dict) -> list[dict]:
             product_no = stream["product_no"]
             prefix = f"产品{product_no}" if product_no is not None else ""
             frames = stream["frames"]
+            if stream["evidence_mode"] == "long_screenshot":
+                meta = stream["screenshot_meta"]
+                row.update({
+                    f"{prefix}原始长截图": meta.get("original_path", ""),
+                    f"{prefix}视觉证据图片": "\n".join(part["path"] for part in meta.get("slices", [])),
+                    f"{prefix}图片数量": len(frames),
+                    f"{prefix}切分状态": meta.get("split_status", "未准备"),
+                })
+                continue
             frame_project_paths = [
                 path for path in (
                     _project_relative_path(frame) for frame in frames
@@ -656,13 +683,23 @@ def _frame_manifest_rows(snapshot: dict) -> list[dict]:
     for item_index, item in enumerate(snapshot.get("items") or []):
         streams = _item_visual_streams(item)
         if not any(
-            stream["source_video"] or stream["runtime_video"] or stream["frames"]
+            stream["source_video"] or stream["runtime_video"] or stream["frames"] or stream.get("original_path")
             for stream in streams
         ):
             continue
         for stream in streams:
             product_no = stream["product_no"]
             frames = stream["frames"]
+            if stream["evidence_mode"] == "long_screenshot":
+                meta = stream["screenshot_meta"]
+                for part_no, part in enumerate(meta.get("slices") or [{}], 1):
+                    rows.append({
+                        "数据集序号": item_index + 1, "id": item.get("id") or f"q{item_index}",
+                        "产品序号": product_no, "图片序号": part_no,
+                        "视觉证据路径": part.get("path", ""), "起始行": part.get("start_y"),
+                        "结束行": part.get("end_y"), "切分状态": meta.get("split_status", "未准备"),
+                    })
+                continue
             selected, _ = _frame_metadata(frames[0].parent) if frames else ({}, {})
             base = {
                 "数据集序号": item_index + 1,
@@ -950,6 +987,26 @@ def write_frames_zip(
             for stream in _item_visual_streams(item):
                 product_no = stream["product_no"]
                 frames = stream["frames"]
+                if stream["evidence_mode"] == "long_screenshot":
+                    stream_dir = f"{item_dir}/product{product_no}"
+                    meta = stream["screenshot_meta"]
+                    evidence_paths = [("original", stream["original_path"])] + [
+                        (f"part_{n:03d}", str(frame)) for n, frame in enumerate(frames, 1)
+                    ]
+                    for label, raw_path in evidence_paths:
+                        path = Path(raw_path) if raw_path else None
+                        exists = bool(path and path.is_file())
+                        archive_path = f"{stream_dir}/{label}{path.suffix}" if exists else ""
+                        if exists:
+                            zf.write(path, archive_path)
+                        manifest.append({
+                            "dataset_index": item_index + 1, "id": raw_id, "product_no": product_no,
+                            "evidence_mode": "long_screenshot", "image_role": label,
+                            "image_path": archive_path, "status": "ok" if exists else "missing",
+                            "split_status": meta.get("split_status", "未准备"),
+                        })
+                    zf.writestr(f"{stream_dir}/screenshot.json", json.dumps(meta, ensure_ascii=False, indent=2))
+                    continue
                 selected, metadata = (
                     _frame_metadata(frames[0].parent) if frames else ({}, {})
                 )
@@ -1129,7 +1186,7 @@ def load_item_judge_calls(
 
 
 _PRODUCT3_XLSX_COLUMN_PREFIXES = (
-    "产品3", "answer3", "context3", "video3", "frames3", "duration3",
+    "产品3", "answer3", "context3", "video3", "screenshot3", "frames3", "duration3",
 )
 
 
@@ -1146,7 +1203,7 @@ def _compare_snapshot_uses_product3(snapshot: dict) -> bool:
         if any(
             candidate.get(field) not in (None, "", [])
             for candidate in candidates
-            for field in ("answer3", "context3", "video3", "frames3", "duration3")
+            for field in ("answer3", "context3", "video3", "screenshot3", "frames3", "duration3")
         ):
             return True
     return False

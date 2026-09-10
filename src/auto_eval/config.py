@@ -30,6 +30,7 @@ class JudgeConfig(BaseModel):
     retry_base_s: float = 1.0
     retry_max_s: float = 20.0
     stream_include_usage: bool = True
+    vl_high_resolution_images: bool = False
 
     def api_key(self) -> str | None:
         return os.environ.get(self.api_key_env) if self.api_key_env else None
@@ -50,6 +51,18 @@ class VisualExtractionConfig(BaseModel):
     jpeg_quality: int = 85
 
 
+class LongScreenshotConfig(BaseModel):
+    """单图限制均针对实际发送内容；Base64 上限为严格小于。"""
+
+    max_pixels: int = Field(default=16_777_216, gt=0)
+    max_data_url_bytes: int = Field(default=10 * 1024 * 1024, gt=0)
+    min_edge: int = Field(default=11, ge=11)
+    max_aspect_ratio: float = Field(default=200, ge=1, allow_inf_nan=False)
+    max_input_tokens: int = Field(default=260_096, gt=0)
+    context_window: int = Field(default=262_144, gt=0)
+    output_reserve_tokens: int = Field(default=8192, gt=0)
+
+
 class VisualModeProfile(BaseModel):
     """独立于垂域分类的视频视觉评估配置。"""
 
@@ -58,6 +71,7 @@ class VisualModeProfile(BaseModel):
     card_types: dict[str, str] = Field(default_factory=dict)
     category_display: dict[str, str] = Field(default_factory=dict)  # category → 中文垂域名（未命中显示原始 category）
     extraction: VisualExtractionConfig
+    long_screenshot: LongScreenshotConfig = Field(default_factory=LongScreenshotConfig)
 
 
 class AppConfig(BaseModel):
