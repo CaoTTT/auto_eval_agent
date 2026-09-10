@@ -15,6 +15,7 @@ import json
 import math
 from numbers import Real
 from typing import Literal
+from ..query_images import normalize_query_input
 
 Mode = Literal[
     "compare",
@@ -145,6 +146,7 @@ def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
             item["context"] = context.strip()
         if mode == "compare":
             try:
+                item.update(normalize_query_input(obj))
                 product_count, evidence_mode = compare_evidence_mode(obj)
             except ValueError as exc:
                 errors.append(f"第 {ln} 行 {exc}")

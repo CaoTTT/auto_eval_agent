@@ -374,6 +374,15 @@ def export_rows(snapshot: dict) -> dict[str, list[dict]]:
         "逐题结果": result_rows,
     }
     frame_rows = _frame_manifest_rows(snapshot)
+    query_rows = _query_image_rows(snapshot)
+    if query_rows:
+        rows["提问图片清单"] = query_rows
+        for index, result_row in enumerate(result_rows):
+            item = snapshot["items"][index]
+            result_row.update({"题型": "图文题" if item.get("query_images") else "文字题",
+                               "提问图片": item.get("query_images", []),
+                               "提问图片元数据": item.get("query_image_meta", []),
+                               "输入指纹": item.get("input_manifest_sha256", "")})
     if frame_rows:
         has_screenshots = any(item.get("evidence_mode") == "long_screenshot" for item in snapshot.get("items", []))
         rows["视觉证据清单" if has_screenshots else "抽帧清单"] = frame_rows
@@ -660,7 +669,25 @@ def _dataset_rows(snapshot: dict) -> list[dict]:
                 f"{prefix}抽帧数量": len(frames),
                 f"{prefix}录屏时长（秒）": stream["duration"],
             })
+        if item.get("query_images") or "query_images" in source:
+            row.update(input_modality="text_image" if item.get("query_images") else "text", query_images=item.get("query_images", []),
+                       query_image_meta=item.get("query_image_meta", []),
+                       input_manifest_sha256=item.get("input_manifest_sha256", ""))
         rows.append(row)
+    return rows
+
+
+def _query_image_rows(snapshot: dict) -> list[dict]:
+    rows = []
+    for index, item in enumerate(snapshot.get("items", [])):
+        metas = item.get("query_image_meta") or []
+        for image_no, source in enumerate(item.get("query_images") or []):
+            meta = metas[image_no] if image_no < len(metas) else {}
+            rows.append({"数据集序号": index + 1, "id": item.get("id", f"q{index}"),
+                         "query": item.get("query", ""), "query_image_id": f"QI{image_no + 1}",
+                         "image_role": "query_image", "source_path": source, **meta,
+                         "input_manifest_sha256": item.get("input_manifest_sha256", ""),
+                         "status": "prepared" if meta else "未准备或失败"})
     return rows
 
 
@@ -987,6 +1014,18 @@ def write_frames_zip(
             raw_id = str(item.get("id") or f"q{item_index + 1}")
             safe_id = _safe_name(raw_id).strip("_")[:100] or f"q{item_index + 1}"
             item_dir = f"{sequence}_{safe_id}"
+            for meta in _query_image_rows({"items": [item]}):
+                for role, key, hash_key in (("original", "original_path", "original_sha256"), ("model", "path", "sha256")):
+                    path = Path(meta[key]) if meta.get(key) else None
+                    exists = bool(path and path.is_file())
+                    actual_hash = hashlib.sha256(path.read_bytes()).hexdigest() if exists else None
+                    matches = exists and actual_hash == meta.get(hash_key)
+                    archive_path = f"{item_dir}/query/{meta['query_image_id']}-{role}{path.suffix}" if matches else ""
+                    if matches:
+                        zf.write(path, archive_path)
+                    manifest.append({**meta, "dataset_index": item_index + 1,
+                                     "view_role": role, "image_path": archive_path,
+                                     "status": "ok" if matches else "missing_or_changed"})
             for stream in _item_visual_streams(item):
                 product_no = stream["product_no"]
                 frames = stream["frames"]
@@ -1280,16 +1319,48 @@ def _write_xlsx(snapshot: dict, destination) -> None:
     with zipfile.ZipFile(destination, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         images = WpsCellImages(zf)
         screenshot_rows = _original_screenshot_rows(snapshot, images)
+        query_rows = _query_image_rows(snapshot)
+        query_cells: list[CellImage | str] = [""] * len(snapshot.get("items", []))
+        if query_rows:
+            embedded = []
+            for row in query_rows:
+                entry = {"数据集序号": row["数据集序号"], "id": row["id"], "query": row["query"]}
+                try:
+                    entry["提问原图"] = images.add(row.get("original_path", ""), row.get("original_sha256"))
+                except OriginalImageError as exc:
+                    entry["提问原图"] = str(exc)
+                query_cells[row["数据集序号"] - 1] = entry["提问原图"]
+                embedded.append(entry)
+            sheets["提问图片"] = embedded
         if screenshot_rows:
             sheets["原始长截图"] = screenshot_rows
+        if query_rows:
+            for sheet_name, query_header in (("数据集明细", "query"), ("逐题结果", "题目"), ("原始长截图", "query")):
+                if sheet_name in sheets:
+                    sheets[sheet_name] = _insert_query_image_column(sheets[sheet_name], query_cells, query_header)
         images.write_parts()
         zf.writestr("[Content_Types].xml", _content_types(len(sheets), images.content_types_xml()))
         zf.writestr("_rels/.rels", _root_rels())
-        zf.writestr("xl/workbook.xml", _workbook_xml(list(sheets), bool(screenshot_rows)))
+        zf.writestr("xl/workbook.xml", _workbook_xml(list(sheets), bool(screenshot_rows or query_rows)))
         zf.writestr("xl/_rels/workbook.xml.rels", _workbook_rels(len(sheets), bool(images.images)))
-        zf.writestr("xl/styles.xml", _styles_xml(bool(screenshot_rows)))
+        zf.writestr("xl/styles.xml", _styles_xml(bool(screenshot_rows or query_rows)))
         for i, (name, rows) in enumerate(sheets.items(), start=1):
-            zf.writestr(f"xl/worksheets/sheet{i}.xml", _sheet_xml(rows, picture_sheet=name == "原始长截图"))
+            zf.writestr(f"xl/worksheets/sheet{i}.xml", _sheet_xml(rows, picture_sheet=name in {"原始长截图", "提问图片"}))
+
+
+def _insert_query_image_column(rows: list[dict], images: list[CellImage | str], query_header: str) -> list[dict]:
+    """Keep dataset order, including text/failed rows; reuse immutable image cells."""
+    output = []
+    for index, row in enumerate(rows):
+        enriched = {}
+        for key, value in row.items():
+            if key == "输入图片原图":
+                continue
+            enriched[key] = value
+            if key == query_header:
+                enriched["输入图片原图"] = images[index]
+        output.append(enriched)
+    return output
 
 
 def _headers(rows: list[dict]) -> list[str]:
@@ -1409,7 +1480,7 @@ def _sheet_xml(rows: list[dict], *, picture_sheet: bool = False) -> str:
         cells = []
         for c_idx, value in enumerate(row, start=1):
             ref = f"{_col(c_idx)}{r_idx}"
-            style = ' s="1"' if r_idx == 1 else (' s="2"' if picture_sheet else "")
+            style = ' s="1"' if r_idx == 1 else (' s="2"' if picture_sheet or isinstance(value, CellImage) else "")
             if isinstance(value, CellImage):
                 # 仅可信 CellImage 生成公式；Query 等输入仍按原来的纯文本方式导出。
                 formula = escape(value.formula)
@@ -1424,6 +1495,8 @@ def _sheet_xml(rows: list[dict], *, picture_sheet: bool = False) -> str:
             else:
                 cells.append(f'<c r="{ref}" t="inlineStr"{style}><is><t>{escape(_cell(value))}</t></is></c>')
         height = ' ht="240" customHeight="1"' if picture_sheet and r_idx > 1 else ""
+        if not picture_sheet and r_idx > 1 and any(isinstance(value, CellImage) for value in row):
+            height = ' ht="96" customHeight="1"'
         rows_xml.append(f'<row r="{r_idx}"{height}>{"".join(cells)}</row>')
     cols = "".join(
         f'<col min="{i}" max="{i}" width="{36 if picture_sheet and h.startswith("产品") else _width(h)}" customWidth="1"/>'
@@ -1452,6 +1525,8 @@ def _col(idx: int) -> str:
 
 
 def _width(header: str) -> int:
+    if header == "输入图片原图":
+        return 24
     if header in {"query", "answer", "generated_answer", "rationale", "理由", "options"}:
         return 42
     if header.startswith("理由_"):

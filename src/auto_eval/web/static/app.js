@@ -43,6 +43,41 @@ createApp({
     const resultBrowser = ref(null);
     const activeSkill = ref("");
     const resultQuery = ref("");
+    const modalityFilter = ref("");
+    const modalityCounts = computed(() => ({
+      text: opItems.value.filter(it => !(it.queryImages || []).length).length,
+      text_image: opItems.value.filter(it => (it.queryImages || []).length).length,
+    }));
+    function queryImageMetas(r) {
+      return r.query_image_meta || items.value[r.index]?.query_image_meta || [];
+    }
+    const evidenceImageErrors = ref({});
+    const evidenceRevisions = ref({});
+    let nextEvidenceRevision = 0;
+    function refreshEvidence(resultRows) {
+      for (const row of resultRows) {
+        if (row && row.index != null) evidenceRevisions.value[row.index] = ++nextEvidenceRevision;
+      }
+      evidenceImageErrors.value = {};
+    }
+    function evidenceImages(r) {
+      const images = queryImageMetas(r).filter(meta => meta.preview_url).map(meta => ({
+        key: meta.preview_url, label: `用户提问图片 ${meta.query_image_id || 'QI1'}`,
+        previewUrl: meta.preview_url, downloadUrl: `${meta.preview_url}?original=true`, longScreenshot: false,
+      }));
+      const index = Number(r.index);
+      const item = items.value[index] || {};
+      if (!taskId.value || !Number.isInteger(index) || index < 0) return images;
+      const source = item.source_data || {};
+      if (item.evidence_mode === 'video_frames') return images;
+      const count = item.product_count || (item.screenshot3 || source.screenshot3 ? 3 : 2);
+      for (let n = 1; n <= count; n++) {
+        if (!(item[`screenshot${n}`] || item[`screenshot_meta${n}`]?.original_path || source[`screenshot${n}`])) continue;
+        const url = `/api/eval/${encodeURIComponent(taskId.value)}/items/${index}/screenshots/${n}?revision=${evidenceRevisions.value[index] || 0}`;
+        images.push({key:url, label:`产品 ${n} 回答长截图`, previewUrl:url, downloadUrl:`${url}&download=true`, longScreenshot:true});
+      }
+      return images;
+    }
     const resultPage = ref(1);
     const resultPageSize = ref(10);
     const progressPage = ref(1);
@@ -114,7 +149,7 @@ createApp({
     const formatHint = computed(
       () =>
         ({
-          compare: "逐题导入 JSONL：product_count可为2或3；每题统一填写screenshot1/2/3长截图路径，或video1/2/3录屏路径；context1/2/3、answer1/2/3可选。",
+          compare: "支持文字题与图文题混合导入：query_images 可选填一张提问图片路径；product_count 为2或3；同题统一用 screenshot1/2/3 或 video1/2/3，不同题可以不同。整批使用同一标准。",
           rich_content: "可逐题上传，也可导入 JSONL：query、context(可选)、video_path、category/answer_text/task_start_time/task_end_time(均可选)；普通图片不算挂卡，回答区域蓝色文字按 Superlink 统计。",
         }[mode.value])
     );
@@ -449,6 +484,8 @@ createApp({
     const filteredResults = computed(() => {
       const q = resultQuery.value.trim().toLowerCase();
       return skillResults.value.filter((r) => {
+        const modality = r.input_modality || ((items.value[r.index]?.query_images || []).length ? "text_image" : "text");
+        if (modalityFilter.value && modality !== modalityFilter.value) return false;
         if (q && !`${r.item_id || ""} ${r.query || ""} ${r.context || ""} ${r.answer_text || ""} ${r.answer1 || ""} ${r.answer2 || ""} ${r.answer3 || ""} ${(r.card_contents || []).join(" ")} ${(r.superlink_texts || []).join(" ")} ${r.rationale || ""}`.toLowerCase().includes(q)) return false;
         return true;
       });
@@ -555,7 +592,29 @@ createApp({
 
     // —— 视频评测：逐题卡片（query + 可选 context + 视频上传 + 可选 answer_text）——
     function newOpItem() {
-      return { _uiKey: ++opItemSequence, id: "", query: "", context: "", category: "", productCount: 2, videoName: "", videoPath: "", video1Path: "", video2Path: "", video3Path: "", frames: [], frameCount: 0, duration: 0, answer: "", answer1: "", answer2: "", answer3: "", context1: "", context2: "", context3: "", taskStartTime: null, taskEndTime: null, sourceLine: null, sourceData: null, sessionGroup: null, turnIndex: null, uploading: false, uploadError: "" };
+      return { _uiKey: ++opItemSequence, id: "", query: "", queryImages: [], queryImageMeta: [], queryUploading: false, queryUploadError: "", evidenceMode: "video_frames", screenshot1Path: "", screenshot2Path: "", screenshot3Path: "", context: "", category: "", productCount: 2, videoName: "", videoPath: "", video1Path: "", video2Path: "", video3Path: "", frames: [], frameCount: 0, duration: 0, answer: "", answer1: "", answer2: "", answer3: "", context1: "", context2: "", context3: "", taskStartTime: null, taskEndTime: null, sourceLine: null, sourceData: null, sessionGroup: null, turnIndex: null, uploading: false, uploadError: "" };
+    }
+    async function onQueryImage(event, index) {
+      const item = opItems.value[index];
+      const file = event.target.files?.[0];
+      if (!file || !item) return;
+      item.queryUploading = true;
+      item.queryUploadError = "";
+      try {
+        const form = new FormData();
+        form.append("file", file);
+        const response = await fetch("/api/upload/query-image", { method: "POST", body: form });
+        const data = await response.json();
+        if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : data.detail?.message || "上传失败");
+        item.queryImages = [data.original_path];
+        item.queryImageMeta = [data];
+      } catch (error) { item.queryUploadError = error.message; }
+      finally { item.queryUploading = false; event.target.value = ""; }
+    }
+    function setQueryImagePath(item, path) {
+      item.queryImages = path.trim() ? [path.trim()] : [];
+      item.queryImageMeta = [];
+      item.queryUploadError = "";
     }
     function addOpItem() {
       opItems.value.push(newOpItem());
@@ -637,6 +696,8 @@ createApp({
             ...newOpItem(),
             id: item.id || "",
             query: item.query || "",
+            queryImages: [...(item.query_images || [])],
+            queryImageMeta: item.query_image_meta || [],
             context: item.context || "",
             category: item.category === "default" ? "" : (item.category || ""),
             videoName: String(item.video_path || "").split(/[\\/]/).pop(),
@@ -689,7 +750,7 @@ createApp({
     }
 
     const canSubmit = computed(() =>
-      !opPreparing.value && opItems.value.some(opItemReady)
+      !opPreparing.value && !opItems.value.some(it => it.queryUploading) && opItems.value.some(opItemReady)
     );
 
     async function submit() {
@@ -710,6 +771,7 @@ createApp({
           context: (it.context || "").trim(),
         };
         if (mode.value === "compare") {
+          item.query_images = [...(it.queryImages || [])];
           const productCount = Number(it.productCount) === 3 || it.video3Path || it.screenshot3Path ? 3 : 2;
           item.product_count = productCount;
           if (it.evidenceMode === "long_screenshot") {
@@ -908,6 +970,7 @@ createApp({
         };
       });
       results.value = snapshotResults;
+      refreshEvidence(snapshotResults);
       progress.value = snapshotResults.length;
       itemProgress.value = reconciled;
       if (snapshot?.summary) summary.value = snapshot.summary;
@@ -929,6 +992,7 @@ createApp({
         const data = JSON.parse(e.data);
         // 一次恢复结果和当前进度，旧结果不能覆盖正在补跑的状态。
         results.value = data.results || [];
+        refreshEvidence(results.value);
         itemProgress.value = data.item_progress || {};
         progressEvents.value = {};
         progress.value = data.progress;
@@ -967,6 +1031,7 @@ createApp({
         if (!isSelected()) return;
         const d = JSON.parse(e.data);
         const result = d.result;
+        refreshEvidence([result]);
         const index = result && result.index;
         if (index == null) {
           results.value.push(result);
@@ -1318,7 +1383,25 @@ createApp({
         }
         datasetName.value = d.dataset_name || "";
         items.value = d.items || [];
+        if (d.mode === "compare") {
+          opItems.value = items.value.map(item => ({
+            ...newOpItem(), id: item.id || "", query: item.query || item.question || "",
+            context: item.context || "", category: item.category || "",
+            queryImages: [...(item.query_images || [])], queryImageMeta: item.query_image_meta || [],
+            productCount: item.product_count || (item.video3 || item.screenshot3 ? 3 : 2),
+            evidenceMode: item.evidence_mode || (item.screenshot1 ? "long_screenshot" : "video_frames"),
+            ...Object.fromEntries([1, 2, 3].flatMap(n => [
+              [`video${n}Path`, item[`video${n}`] || ""], [`screenshot${n}Path`, item[`screenshot${n}`] || ""],
+              [`answer${n}`, item[`answer${n}`] || ""], [`context${n}`, item[`context${n}`] || ""],
+            ])), taskStartTime: item.task_start_time ?? null, taskEndTime: item.task_end_time ?? null,
+            sourceData: item.source_data || null, sourceLine: item.source_line ?? null,
+            sessionGroup: item.session_group ?? null, turnIndex: item.turn_index ?? null,
+          }));
+          opPage.value = 1;
+        }
+        modalityFilter.value = "";
         results.value = d.results || [];
+        refreshEvidence(results.value);
         itemProgress.value = d.item_progress || {};
         restoreProgressEvents(d.progress_events);
         expandedProgressLogs.value = {};
@@ -1399,6 +1482,8 @@ createApp({
     function itemArtifactUrl(result, format) {
       const index = Number(result && result.index);
       if (!taskId.value || !Number.isInteger(index) || index < 0) return "";
+      const item = items.value[index] || {};
+      if (format === 'video' && (item.evidence_mode === 'long_screenshot' || item.screenshot1)) return "";
       return `/api/eval/${taskId.value}/items/${index}/export?format=${encodeURIComponent(format)}`;
     }
 
@@ -1440,6 +1525,8 @@ createApp({
       resultJumpPage,
       resultBrowser,
       activeSkill, resultQuery, resultPage, resultPageSize,
+      modalityFilter, modalityCounts, queryImageMetas, onQueryImage, setQueryImagePath,
+      evidenceImages, evidenceImageErrors,
       skillTabs, filteredResults, pagedResults, pageCount, resultTableWidth,
       formatHint, resultCols, opItems, pagedOpItems, opPreparing, canSubmit,
       switchMode, onOpManifestFile, submit, cell, columnWidth, exportCsv, exportJson, exportXlsx, exportFrames, itemArtifactUrl, addOpItem, removeOpItem, onOpVideo, onOpDrop,

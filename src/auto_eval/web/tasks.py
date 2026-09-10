@@ -148,6 +148,11 @@ def merge_items_by_id(
         iid = raw["id"]
         if iid in id_to_index:
             idx = id_to_index[iid]
+            old = task.items[idx]
+            if old.get("query_images") or raw.get("query_images"):
+                task.results = [r for r in task.results if str(r.get("index")) != str(idx)]
+                task.item_progress.pop(str(idx), None)
+                task.progress_events.pop(str(idx), None)
             task.items[idx] = raw  # 全量替换：新 dict，无旧 frames/历史总结
             replaced.append(iid)
         else:

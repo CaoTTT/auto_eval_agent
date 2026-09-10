@@ -117,6 +117,48 @@ def assert_valid_package(archive):
                 assert target in names
 
 
+def test_question_original_immediately_after_query_in_result_sheets(tmp_path, monkeypatch):
+    original = tmp_path / "question.jpg"
+    exif = Image.Exif()
+    exif[274] = 6
+    Image.new("RGB", (120, 80), "red").save(original, exif=exif)
+    raw = original.read_bytes()
+    model_view = tmp_path / "model-view.png"
+    make_image(model_view, size=(80, 120), color="blue")
+    answer = tmp_path / "answer.png"
+    make_image(answer, color="green")
+    items = [screenshot_item([answer, answer], index=i) for i in range(3)]
+    items[1].update(query_images=[str(original)], query_image_meta=[{
+        "original_path": str(original), "original_sha256": hashlib.sha256(raw).hexdigest(),
+        "path": str(model_view), "query_image_id": "QI1",
+    }])
+    items[2].update(query_images=["missing.png"], query_image_meta=[{"original_path": str(tmp_path / "missing.png")}])
+    before = snapshot(items)
+    unchanged = json.dumps(before)
+    for method in ("save", "resize", "convert", "crop"):
+        monkeypatch.setattr(Image.Image, method, lambda *a, **k: pytest.fail("必须嵌入原文件，不能重编码"))
+    archive, sheets = workbook(history.build_xlsx(before))
+    for name, query_header in (("数据集明细", "query"), ("逐题结果", "题目"), ("原始长截图", "query")):
+        sheet = sheets[name]
+        labels = headers(sheet)
+        column = labels.index(query_header) + 1
+        assert labels[column] == "输入图片原图"
+        rows = sheet.findall("s:sheetData/s:row", NS)
+        assert len(rows) == 4
+        assert cell_text(rows[1][column]) == ""  # Text-only first row does not move later images.
+        assert "原图文件缺失" in cell_text(rows[3][column])
+        assert embedded_cells(archive, sheet)[f"{history._col(column + 1)}3"] == raw
+        if name != "原始长截图":
+            assert rows[2].attrib["ht"] == "96"
+            assert "ht" not in rows[1].attrib
+    media = [archive.read(name) for name in archive.namelist() if name.startswith("xl/media/")]
+    assert media.count(raw) == 1  # All sheets share one byte-identical embedded original.
+    assert model_view.read_bytes() not in media
+    assert json.dumps(before) == unchanged
+    assert all("输入图片原图" not in row for row in history.export_rows(before)["逐题结果"])
+    assert_valid_package(archive)
+
+
 @pytest.mark.parametrize("count", [2, 3])
 def test_one_query_per_row_product_columns_and_originals_only(tmp_path, monkeypatch, count):
     items, expected = [], {}

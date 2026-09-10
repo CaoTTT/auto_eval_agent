@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import json
 import time
 import uuid
@@ -27,6 +28,8 @@ from ..judges.compare_protocols import (
 )
 from ..media import probe_duration
 from ..paths import RUNS_DIR
+from ..query_images import normalize_query_input, PREPARED_FIELDS, prepare_query_images, QueryImageError
+from ..preparation import run_preparation
 from .parse_input import Mode, compare_evidence_mode, parse_csv, parse_jsonl, parse_text
 from .history import (
     write_xlsx,
@@ -44,6 +47,7 @@ from .history import (
 )
 from .video_prepare import (
     VIDEO_EXTENSIONS,
+    operation_video_roots,
     resolve_operation_video_path,
 )
 from .runner import run_eval, run_retry, run_update_batch, spawn_background
@@ -149,6 +153,8 @@ def _protocol_manifest(protocol, app_cfg, options: dict) -> dict:
     visual_profile = app_cfg.visual_modes.get("rich_content")
     if visual_profile is not None:
         manifest["media_algorithm_version"] = visual_profile.extraction.algorithm_version
+        manifest["visual_profile"] = visual_profile.model_dump()
+        manifest["input_schema_version"] = "1.1"
     selected = options.get("judges") or (
         [app_cfg.judges[0].name] if app_cfg.judges else []
     )
@@ -157,7 +163,9 @@ def _protocol_manifest(protocol, app_cfg, options: dict) -> dict:
             "name": judge.name,
             "model": judge.model,
             "temperature": judge.temperature,
+            "top_p": judge.top_p,
             "seed": judge.seed,
+            "vl_high_resolution_images": judge.vl_high_resolution_images,
         }
         for judge in app_cfg.judges
         if judge.name in selected
@@ -177,12 +185,15 @@ def _validate_eval_request(req: EvalReq, app_cfg) -> None:
     selected_judges = [judge for judge in app_cfg.judges if judge.name in selected]
     if not selected_judges:
         selected_judges = app_cfg.judges[:1]
-    if req.mode != "compare" or not selected_judges:
+    if req.mode != "compare":
         return
     _compare_protocol_or_422(req.evaluation_profile)
     invalid: list[str] = []
     for index, item in enumerate(req.items, 1):
         try:
+            item.update(normalize_query_input(item))
+            for field in PREPARED_FIELDS:
+                item.pop(field, None)
             product_count, evidence_mode = compare_evidence_mode(item)
             item.update(product_count=product_count, evidence_mode=evidence_mode)
         except ValueError as exc:
@@ -463,6 +474,9 @@ async def api_eval_items(req: EvalItemsReq):
     created = task is None
     if task is not None and task.repair_status in {"queued", "running"}:
         raise HTTPException(409, "任务正在失败补跑，暂不能同时更新 items")
+    if task is not None and any(it.get("query_images") for it in [*task.items, *req.items]):
+        if task.active_runs or task.status in {"pending", "queued", "running"}:
+            raise HTTPException(409, "图文任务正在运行，请完成或取消后再替换题目")
     mode = req.mode if created else task.mode
     if created:
         if req.mode is None:
@@ -474,6 +488,14 @@ async def api_eval_items(req: EvalItemsReq):
     # compare 模式校验只针对本次批次 items（命中替换的条目也全部重评），
     # 放在 new_task 之前，避免校验失败留下空任务。
     requested_profile = req.evaluation_profile
+    if not created and mode == "compare":
+        old_items = {item.get("id"): item for item in task.items}
+        for item in req.items:
+            old = old_items.get(item.get("id"), {})
+            if old.get("query_images") and "query_images" not in item:
+                raise HTTPException(422, "替换图文题必须显式提交 query_images；移除图片请传 []")
+        if any(item.get("query_images") for item in req.items) and task.protocol_manifest.get("input_schema_version") != "1.1":
+            raise HTTPException(422, "旧任务实现不支持提问图片，请新建任务")
     if not created and requested_profile and requested_profile != task.evaluation_profile:
         raise HTTPException(
             422,
@@ -486,15 +508,14 @@ async def api_eval_items(req: EvalItemsReq):
         if mode == "compare"
         else None
     )
-    _validate_eval_request(
-        EvalReq(
-            mode=mode,
-            items=req.items,
-            options=req.options,
-            evaluation_profile=protocol.id if protocol else None,
-        ),
-        app_cfg,
+    validated_request = EvalReq(
+        mode=mode,
+        items=req.items,
+        options=req.options,
+        evaluation_profile=protocol.id if protocol else None,
     )
+    _validate_eval_request(validated_request, app_cfg)
+    req.items = validated_request.items
     if created:
         task = new_task(
             mode,
@@ -583,6 +604,51 @@ async def api_item_result(task_id: str, item_id: str):
 
 _MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 模块常量便于测试 monkeypatch
 _UPLOAD_CHUNK = 1024 * 1024
+
+
+@app.post("/api/upload/query-image")
+async def api_upload_query_image(file: UploadFile = File(...)):
+    policy = cfg().visual_modes["rich_content"].query_images
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
+        raise HTTPException(422, "仅支持静态 PNG/JPEG/WebP")
+    upload_dir = RUNS_DIR / "query_uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    path = upload_dir / (uuid.uuid4().hex + suffix)
+    try:
+        size = 0
+        with path.open("wb") as dest:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > policy.max_file_bytes:
+                    raise HTTPException(413, "提问图片上传大小超限")
+                dest.write(chunk)
+        prepared = await run_preparation(
+            prepare_query_images, {"query": "上传预览", "query_images": [str(path)]},
+            session_name="uploads", cfg=policy, timeout=60,
+        )
+        meta = prepared["query_image_meta"][0]
+        return {"path": meta["original_path"], **meta}
+    except QueryImageError as exc:
+        raise HTTPException(422, {"code": exc.code, "message": str(exc)}) from exc
+    finally:
+        path.unlink(missing_ok=True)
+        await file.close()
+
+
+@app.get("/api/query-images/{image_id}")
+def api_query_image(image_id: str, original: bool = False):
+    if len(image_id) != 32 or any(c not in "0123456789abcdef" for c in image_id):
+        raise HTTPException(404, "图片不存在")
+    root = (RUNS_DIR / "query_images").resolve()
+    registry = root / "registry" / f"{image_id}.json"
+    if not registry.is_file():
+        raise HTTPException(404, "图片不存在")
+    meta = json.loads(registry.read_text(encoding="utf-8"))
+    path = Path(meta["original_path" if original else "path"]).resolve()
+    if not path.is_relative_to(root) or not path.is_file():
+        raise HTTPException(404, "图片不可用")
+    return FileResponse(path, filename=path.name if original else None)
 
 
 @app.post("/api/upload/video")
@@ -905,6 +971,51 @@ def api_export_item(task_id: str, item_index: int, format: str):
         )
 
     raise HTTPException(400, "format 必须是 video、frames_zip 或 judge_calls")
+
+
+@app.get("/api/eval/{task_id}/items/{item_index}/screenshots/{product_no}")
+def api_item_screenshot(task_id: str, item_index: int, product_no: int, download: bool = False):
+    """Serve only the original screenshot bound to this task/product, never a slice."""
+    from PIL import Image
+
+    if product_no not in (1, 2, 3):
+        raise HTTPException(404, "产品不存在")
+    task = peek_task(task_id, touch=False)
+    data = task_to_snapshot(task) if task else load_snapshot(task_id)
+    if not data or not 0 <= item_index < len(data.get("items") or []):
+        raise HTTPException(404, "题目不存在")
+    item = data["items"][item_index]
+    source = item.get("source_data") or {}
+    meta = item.get(f"screenshot_meta{product_no}") or {}
+    raw = meta.get("original_path") or item.get(f"screenshot{product_no}") or source.get(f"screenshot{product_no}")
+    count = item.get("product_count") or (3 if item.get("screenshot3") or source.get("screenshot3") else 2)
+    if not raw or product_no > count or item.get("evidence_mode") == "video_frames":
+        raise HTTPException(404, "该产品没有回答长截图")
+    path = Path(raw).expanduser()
+    path = (path if path.is_absolute() else BASE_DIR / path).resolve()
+    if not any(path.is_relative_to(root) for root in operation_video_roots(BASE_DIR)) or not path.is_file():
+        raise HTTPException(404, "长截图不存在或不在授权目录")
+    try:
+        with Image.open(path) as image:
+            if image.format not in {"PNG", "JPEG", "WEBP"} or getattr(image, "n_frames", 1) != 1:
+                raise ValueError("不支持的长截图格式")
+            mime = Image.MIME[image.format]
+            image.verify()
+        if meta.get("original_sha256"):
+            with path.open("rb") as file:
+                digest = hashlib.sha256()
+                for chunk in iter(lambda: file.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            if digest.hexdigest() != meta["original_sha256"]:
+                raise HTTPException(409, "原始长截图已变化，无法展示本次评测原图")
+    except HTTPException:
+        raise
+    except (OSError, ValueError) as exc:
+        raise HTTPException(404, "长截图无法读取") from exc
+    stem = _download_stem(str(item.get("id") or item_index + 1), "item")
+    return FileResponse(path, media_type=mime,
+                        filename=f"{stem}_product{product_no}_original{path.suffix.lower()}" if download else None,
+                        headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
 
 
 @app.get("/")

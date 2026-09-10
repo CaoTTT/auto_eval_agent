@@ -40,6 +40,20 @@ category_display:
   sports: 体育
   weather: 天气
 
+# 本地保守预算，非厂商能力声明；部署前按实际模型/网关调整。
+query_images:
+  allowed_roots: [] # 项目与 runs 默认授权；其他数据目录在此显式添加
+  max_file_bytes: 10485760
+  max_data_url_bytes: 10485760
+  max_pixels: 16777216
+  min_edge: 11
+  max_request_images: 64
+  max_request_bytes: 67108864
+  request_overhead_bytes: 65536
+  max_input_tokens: 260096
+  context_window: 262144
+  output_reserve_tokens: 8192
+
 extraction:
   algorithm_version: rich-content-v1.1.0
   default_start_time: 0.0

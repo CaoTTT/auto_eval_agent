@@ -12,6 +12,8 @@ from typing import Any, Literal
 from pydantic import ValidationError
 
 from ..config import VisualModeProfile
+from ..query_images import encode_query_image, check_request_budget, input_manifest
+from ..preparation import run_preparation, check_preparation
 from ..media import encode_frame
 from ..long_screenshot import (
     RISKY_REVIEW_REASON, check_context_budget, encode_original_image,
@@ -20,6 +22,7 @@ from ..paths import resolve_project_path
 from ..schema import VisualCompareObservation
 from .base import JudgeClient, JudgeOutputParseError
 from .prompts import parse_json_loose
+from .query_image_prompt import QUERY_IMAGE_INSTRUCTIONS
 from .compare_protocols import (
     CompareProtocol,
     DIMENSIONS,
@@ -267,6 +270,7 @@ class VisualCompareJudge:
         product_count: Literal[2, 3] | None = None,
         evidence_mode: str = "video_frames",
         screenshot_metas: list[dict] | None = None,
+        query_image_meta: list[dict] | None = None,
         evaluation_time: datetime | None = None,
         stream_callback=None,
     ) -> dict[str, Any]:
@@ -290,6 +294,13 @@ class VisualCompareJudge:
             product_count=actual_product_count,
             evidence_mode=evidence_mode,
         )
+        query_metas = query_image_meta or []
+        if len(query_metas) > 1:
+            raise ValueError("首版每题仅支持一张提问图片")
+        if query_metas:
+            if self.protocol.bundle_revision in {"0.2.0", "0.3.0"}:
+                raise ValueError("旧实现版本不支持提问图片，请新建任务")
+            system += QUERY_IMAGE_INSTRUCTIONS
         user = self.protocol.user_template.render(
             evaluation_datetime=evaluation_datetime,
             question=question,
@@ -319,7 +330,16 @@ class VisualCompareJudge:
             frame_groups = (frames1, frames2, frames3) if actual_product_count == 3 else (frames1, frames2)
             content_parts = [{"type": "text", "text": user}]
             image_metadata = []
+            for meta in query_metas:
+                content_parts.extend([
+                    {"type": "text", "text": f"提问图片 {meta['query_image_id']} 开始：共享用户题目，不是产品回答"},
+                    {"type": "image_url", "image_url": {"url": encode_query_image(meta, self.profile.query_images)}},
+                    {"type": "text", "text": f"提问图片 {meta['query_image_id']} 结束"},
+                ])
+                image_metadata.append({**meta, "ref_path": meta["path"]})
+                user_image_refs.append(meta["path"])
             for product_no, frames in enumerate(frame_groups, 1):
+                check_preparation()
                 if not frames:
                     if is_screenshot:
                         raise ValueError(f"产品{product_no}缺少长截图证据")
@@ -347,7 +367,7 @@ class VisualCompareJudge:
                     content_parts.append({"type": "text", "text": f"产品{product_no}长截图结束"})
                     user_image_refs.extend(frames)
                     continue
-                user_images.extend(
+                encoded_frames = list(
                     encode_frame(
                         Path(path),
                         max_edge=extraction.max_edge,
@@ -355,15 +375,36 @@ class VisualCompareJudge:
                     )
                     for path in frames
                 )
+                if query_metas:
+                    for frame_no, (path, encoded) in enumerate(zip(frames, encoded_frames), 1):
+                        content_parts.extend([
+                            {"type": "text", "text": f"产品{product_no}回答录屏第{frame_no}帧开始"},
+                            {"type": "image_url", "image_url": {"url": encoded}},
+                            {"type": "text", "text": f"产品{product_no}回答录屏第{frame_no}帧结束"},
+                        ])
+                        image_metadata.append({"image_role": "product_answer", "product_no": product_no,
+                                               "frame_no": frame_no, "ref_path": path})
+                else:
+                    user_images.extend(encoded_frames)
                 user_image_refs.extend(frames)
 
             return user_images, user_image_refs, content_parts, image_metadata
 
-        user_images, user_image_refs, content_parts, image_metadata = await asyncio.to_thread(prepare_images)
+        user_images, user_image_refs, content_parts, image_metadata = (
+            await run_preparation(prepare_images, timeout=60) if query_metas
+            else await asyncio.to_thread(prepare_images)
+        )
 
         started = time.perf_counter()
-        if is_screenshot:
-            check_context_budget(system, [p["text"] for p in content_parts if p["type"] == "text"], metas, self.profile.long_screenshot)
+        request_views = []
+        if query_metas:
+            request_views = await run_preparation(check_request_budget, system, content_parts, self.profile.query_images, timeout=60)
+            for metadata, view in zip(image_metadata, request_views, strict=True):
+                metadata.update(view)
+                metadata.setdefault("image_role", "product_answer")
+        if is_screenshot or query_metas:
+            if is_screenshot:
+                check_context_budget(system, [p["text"] for p in content_parts if p["type"] == "text"], metas, self.profile.long_screenshot)
             raw_output = await self.client.complete(
                 system, user, stream_callback=stream_callback,
                 content_parts=content_parts, image_metadata=image_metadata,
@@ -424,4 +465,11 @@ class VisualCompareJudge:
                 f"{system}\0{user}".encode("utf-8")
             ).hexdigest(),
         })
+        if query_metas:
+            identity = {**self.protocol.public_metadata(), "original_hashes": [m["original_sha256"] for m in query_metas], "answers": [answer1, answer2, answer3],
+                        "contexts": [context1, context2, context3]}
+            result["input_manifest_sha256"] = input_manifest(
+                question, context, content_parts, request_views, identity,
+                self.profile.query_images.model_dump(),
+            )
         return result

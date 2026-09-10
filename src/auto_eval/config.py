@@ -63,6 +63,22 @@ class LongScreenshotConfig(BaseModel):
     output_reserve_tokens: int = Field(default=8192, gt=0)
 
 
+class QueryImageConfig(BaseModel):
+    """Local conservative limits; operators must verify their model/gateway."""
+
+    allowed_roots: list[str] = Field(default_factory=list)
+    max_file_bytes: int = Field(default=10 * 1024 * 1024, gt=0)
+    max_data_url_bytes: int = Field(default=10 * 1024 * 1024, gt=0)
+    max_pixels: int = Field(default=16_777_216, gt=0)
+    min_edge: int = Field(default=11, ge=1)
+    max_request_images: int = Field(default=64, gt=0)
+    max_request_bytes: int = Field(default=64 * 1024 * 1024, gt=0)
+    request_overhead_bytes: int = Field(default=65536, ge=0)
+    max_input_tokens: int = Field(default=260_096, gt=0)
+    context_window: int = Field(default=262_144, gt=0)
+    output_reserve_tokens: int = Field(default=8192, gt=0)
+
+
 class VisualModeProfile(BaseModel):
     """独立于垂域分类的视频视觉评估配置。"""
 
@@ -72,6 +88,7 @@ class VisualModeProfile(BaseModel):
     category_display: dict[str, str] = Field(default_factory=dict)  # category → 中文垂域名（未命中显示原始 category）
     extraction: VisualExtractionConfig
     long_screenshot: LongScreenshotConfig = Field(default_factory=LongScreenshotConfig)
+    query_images: QueryImageConfig = Field(default_factory=QueryImageConfig)
 
 
 class AppConfig(BaseModel):

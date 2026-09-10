@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <title>auto_eval 评估台</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260908_protocol_versions">
+  <link rel="stylesheet" href="/static/style.css?v=20260910_vqa_images">
   <style>
     .op-cards { display:flex; flex-direction:column; gap:12px; }
     .op-card { border:1px solid #e2e8f0; border-radius:8px; padding:12px; background:#fafbfc; }
@@ -153,7 +153,36 @@
         <div v-if="entry.item.videoPath" class="op-path">{{ entry.item.videoPath }}</div>
         <textarea v-model="entry.item.answer" rows="2" placeholder="(可选) answer_text，只辅助理解回答语义，不能证明画面中存在挂卡或蓝色链接"></textarea>
       </div>
-      <div class="pagination" v-if="opPageCount>1 && mode!=='compare'">
+      <template v-if="mode==='compare'">
+        <p class="hint">文字题 {{ modalityCounts.text }} · 图文题 {{ modalityCounts.text_image }} · 全部使用本任务所选标准。每题可选一张提问图片。</p>
+        <div v-for="entry in pagedOpItems" :key="entry.item._uiKey" class="op-card">
+          <div class="op-card-head"><strong>题目 {{ entry.index+1 }} · {{ entry.item.queryImages.length ? '图文题' : '文字题' }}</strong>
+            <button v-if="opItems.length>1" @click="removeOpItem(entry.index)" class="btn-danger">删除</button></div>
+          <textarea v-model="entry.item.query" rows="2" placeholder="用户问题（必填）"></textarea>
+          <textarea v-model="entry.item.context" rows="2" placeholder="共享背景（可选）"></textarea>
+          <div class="query-image-panel">
+            <strong>用户提问图片（可选）</strong>
+            <input :value="entry.item.queryImages[0] || ''" @input="setQueryImagePath(entry.item, $event.target.value)" placeholder="授权本地图片路径，留空为文字题" :disabled="entry.item.queryUploading">
+            <label class="op-upload-btn"><input type="file" accept=".png,.jpg,.jpeg,.webp" @change="onQueryImage($event, entry.index)" :disabled="entry.item.queryUploading" hidden>上传 / 替换提问图片</label>
+            <button v-if="entry.item.queryImages.length" @click="setQueryImagePath(entry.item, '')" :disabled="entry.item.queryUploading">移除图片</button>
+            <span v-if="entry.item.queryUploading">上传中…</span><span class="err">{{ entry.item.queryUploadError }}</span>
+            <span v-for="meta in entry.item.queryImageMeta" :key="meta.image_id">
+              <a :href="meta.preview_url" target="_blank" rel="noopener"><img :src="meta.preview_url" class="query-image-preview" alt="用户提问图片">查看图片</a>
+              <a :href="meta.preview_url+'?original=true'" class="row-export-link">下载原图</a>
+            </span>
+          </div>
+          <label>回答证据 <select v-model="entry.item.evidenceMode"><option value="video_frames">录屏视频</option><option value="long_screenshot">回答长截图</option></select></label>
+          <label>产品数 <select v-model.number="entry.item.productCount"><option :value="2">2</option><option :value="3">3</option></select></label>
+          <div v-for="n in entry.item.productCount" :key="n" class="answer-evidence-panel">
+            <strong>产品 {{ n }} 回答证据</strong>
+            <input v-if="entry.item.evidenceMode==='long_screenshot'" v-model="entry.item['screenshot'+n+'Path']" placeholder="回答长截图路径">
+            <input v-else v-model="entry.item['video'+n+'Path']" placeholder="录屏视频路径">
+            <textarea v-model="entry.item['answer'+n]" rows="2" placeholder="产品回答文字（可选）"></textarea>
+            <input v-model="entry.item['context'+n]" placeholder="产品背景（可选）">
+          </div>
+        </div>
+      </template>
+      <div class="pagination" v-if="opPageCount>1">
         <span class="page-size page-size-fixed">每页 {{ opPageSize }} 条</span>
         <button @click="changeOpPage(-1)" :disabled="opPage<=1">上一页</button>
         <template v-for="page in paginationPages(opPage, opPageCount)" :key="'operation-page-'+page">
@@ -166,7 +195,7 @@
           <button @click="jumpTablePage('operation')">确定</button>
         </span>
       </div>
-      <button v-if="mode!=='compare'" @click="addOpItem" class="op-add">+ 添加题目</button>
+      <button @click="addOpItem" class="op-add">+ 添加题目</button>
     </div>
   </section>
 
@@ -294,7 +323,7 @@
       <button @click="exportCsv" :disabled="!taskId || !!loadingTaskId">导出 CSV</button>
       <button @click="exportJson" :disabled="!taskId || !!loadingTaskId">导出 JSON</button>
       <button @click="exportXlsx()" :disabled="!taskId || !!loadingTaskId || !!exportingTaskId">导出 XLSX（完整）</button>
-      <button v-if="isVideoMode" @click="exportFrames" :disabled="!taskId || !!loadingTaskId">导出抽帧 ZIP</button>
+      <button v-if="isVideoMode" @click="exportFrames" :disabled="!taskId || !!loadingTaskId">导出视觉证据 ZIP</button>
       <span v-if="loadingTaskId">正在加载任务，请稍候…</span>
       <button v-if="summary && summary.failed" @click="retryFailedCases(null)" :disabled="retrySubmitting || ['queued','running'].includes(repairStatus)">
         {{ retrySubmitting ? '提交中…' : '重跑全部失败项' }}
@@ -305,6 +334,7 @@
       <span v-if="retryStatusLabel(repairStatus)" class="running">{{ retryStatusLabel(repairStatus) }}</span>
     </h2>
     <div class="summary" v-if="summary">
+      <span v-if="summary.input_modality_counts">文字题 {{ summary.input_modality_counts.text }} · 图文题 {{ summary.input_modality_counts.text_image }}</span>
       <span>样本量 {{ summary.total }}</span>
       <span>成功评测 {{ summary.done }}</span>
       <span v-if="summary.failed">失败 {{ summary.failed }}</span>
@@ -325,9 +355,20 @@
       </div>
       <div class="result-filters">
         <input v-model="resultQuery" @input="resetResultPage" placeholder="搜索题号、query、context、回答或理由">
+        <select v-if="mode==='compare'" v-model="modalityFilter" @change="resetResultPage"><option value="">全部题型</option><option value="text">文字题</option><option value="text_image">图文题</option></select>
         <span class="result-count">共 {{ filteredResults.length }} 条</span>
       </div>
       <div class="result-table-wrap">
+        <details v-if="summary && summary.by_input_modality">
+          <summary>按题型查看汇总（沿用任务统一标准）</summary>
+          <div v-for="(sub, key) in summary.by_input_modality" :key="key" class="query-image-panel">
+            <strong>{{ key==='text' ? '文字题' : '图文题' }}</strong> · 样本 {{ sub.total }} · 成功 {{ sub.done }} · 失败 {{ sub.failed }} · 可比较 {{ sub.comparable }}
+            <p v-for="dim in [['understanding','理解需求'],['service_closure','服务闭环'],['scenario_fulfillment','场景化满足'],['intuitive_efficiency','直观高效'],['evidence_quality','证据质量'],['guided_recommendation','引导推荐']]" :key="dim[0]">
+              {{ dim[1] }} · 适用 {{ sub[dim[0]+'_applicable'] }} · 完整评分 {{ sub[dim[0]+'_scored'] }} ·
+              <span v-for="n in sub.product_count" :key="n">产品{{ n }}均分 {{ sub[dim[0]+'_answer'+n+'_avg'] ?? 'N/A' }} </span>
+            </p>
+          </div>
+        </details>
         <table class="grid results compact-results" :style="{ width: resultTableWidth + 'px' }">
           <colgroup>
             <col style="width:48px">
@@ -342,7 +383,7 @@
               <th>#</th><th>补跑</th>
               <th v-for="c in resultCols" :key="c.key">{{ c.label }}</th>
               <th v-if="isVideoMode">原视频（MP4）</th>
-              <th v-if="isVideoMode">抽帧结果（ZIP）</th>
+              <th v-if="isVideoMode">视觉证据（ZIP）</th>
               <th v-if="isVideoMode">轨迹数据（JSON）</th>
             </tr>
           </thead>
@@ -377,6 +418,22 @@
                   <span v-else>—</span>
                 </td>
               </tr>
+              <tr v-if="evidenceImages(r).length"><td colspan="99" class="query-image-panel">
+                <details open>
+                  <summary>输入图片与回答长截图 · {{ evidenceImages(r).length }} 张</summary>
+                  <div class="evidence-gallery">
+                    <figure v-for="picture in evidenceImages(r)" :key="picture.key" class="evidence-card">
+                      <figcaption>{{ picture.label }}</figcaption>
+                      <p v-if="evidenceImageErrors[picture.key]" class="err">图片不可用或原文件已变化，请检查源文件。</p>
+                      <a v-else :href="picture.previewUrl" target="_blank" rel="noopener" class="evidence-image-scroll" :class="{'is-long-screenshot':picture.longScreenshot}">
+                        <img :src="picture.previewUrl" :alt="picture.label" loading="lazy" @error="evidenceImageErrors[picture.key]=true">
+                      </a>
+                      <div class="evidence-card-actions"><a :href="picture.previewUrl" target="_blank" rel="noopener">查看原图</a><a :href="picture.downloadUrl">下载原图</a></div>
+                      <small v-if="picture.longScreenshot">可上下滚动查看完整长截图</small>
+                    </figure>
+                  </div>
+                </details>
+              </td></tr>
               <tr v-if="r.error" class="result-error-detail"><td colspan="99">评估失败：{{ r.error }}</td></tr>
             </template>
           </tbody>
@@ -416,6 +473,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20260910_background_export"></script>
+  <script type="module" src="/static/app.js?v=20260910_vqa_images"></script>
 </body>
 </html>

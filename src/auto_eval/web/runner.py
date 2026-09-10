@@ -14,7 +14,8 @@ from pathlib import Path
 
 from ..paths import RUNS_DIR
 from ..preparation import run_preparation
-from ..config import AppConfig
+from ..config import AppConfig, VisualModeProfile
+from ..query_images import prepare_query_images, QueryImageError, PREPARED_FIELDS
 from ..judges import (
     JudgeClient,
     RichContentJudge,
@@ -146,6 +147,8 @@ def _to_evalitem(item: dict, idx: int) -> EvalItem:
     return EvalItem(
         id=item.get("id", f"q{idx}"),
         question=item["query"],
+        query_images=item.get("query_images") or [],
+        input_modality="text_image" if item.get("query_images") else "text",
         context=item.get("context"),
         category=item.get("category", "default"),
         media=item.get("media") or [],
@@ -226,13 +229,24 @@ def _make_item_evaluator(
     runtime_options = options if options is not None else task.options
     compare_protocol = (
         resolve_compare_protocol(
-            task.evaluation_profile or runtime_options.get("evaluation_profile")
+            task.evaluation_profile or runtime_options.get("evaluation_profile"),
+            task.protocol_manifest.get("bundle_revision"),
         )
         if task.mode == "compare"
         else None
     )
     selected = runtime_options.get("judges") or [cfg.judges[0].name]
     judges_cfg = [j for j in cfg.judges if j.name in selected] or cfg.judges[:1]
+    frozen_judges = task.protocol_manifest.get("judges") or []
+    if task.protocol_manifest.get("input_schema_version") == "1.1" and frozen_judges:
+        configured = {j.name: j for j in cfg.judges}
+        judges_cfg = []
+        for frozen in frozen_judges:
+            if frozen["name"] not in configured:
+                raise ValueError("冻结裁判配置不可用，请恢复配置或新建任务")
+            judges_cfg.append(configured[frozen["name"]].model_copy(update={
+                key: value for key, value in frozen.items() if key != "name"
+            }))
     # R3：构造中途失败（如某个 judge 缺 base_url）时，已建客户端的连接池会
     # 无人关闭而泄漏——先登记再逐个构造，失败时交后台任务关闭后重抛。
     clients: list[JudgeClient] = []
@@ -244,6 +258,8 @@ def _make_item_evaluator(
             spawn_background(_aclose_judge_clients(clients))
         raise
     rich_profile = cfg.visual_modes.get("rich_content")
+    if task.mode == "compare" and task.protocol_manifest.get("visual_profile"):
+        rich_profile = VisualModeProfile.model_validate(task.protocol_manifest["visual_profile"])
     rich_judges = (
         [RichContentJudge(client, rich_profile) for client in clients]
         if rich_profile is not None
@@ -341,6 +357,7 @@ def _make_item_evaluator(
                 )
                 last_error = None
                 res = None
+                item_dict.pop("input_manifest_sha256", None)
                 is_screenshot = task.mode == "compare" and (
                     item_dict.get("evidence_mode") == "long_screenshot" or bool(item_dict.get("screenshot1"))
                 )
@@ -415,6 +432,24 @@ def _make_item_evaluator(
                             progress_message="长截图准备失败" if is_screenshot else "视频校验或抽帧失败",
                             progress_status="error",
                         )
+                if last_error is None and task.mode == "compare":
+                    try:
+                        if item_dict.get("query_images"):
+                            if rich_profile is None:
+                                raise ValueError("缺少视觉模式配置")
+                            prepared_query = await run_preparation(
+                                prepare_query_images, item_dict, session_name=task.session_name,
+                                cfg=rich_profile.query_images,
+                                timeout=float(runtime_options.get("video_prepare_timeout_s") or 300),
+                            )
+                            item_dict.update(prepared_query)
+                            _persist_task(task)
+                        else:
+                            item_dict.update(query_images=[], input_modality="text")
+                            for field in PREPARED_FIELDS:
+                                item_dict.pop(field, None)
+                    except Exception as exc:
+                        last_error = exc
                 if last_error is None:
                     for attempt in range(2):
                         try:
@@ -473,7 +508,7 @@ def _make_item_evaluator(
                     }
                     if item_dict.get("context"):
                         res["context"] = item_dict["context"]
-                    if isinstance(last_error, ContextBudgetExceeded):
+                    if isinstance(last_error, (ContextBudgetExceeded, QueryImageError)):
                         res.update(
                             error_type=last_error.code, needs_human_review=True,
                             needs_review=True, needs_review_label="T",
@@ -494,6 +529,15 @@ def _make_item_evaluator(
                         request_id=request_id,
                     )
             res["index"] = idx
+            if task.mode == "compare":
+                res.update(input_modality="text_image" if item_dict.get("query_images") else "text",
+                           query_images=item_dict.get("query_images") or [],
+                           evidence_mode=item_dict.get("evidence_mode", "video_frames"))
+                for field in PREPARED_FIELDS:
+                    if field in item_dict and field != "input_manifest_sha256":
+                        res[field] = item_dict[field]
+                if res.get("input_manifest_sha256"):
+                    item_dict["input_manifest_sha256"] = res["input_manifest_sha256"]
             if pending_judge_traces:
                 await asyncio.to_thread(
                     flush_web_trace_records,
@@ -523,7 +567,7 @@ async def _run(task: Task, cfg: AppConfig) -> None:
     sessions: dict[str, list[int]] = {}
     standalone: list[int] = []
     for i, it in enumerate(task.items):
-        grp = it.get("session_group")
+        grp = it.get("session_group") if task.mode != "compare" else None
         if task.mode == "rich_content" and grp:
             sessions.setdefault(str(grp), []).append(i)
         else:
@@ -537,7 +581,7 @@ async def _run(task: Task, cfg: AppConfig) -> None:
         prior_summary = ""
         for turn_no, idx in enumerate(idxs, 1):
             it = task.items[idx]
-            if prior_summary:
+            if prior_summary and task.mode != "compare":
                 base_ctx = (it.get("context") or "").strip()
                 it["context"] = (
                     f"{base_ctx}\n\n历史对话总结：\n{prior_summary}"
@@ -566,6 +610,7 @@ async def _run(task: Task, cfg: AppConfig) -> None:
 
 
 _PREPARED_ITEM_FIELDS = {
+    "query_images", "input_modality", *PREPARED_FIELDS,
     "evidence_mode", "screenshot_meta1", "screenshot_meta2", "screenshot_meta3",
     "frames", "frames1", "frames2", "frames3", "frame_count", "media",
     "video_name", "video1_path", "video2_path", "video3_path",
@@ -654,7 +699,7 @@ async def run_retry(task: Task, cfg: AppConfig, retry_id: str) -> None:
         grouped: dict[str, list[int]] = {}
         standalone: list[int] = []
         for idx, item in enumerate(task.items):
-            group = item.get("session_group")
+            group = item.get("session_group") if task.mode != "compare" else None
             if group:
                 grouped.setdefault(str(group), []).append(idx)
             elif idx in target_set:
@@ -665,7 +710,7 @@ async def run_retry(task: Task, cfg: AppConfig, retry_id: str) -> None:
         async def run_one(idx: int, prior_summary: str = "") -> dict:
             working = copy.deepcopy(task.items[idx])
             base_ctx = _base_context(working)
-            if prior_summary:
+            if prior_summary and task.mode != "compare":
                 working["context"] = (
                     f"{base_ctx}\n\n历史对话总结：\n{prior_summary}" if base_ctx
                     else f"历史对话总结：\n{prior_summary}"
@@ -802,7 +847,7 @@ async def _run_update_batch_body(
         prior_summary = ""
         for turn_no, (idx, item_dict) in enumerate(batch, 1):
             current = (idx, item_dict)
-            if prior_summary:
+            if prior_summary and task.mode != "compare":
                 base_ctx = (item_dict.get("context") or "").strip()
                 item_dict["context"] = (
                     f"{base_ctx}\n\n历史对话总结：\n{prior_summary}"
@@ -1004,6 +1049,7 @@ async def _eval_one(
             out[f"context{product_no}"] = contexts[product_no]
 
         compare_result = await compare_judges[0].evaluate(
+            **({"query_image_meta": item_dict["query_image_meta"]} if item.query_images else {}),
             question=item.question,
             context=(item.context or "").strip(),
             context1=contexts[1],
@@ -1052,7 +1098,7 @@ async def _eval_one(
     return out
 
 
-def _summarize(task: Task) -> dict:
+def _summarize(task: Task, *, include_subsets: bool = True) -> dict:
     if task.mode == "rich_content":
         return _summarize_rich_content(task)
     # compare：协议定义七维绝对分；准确性保留逐题输出但暂不参与汇总。
@@ -1084,7 +1130,7 @@ def _summarize(task: Task) -> dict:
         "accuracy_aggregation_enabled": False,
         "needs_human_review_count": sum(
             bool(row.get("needs_human_review")) for row in valid
-        ) + sum(bool(row.get("needs_human_review")) for row in res if row.get("error_type") == "context_budget_exceeded"),
+        ) + sum(bool(row.get("needs_human_review")) for row in res if row.get("error")),
     }
     max_product_count = max(
         (int(row.get("product_count") or 2) for row in valid),
@@ -1148,6 +1194,18 @@ def _summarize(task: Task) -> dict:
     summary["conflict_yes"] = sum(1 for r in valid if r.get("has_conflict") == "yes")
     summary["conflict_no"] = sum(1 for r in valid if r.get("has_conflict") == "no")
     summary["conflict_unclear"] = sum(1 for r in valid if r.get("has_conflict") == "unclear")
+    if include_subsets:
+        from copy import copy
+        summary["input_modality_counts"] = {}
+        summary["by_input_modality"] = {}
+        for modality in ("text", "text_image"):
+            indexes = [i for i, item in enumerate(task.items) if ("text_image" if item.get("query_images") else "text") == modality]
+            summary["input_modality_counts"][modality] = len(indexes)
+            subset = copy(task)
+            subset.items = [task.items[i] for i in indexes]
+            remap = {old: new for new, old in enumerate(indexes)}
+            subset.results = [{**r, "index": remap[r["index"]]} for r in res if r.get("index") in remap]
+            summary["by_input_modality"][modality] = _summarize(subset, include_subsets=False)
     return summary
 
 

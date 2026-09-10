@@ -101,7 +101,7 @@ class WpsCellImages:
             pictures.append(
                 '<etc:cellImage><xdr:pic><xdr:nvPicPr>'
                 f'<xdr:cNvPr id="{image.index}" name="{image.name}" '
-                f'descr="完整原始长截图（{image.width} × {image.height}）"/>'
+                f'descr="完整原始图片（{image.width} × {image.height}）"/>'
                 '<xdr:cNvPicPr><a:picLocks noChangeAspect="1"/></xdr:cNvPicPr></xdr:nvPicPr>'
                 f'<xdr:blipFill><a:blip r:embed="rId{image.index}"/>'
                 '<a:stretch><a:fillRect/></a:stretch></xdr:blipFill><xdr:spPr><a:xfrm>'
