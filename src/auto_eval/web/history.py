@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from ..paths import PROJECT_ROOT, RUNS_DIR
+from .xlsx_images import CELL_IMAGE_REL, CellImage, OriginalImageError, WpsCellImages
 
 
 HISTORY_DIR = RUNS_DIR / "web_history"
@@ -1209,12 +1210,44 @@ def _compare_snapshot_uses_product3(snapshot: dict) -> bool:
     return False
 
 
-def build_xlsx(snapshot: dict) -> bytes:
-    """生成 xlsx（纯数据 sheet，不含图表）。
+def _original_screenshot_rows(snapshot: dict, images: WpsCellImages) -> list[dict]:
+    """一条输入一行、每个产品一列；原图缺失时不以切片或其他产品代替。"""
+    items = snapshot.get("items") or []
+    streams_by_item = [_item_visual_streams(item) for item in items]
+    screenshot_streams = [
+        stream for streams in streams_by_item for stream in streams
+        if stream["evidence_mode"] == "long_screenshot"
+    ]
+    if not screenshot_streams:
+        return []
+    count = max(stream["product_no"] for stream in screenshot_streams)
+    rows = []
+    for index, (item, streams) in enumerate(zip(items, streams_by_item)):
+        row = {
+            "数据集序号": index + 1, "id": item.get("id") or f"q{index}",
+            "query": item.get("query") or item.get("question") or "",
+            **{f"产品{n}原图": "" for n in range(1, count + 1)},
+        }
+        for stream in streams:
+            product_no = stream["product_no"]
+            if product_no not in range(1, count + 1):
+                continue
+            key = f"产品{product_no}原图"
+            if stream["evidence_mode"] != "long_screenshot":
+                row[key] = "录屏模式，无原始长截图"
+                continue
+            try:
+                row[key] = images.add(
+                    stream["original_path"], stream["screenshot_meta"].get("original_sha256"),
+                )
+            except OriginalImageError as exc:
+                row[key] = str(exc)
+        rows.append(row)
+    return rows
 
-    手写 OOXML chart 易被 Excel 判"需修复"且样式差，故只导出数据；
-    如需图表，用导出的汇总数据在 Excel 中自行插入。
-    """
+
+def build_xlsx(snapshot: dict) -> bytes:
+    """生成评分数据及 WPS 原始长截图页；图片按原字节嵌入，不影响正式评分列。"""
     sheets = {name: rows for name, rows in export_rows(snapshot).items() if rows}
     if snapshot.get("mode") == "compare" and not _compare_snapshot_uses_product3(snapshot):
         for sheet_name in ("数据集明细", "逐题结果"):
@@ -1230,16 +1263,20 @@ def build_xlsx(snapshot: dict) -> bytes:
     if not sheets:
         sheets = {"逐题结果": []}
 
-    names = list(sheets)
     buf = BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("[Content_Types].xml", _content_types(len(sheets)))
+        images = WpsCellImages(zf)
+        screenshot_rows = _original_screenshot_rows(snapshot, images)
+        if screenshot_rows:
+            sheets["原始长截图"] = screenshot_rows
+        images.write_parts()
+        zf.writestr("[Content_Types].xml", _content_types(len(sheets), images.content_types_xml()))
         zf.writestr("_rels/.rels", _root_rels())
-        zf.writestr("xl/workbook.xml", _workbook_xml(names))
-        zf.writestr("xl/_rels/workbook.xml.rels", _workbook_rels(len(sheets)))
-        zf.writestr("xl/styles.xml", _styles_xml())
-        for i, (_name, rows) in enumerate(sheets.items(), start=1):
-            zf.writestr(f"xl/worksheets/sheet{i}.xml", _sheet_xml(rows))
+        zf.writestr("xl/workbook.xml", _workbook_xml(list(sheets), bool(screenshot_rows)))
+        zf.writestr("xl/_rels/workbook.xml.rels", _workbook_rels(len(sheets), bool(images.images)))
+        zf.writestr("xl/styles.xml", _styles_xml(bool(screenshot_rows)))
+        for i, (name, rows) in enumerate(sheets.items(), start=1):
+            zf.writestr(f"xl/worksheets/sheet{i}.xml", _sheet_xml(rows, picture_sheet=name == "原始长截图"))
     return buf.getvalue()
 
 
@@ -1262,7 +1299,7 @@ def _cell(value: Any) -> str:
     return str(value)
 
 
-def _content_types(sheet_count: int) -> str:
+def _content_types(sheet_count: int, image_types: str = "") -> str:
     overrides = "".join(
         f'<Override PartName="/xl/worksheets/sheet{i}.xml" '
         'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
@@ -1277,7 +1314,7 @@ def _content_types(sheet_count: int) -> str:
         'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
         '<Override PartName="/xl/styles.xml" '
         'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
-        f"{overrides}</Types>"
+        f"{overrides}{image_types}</Types>"
     )
 
 
@@ -1290,16 +1327,17 @@ def _root_rels() -> str:
     )
 
 
-def _workbook_xml(names: list[str]) -> str:
+def _workbook_xml(names: list[str], picture_sheet: bool = False) -> str:
     sheets = "".join(
         f'<sheet name="{escape(_sheet_name(name))}" sheetId="{i}" r:id="rId{i}"/>'
         for i, name in enumerate(names, start=1)
     )
+    views = '<bookViews><workbookView/></bookViews>' if picture_sheet else ""
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'
         '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
         'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
-        f"<sheets>{sheets}</sheets></workbook>"
+        f"{views}<sheets>{sheets}</sheets></workbook>"
     )
 
 
@@ -1308,7 +1346,7 @@ def _sheet_name(name: str) -> str:
     return cleaned[:31] or "Sheet"
 
 
-def _workbook_rels(sheet_count: int) -> str:
+def _workbook_rels(sheet_count: int, has_cell_images: bool = False) -> str:
     rels = "".join(
         f'<Relationship Id="rId{i}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" '
         f'Target="worksheets/sheet{i}.xml"/>'
@@ -1319,6 +1357,11 @@ def _workbook_rels(sheet_count: int) -> str:
         'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" '
         'Target="styles.xml"/>'
     )
+    if has_cell_images:
+        rels += (
+            f'<Relationship Id="rId{sheet_count + 2}" Type="{CELL_IMAGE_REL}" '
+            'Target="cellimages.xml"/>'
+        )
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'
         '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
@@ -1326,7 +1369,11 @@ def _workbook_rels(sheet_count: int) -> str:
     )
 
 
-def _styles_xml() -> str:
+def _styles_xml(picture_sheet: bool = False) -> str:
+    picture_style = (
+        '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1">'
+        '<alignment vertical="top" wrapText="1"/></xf>'
+    ) if picture_sheet else ""
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'
         '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
@@ -1335,13 +1382,14 @@ def _styles_xml() -> str:
         '<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>'
         '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'
         '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
-        '<cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
-        '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0"/></cellXfs>'
+        f'<cellXfs count="{3 if picture_sheet else 2}"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
+        '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0"/>'
+        f'{picture_style}</cellXfs>'
         '</styleSheet>'
     )
 
 
-def _sheet_xml(rows: list[dict]) -> str:
+def _sheet_xml(rows: list[dict], *, picture_sheet: bool = False) -> str:
     headers = _headers(rows)
     table = [headers] + [[row.get(h) for h in headers] for row in rows]
     rows_xml = []
@@ -1349,25 +1397,36 @@ def _sheet_xml(rows: list[dict]) -> str:
         cells = []
         for c_idx, value in enumerate(row, start=1):
             ref = f"{_col(c_idx)}{r_idx}"
-            style = ' s="1"' if r_idx == 1 else ""
-            if (
+            style = ' s="1"' if r_idx == 1 else (' s="2"' if picture_sheet else "")
+            if isinstance(value, CellImage):
+                # 仅可信 CellImage 生成公式；Query 等输入仍按原来的纯文本方式导出。
+                formula = escape(value.formula)
+                cells.append(f'<c r="{ref}" t="str"{style}><f>_xlfn.{formula}</f><v>={formula}</v></c>')
+            elif (
                 r_idx > 1
                 and isinstance(value, (int, float))
                 and not isinstance(value, bool)
                 and (not isinstance(value, float) or math.isfinite(value))
             ):
-                cells.append(f'<c r="{ref}"><v>{value}</v></c>')
+                cells.append(f'<c r="{ref}"{style}><v>{value}</v></c>')
             else:
                 cells.append(f'<c r="{ref}" t="inlineStr"{style}><is><t>{escape(_cell(value))}</t></is></c>')
-        rows_xml.append(f'<row r="{r_idx}">{"".join(cells)}</row>')
+        height = ' ht="240" customHeight="1"' if picture_sheet and r_idx > 1 else ""
+        rows_xml.append(f'<row r="{r_idx}"{height}>{"".join(cells)}</row>')
     cols = "".join(
-        f'<col min="{i}" max="{i}" width="{_width(h)}" customWidth="1"/>'
+        f'<col min="{i}" max="{i}" width="{36 if picture_sheet and h.startswith("产品") else _width(h)}" customWidth="1"/>'
         for i, h in enumerate(headers, start=1)
     )
+    views = (
+        '<sheetViews><sheetView workbookViewId="0">'
+        '<pane xSplit="3" ySplit="1" topLeftCell="D2" activePane="bottomRight" state="frozen"/>'
+        '<selection pane="bottomRight" activeCell="D2" sqref="D2"/>'
+        '</sheetView></sheetViews>'
+    ) if picture_sheet else ""
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'
         '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
-        f"<cols>{cols}</cols><sheetData>{''.join(rows_xml)}</sheetData>"
+        f"{views}<cols>{cols}</cols><sheetData>{''.join(rows_xml)}</sheetData>"
         "</worksheet>"
     )
 
