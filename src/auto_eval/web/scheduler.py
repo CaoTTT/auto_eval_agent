@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable
 
 from .history import save_task
+from .persistence import drain_task_saves, queue_task_save, wait_task_save
 from .tasks import Task, retire_task
 
 
@@ -57,7 +58,7 @@ class EvalScheduler:
             runner=runner,
             total=len(task.items),
         ))
-        save_task(task)
+        queue_task_save(task, save=save_task)
         self._wake.set()
         self.start()
         return len(self._pending)
@@ -82,7 +83,7 @@ class EvalScheduler:
             runner=runner,
             total=total,
         ))
-        save_task(task)
+        queue_task_save(task, save=save_task)
         self._wake.set()
         self.start()
         return len(self._pending)
@@ -108,7 +109,7 @@ class EvalScheduler:
             task.error = None
             event = "cancelled"
             message = "排队任务已取消"
-        save_task(task)
+        queue_task_save(task, save=save_task)
         task._fanout(event, {"message": message, "job_id": job.job_id})
         retire_task(task)
         return task
@@ -164,9 +165,10 @@ class EvalScheduler:
             else:
                 job.task.status = "error"
                 job.task.error = "服务中断，排队任务未开始"
-            save_task(job.task)
+            await wait_task_save(job.task, save=save_task)
             retire_task(job.task)
         self._wake.clear()
+        await drain_task_saves()
 
     async def _worker_loop(self) -> None:
         try:
@@ -192,7 +194,7 @@ class EvalScheduler:
                         else:
                             job.task.status = "error"
                             job.task.error = f"{type(exc).__name__}: {exc}"
-                        save_task(job.task)
+                        await wait_task_save(job.task, save=save_task)
                         retire_task(job.task)
                     finally:
                         self._running = None

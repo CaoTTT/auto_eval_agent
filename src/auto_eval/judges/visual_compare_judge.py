@@ -1,6 +1,7 @@
 """可按任务冻结 V0.2 简化版或 V0.3 的垂域视觉对比裁判。"""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import time
@@ -312,48 +313,53 @@ class VisualCompareJudge:
             split_manifest3=_screenshot_prompt_manifest(metas[2]) if len(metas) > 2 else "",
         )
 
-        user_images: list[str] = []
-        user_image_refs: list[str] = []
-        frame_groups = (frames1, frames2, frames3) if actual_product_count == 3 else (frames1, frames2)
-        content_parts = [{"type": "text", "text": user}]
-        image_metadata = []
-        for product_no, frames in enumerate(frame_groups, 1):
-            if not frames:
+        def prepare_images():
+            user_images: list[str] = []
+            user_image_refs: list[str] = []
+            frame_groups = (frames1, frames2, frames3) if actual_product_count == 3 else (frames1, frames2)
+            content_parts = [{"type": "text", "text": user}]
+            image_metadata = []
+            for product_no, frames in enumerate(frame_groups, 1):
+                if not frames:
+                    if is_screenshot:
+                        raise ValueError(f"产品{product_no}缺少长截图证据")
+                    continue
                 if is_screenshot:
-                    raise ValueError(f"产品{product_no}缺少长截图证据")
-                continue
-            if is_screenshot:
-                meta = metas[product_no - 1]
-                if frames != [part["path"] for part in meta["slices"]]:
-                    raise ValueError("长截图图片顺序与预处理元数据不一致")
-                count = len(frames)
-                intro = f"产品{product_no}最终回答长截图开始，共{count}块；从上到下连续、无重叠。切片边界不是产品缺陷。"
-                content_parts.append({"type": "text", "text": intro})
-                for part_no, path in enumerate(frames, 1):
-                    position = "whole" if count == 1 else ("top" if part_no == 1 else "bottom" if part_no == count else "middle")
-                    label = f"产品{product_no} 第{part_no}/{count}块（{position}），切片状态：{meta['split_status']}"
-                    content_parts.extend([
-                        {"type": "text", "text": label},
-                        {"type": "image_url", "image_url": {"url": encode_original_image(resolve_project_path(path), self.profile.long_screenshot, meta["slices"][part_no - 1].get("sha256"))}},
-                        {"type": "text", "text": f"产品{product_no} 第{part_no}/{count}块结束"},
-                    ])
-                    image_metadata.append({
-                        "product_no": product_no, "part_no": part_no, "part_count": count,
-                        "position": position, "split_status": meta["split_status"], "ref_path": path,
-                        **({"preprocessing": meta} if part_no == 1 else {}),
-                    })
-                content_parts.append({"type": "text", "text": f"产品{product_no}长截图结束"})
-                user_image_refs.extend(frames)
-                continue
-            user_images.extend(
-                encode_frame(
-                    Path(path),
-                    max_edge=extraction.max_edge,
-                    quality=extraction.jpeg_quality,
+                    meta = metas[product_no - 1]
+                    if frames != [part["path"] for part in meta["slices"]]:
+                        raise ValueError("长截图图片顺序与预处理元数据不一致")
+                    count = len(frames)
+                    intro = f"产品{product_no}最终回答长截图开始，共{count}块；从上到下连续、无重叠。切片边界不是产品缺陷。"
+                    content_parts.append({"type": "text", "text": intro})
+                    for part_no, path in enumerate(frames, 1):
+                        position = "whole" if count == 1 else ("top" if part_no == 1 else "bottom" if part_no == count else "middle")
+                        label = f"产品{product_no} 第{part_no}/{count}块（{position}），切片状态：{meta['split_status']}"
+                        content_parts.extend([
+                            {"type": "text", "text": label},
+                            {"type": "image_url", "image_url": {"url": encode_original_image(resolve_project_path(path), self.profile.long_screenshot, meta["slices"][part_no - 1].get("sha256"))}},
+                            {"type": "text", "text": f"产品{product_no} 第{part_no}/{count}块结束"},
+                        ])
+                        image_metadata.append({
+                            "product_no": product_no, "part_no": part_no, "part_count": count,
+                            "position": position, "split_status": meta["split_status"], "ref_path": path,
+                            **({"preprocessing": meta} if part_no == 1 else {}),
+                        })
+                    content_parts.append({"type": "text", "text": f"产品{product_no}长截图结束"})
+                    user_image_refs.extend(frames)
+                    continue
+                user_images.extend(
+                    encode_frame(
+                        Path(path),
+                        max_edge=extraction.max_edge,
+                        quality=extraction.jpeg_quality,
+                    )
+                    for path in frames
                 )
-                for path in frames
-            )
-            user_image_refs.extend(frames)
+                user_image_refs.extend(frames)
+
+            return user_images, user_image_refs, content_parts, image_metadata
+
+        user_images, user_image_refs, content_parts, image_metadata = await asyncio.to_thread(prepare_images)
 
         started = time.perf_counter()
         if is_screenshot:

@@ -53,6 +53,14 @@ createApp({
     const historyNoteDrafts = ref({});
     const historyNoteEditing = ref({});
     const loadingHistory = ref(false);
+    const loadingTaskId = ref("");
+    const exportingTaskId = ref("");
+    const exportMessage = ref("");
+    const exportError = ref("");
+    const exportDownloadUrl = ref("");
+    let historyLoadVersion = 0;
+    let historyLoadController = null;
+    let disposed = false;
     const queueState = ref({ running: null, queued: [] });
     const selectedTaskStatus = ref("");
     const queueNotice = ref("");
@@ -532,6 +540,7 @@ createApp({
     }
 
     function switchMode(k) {
+      cancelHistoryLoad();
       mode.value = k;
       selectedJudges.value = defaultJudgeSelection();
       if (k === "compare") selectedEvaluationProfile.value = defaultEvaluationProfile();
@@ -685,6 +694,8 @@ createApp({
 
     async function submit() {
       if (submitting.value) return;
+      cancelHistoryLoad();
+      const submitViewVersion = historyLoadVersion;
       runError.value = "";
       const valid = opItems.value.filter(opItemReady);
       if (!valid.length) {
@@ -768,6 +779,11 @@ createApp({
         runError.value = "无法启动评估：" + detail;
         return;
       }
+      if (submitViewVersion !== historyLoadVersion) {
+        loadQueue();
+        loadHistory();
+        return;
+      }
       closeActiveStream();
       items.value = submittedItems;
       errors.value = [];
@@ -808,7 +824,9 @@ createApp({
     }
 
     async function retryFailedCases(indexes = null) {
-      if (!taskId.value || retrySubmitting.value) return;
+      if (!taskId.value || retrySubmitting.value || loadingTaskId.value) return;
+      const retryTaskId = taskId.value;
+      const viewVersion = historyLoadVersion;
       const selected = indexes == null ? null : [...new Set(indexes.map(Number))];
       if (selected && !selected.length) return;
       retrySubmitting.value = true;
@@ -817,7 +835,7 @@ createApp({
         || `retry-${Date.now()}-${Math.random().toString(16).slice(2)}`;
       let response;
       try {
-        response = await fetch(`/api/eval/${encodeURIComponent(taskId.value)}/retries`, {
+        response = await fetch(`/api/eval/${encodeURIComponent(retryTaskId)}/retries`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -829,11 +847,13 @@ createApp({
         });
       } catch (error) {
         retrySubmitting.value = false;
+        if (viewVersion !== historyLoadVersion || taskId.value !== retryTaskId) return;
         runError.value = "无法提交失败补跑：" + (error?.message || "网络错误");
         return;
       }
       const data = await response.json().catch(() => ({}));
       retrySubmitting.value = false;
+      if (viewVersion !== historyLoadVersion || taskId.value !== retryTaskId) return;
       if (!response.ok) {
         const detail = typeof data.detail === "string"
           ? data.detail
@@ -850,12 +870,13 @@ createApp({
       await loadHistory();
     }
 
-    async function reconcileTaskAfterError(message) {
+    async function reconcileTaskAfterError(message, errorTaskId, viewVersion) {
       let snapshot = null;
       try {
-        const response = await fetch(`/api/history/${taskId.value}`);
+        const response = await fetch(`/api/history/${encodeURIComponent(errorTaskId)}`);
         if (response.ok) snapshot = await response.json();
       } catch (_) {}
+      if (viewVersion !== historyLoadVersion || taskId.value !== errorTaskId) return false;
       const snapshotResults = snapshot?.results || results.value;
       const resultByIndex = new Map(snapshotResults.map((entry) => [entry.index, entry]));
       const snapshotProgress = snapshot?.item_progress || {};
@@ -890,6 +911,7 @@ createApp({
       progress.value = snapshotResults.length;
       itemProgress.value = reconciled;
       if (snapshot?.summary) summary.value = snapshot.summary;
+      return true;
     }
 
     function closeActiveStream() {
@@ -901,7 +923,7 @@ createApp({
       closeActiveStream();
       const es = new EventSource(`/api/eval/${streamTaskId}/stream?compact=true`);
       activeEventSource = es;
-      const isSelected = () => taskId.value === streamTaskId && activeEventSource === es;
+      const isSelected = () => !loadingTaskId.value && taskId.value === streamTaskId && activeEventSource === es;
       es.addEventListener("replay_state", (e) => {
         if (!isSelected()) return;
         const data = JSON.parse(e.data);
@@ -1016,7 +1038,7 @@ createApp({
         queueNotice.value = "";
         es.close();
         if (activeEventSource === es) activeEventSource = null;
-        await reconcileTaskAfterError(message);
+        if (!await reconcileTaskAfterError(message, streamTaskId, historyLoadVersion)) return;
         runError.value = "评估出错：" + message;
         loadQueue();
         loadHistory();
@@ -1261,59 +1283,117 @@ createApp({
       await loadHistory();
     }
 
+    function cancelHistoryLoad() {
+      historyLoadVersion++;
+      if (historyLoadController) historyLoadController.abort();
+      historyLoadController = null;
+      loadingTaskId.value = "";
+    }
+
     async function loadHistoryTask(id) {
-      const r = await fetch(`/api/history/${id}`);
-      if (!r.ok) {
-        alert("历史记录加载失败");
-        return;
+      cancelHistoryLoad();
+      const version = historyLoadVersion;
+      let loaded = false;
+      loadingTaskId.value = id;
+      historyLoadController = typeof AbortController !== "undefined" ? new AbortController() : null;
+      try {
+        const r = await fetch(`/api/history/${encodeURIComponent(id)}`, historyLoadController ? {signal: historyLoadController.signal} : {});
+        if (version !== historyLoadVersion) return;
+        if (!r.ok) {
+          alert("历史记录加载失败");
+          return;
+        }
+        const d = await r.json();
+        if (version !== historyLoadVersion) return;
+        if (!modes.some((m) => m.key === d.mode)) {
+          alert("该历史记录使用已下线的评测模式，无法加载。");
+          return;
+        }
+        loaded = true;
+        closeActiveStream();
+        taskId.value = d.task_id || id;
+        mode.value = d.mode;
+        if (d.mode === "compare") {
+          selectedEvaluationProfile.value = d.evaluation_profile || defaultEvaluationProfile();
+        }
+        datasetName.value = d.dataset_name || "";
+        items.value = d.items || [];
+        results.value = d.results || [];
+        itemProgress.value = d.item_progress || {};
+        restoreProgressEvents(d.progress_events);
+        expandedProgressLogs.value = {};
+        summary.value = d.summary || null;
+        repairStatus.value = d.repair_status || "idle";
+        const retryRuns = Object.values(d.retry_runs || {});
+        activeRetry.value = retryRuns.sort(
+          (a, b) => Number(b.created_at || 0) - Number(a.created_at || 0)
+        )[0] || null;
+        total.value = items.value.length || results.value.length;
+        progress.value = results.value.length;
+        selectedTaskStatus.value = d.status || "";
+        running.value = ["pending", "queued", "running"].includes(selectedTaskStatus.value);
+        queueNotice.value = selectedTaskStatus.value === "queued" ? "该任务正在等待前序任务完成。" : "";
+        activeSkill.value = "";
+        resultQuery.value = "";
+        resultPage.value = 1;
+        progressPage.value = 1;
+        if (mode.value !== "compare" && skillTabs.value.length) activeSkill.value = skillTabs.value[0].key;
+        if (running.value || ["queued", "running"].includes(repairStatus.value)) connectSSE(taskId.value);
+        nextTick(() => resultBrowser.value && resultBrowser.value.scrollIntoView({ behavior: "smooth", block: "start" }));
+      } catch (error) {
+        if (version === historyLoadVersion && error?.name !== "AbortError") {
+          runError.value = "历史记录加载失败：" + (error?.message || "网络错误");
+        }
+      } finally {
+        if (version === historyLoadVersion) {
+          loadingTaskId.value = "";
+          historyLoadController = null;
+          if (!loaded && (running.value || ["queued", "running"].includes(repairStatus.value))) connectSSE(taskId.value);
+        }
       }
-      const d = await r.json();
-      if (!modes.some((m) => m.key === d.mode)) {
-        alert("该历史记录使用已下线的评测模式，无法加载。");
-        return;
-      }
-      closeActiveStream();
-      taskId.value = d.task_id || id;
-      mode.value = d.mode;
-      if (d.mode === "compare") {
-        selectedEvaluationProfile.value = d.evaluation_profile || defaultEvaluationProfile();
-      }
-      datasetName.value = d.dataset_name || "";
-      items.value = d.items || [];
-      results.value = d.results || [];
-      itemProgress.value = d.item_progress || {};
-      restoreProgressEvents(d.progress_events);
-      expandedProgressLogs.value = {};
-      summary.value = d.summary || null;
-      repairStatus.value = d.repair_status || "idle";
-      const retryRuns = Object.values(d.retry_runs || {});
-      activeRetry.value = retryRuns.sort(
-        (a, b) => Number(b.created_at || 0) - Number(a.created_at || 0)
-      )[0] || null;
-      total.value = items.value.length || results.value.length;
-      progress.value = results.value.length;
-      selectedTaskStatus.value = d.status || "";
-      running.value = ["pending", "queued", "running"].includes(selectedTaskStatus.value);
-      queueNotice.value = selectedTaskStatus.value === "queued" ? "该任务正在等待前序任务完成。" : "";
-      activeSkill.value = "";
-      resultQuery.value = "";
-      resultPage.value = 1;
-      progressPage.value = 1;
-      if (mode.value !== "compare" && skillTabs.value.length) activeSkill.value = skillTabs.value[0].key;
-      if (running.value || ["queued", "running"].includes(repairStatus.value)) connectSSE(taskId.value);
-      nextTick(() => resultBrowser.value && resultBrowser.value.scrollIntoView({ behavior: "smooth", block: "start" }));
     }
 
     function exportCsv() {
+      if (loadingTaskId.value) return;
       window.open(`/api/eval/${taskId.value}/export?format=csv`);
     }
     function exportJson() {
+      if (loadingTaskId.value) return;
       window.open(`/api/eval/${taskId.value}/export?format=json`);
     }
-    function exportXlsx() {
-      window.open(`/api/eval/${taskId.value}/export?format=xlsx`);
+    async function exportXlsx(requestedId = "") {
+      if (exportingTaskId.value || (!requestedId && loadingTaskId.value)) return;
+      const id = requestedId || taskId.value;
+      if (!id) return;
+      exportingTaskId.value = id;
+      exportError.value = "";
+      exportDownloadUrl.value = "";
+      exportMessage.value = `正在为任务 ${id} 准备 Excel…`;
+      try {
+        const response = await fetch(`/api/eval/${encodeURIComponent(id)}/exports`, {method: "POST"});
+        let data = await response.json();
+        if (!response.ok) throw new Error(data.detail || "导出请求失败");
+        while (!disposed && ["queued", "generating"].includes(data.status)) {
+          exportMessage.value = `任务 ${id}：${data.status === 'queued' ? '等待生成' : '正在生成 Excel'}…`;
+          await new Promise(resolve => window.setTimeout(resolve, 1000));
+          if (disposed) return;
+          const status = await fetch(`/api/exports/${encodeURIComponent(data.export_id)}`);
+          data = await status.json();
+          if (!status.ok) throw new Error(data.detail || "无法读取导出状态");
+        }
+        if (disposed) return;
+        if (data.status !== "ready") throw new Error(data.error || "生成 Excel 失败");
+        exportDownloadUrl.value = `/api/exports/${encodeURIComponent(data.export_id)}/download`;
+        exportMessage.value = `任务 ${id}：Excel 已生成，请点击下载（30 分钟内有效）。`;
+      } catch (error) {
+        exportMessage.value = "";
+        exportError.value = `任务 ${id} 导出失败：${error?.message || "网络错误"}。可再次点击导出重试。`;
+      } finally {
+        exportingTaskId.value = "";
+      }
     }
     function exportFrames() {
+      if (loadingTaskId.value) return;
       window.open(`/api/eval/${taskId.value}/export?format=frames_zip`);
     }
     function itemArtifactUrl(result, format) {
@@ -1338,6 +1418,8 @@ createApp({
     });
 
     onUnmounted(() => {
+      disposed = true;
+      cancelHistoryLoad();
       if (progressClockTimer != null) window.clearInterval(progressClockTimer);
       if (queueRefreshTimer != null) window.clearInterval(queueRefreshTimer);
       closeActiveStream();
@@ -1352,6 +1434,7 @@ createApp({
       failedResultIndexes, retryIndexSelected, toggleRetryIndex, retryFailedCases,
       itemProgress, progressEvents, expandedProgressLogs, pagedProgressRows, progressStages,
       historyItems, historyNoteDrafts, historyNoteEditing, loadingHistory, pageSize,
+      loadingTaskId, exportingTaskId, exportMessage, exportError, exportDownloadUrl,
       opPage, opPageSize, opPageCount, opJumpPage,
       progressPage, progressPageCount, progressJumpPage,
       resultJumpPage,

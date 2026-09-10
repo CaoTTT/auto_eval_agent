@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .history import load_snapshot, make_session_name, save_task
+from .persistence import queue_task_save, task_save_pending
 
 # 每个 SSE 连接的事件队列上限：慢消费者丢最旧保最新，杜绝无消费者时无限堆积
 _MAX_SUB_QUEUE = 500
@@ -92,7 +93,7 @@ def _enforce_capacity() -> None:
     """LRU 容量兜底：从最旧开始淘汰空闲终态任务；全是运行中则不强制。"""
     while len(TASKS) > TASKS_CAPACITY:
         for tid, t in TASKS.items():
-            if t.active_runs <= 0 and t.status in {"done", "error", "cancelled"}:
+            if t.active_runs <= 0 and t.status in {"done", "error", "cancelled"} and not task_save_pending(tid):
                 TASKS.pop(tid, None)
                 break
         else:
@@ -124,7 +125,7 @@ def new_task(
     )
     TASKS[task_id] = t
     _enforce_capacity()
-    save_task(t)
+    queue_task_save(t, save=save_task)
     return t
 
 
@@ -316,7 +317,7 @@ def retire_task(task: Task) -> None:
 
     身份校验防止误删同 id 的新对象（删除历史后重建等场景）。
     """
-    if task.active_runs > 0 or task.status not in {"done", "error", "cancelled"}:
+    if task.active_runs > 0 or task.status not in {"done", "error", "cancelled"} or task_save_pending(task.id):
         return
     if TASKS.get(task.id) is task:
         TASKS.pop(task.id, None)

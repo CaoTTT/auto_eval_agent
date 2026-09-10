@@ -76,7 +76,8 @@
             <td class="history-progress-cell">{{ h.done }}/{{ h.total }}</td>
             <td>{{ h.preview }}</td>
             <td style="white-space:nowrap">
-              <button @click="loadHistoryTask(h.task_id)">加载</button>
+              <button @click="loadHistoryTask(h.task_id)">{{ loadingTaskId === h.task_id ? '加载中…' : '加载' }}</button>
+              <button @click="exportXlsx(h.task_id)" :disabled="!!exportingTaskId">导出 Excel</button>
               <button @click="delHistory(h.task_id)" class="btn-danger">删除</button>
             </td>
             <td class="history-note-cell">
@@ -104,6 +105,11 @@
     </div>
     <p v-else class="hint">暂无历史记录。</p>
   </details>
+  <section v-if="exportMessage || exportError" aria-live="polite">
+    <p v-if="exportMessage">{{ exportMessage }}</p>
+    <p v-if="exportError" class="error">{{ exportError }}</p>
+    <a v-if="exportDownloadUrl" :href="exportDownloadUrl" download>下载 Excel 文件</a>
+  </section>
   <section>
     <h2>① 批量输入</h2>
     <p class="hint">{{ formatHint }}</p>
@@ -285,10 +291,11 @@
 
   <section v-if="results.length || summary">
     <h2>③ 结果
-      <button @click="exportCsv" :disabled="!taskId">导出 CSV</button>
-      <button @click="exportJson" :disabled="!taskId">导出 JSON</button>
-      <button @click="exportXlsx" :disabled="!taskId">导出 XLSX（完整）</button>
-      <button v-if="isVideoMode" @click="exportFrames" :disabled="!taskId">导出抽帧 ZIP</button>
+      <button @click="exportCsv" :disabled="!taskId || !!loadingTaskId">导出 CSV</button>
+      <button @click="exportJson" :disabled="!taskId || !!loadingTaskId">导出 JSON</button>
+      <button @click="exportXlsx()" :disabled="!taskId || !!loadingTaskId || !!exportingTaskId">导出 XLSX（完整）</button>
+      <button v-if="isVideoMode" @click="exportFrames" :disabled="!taskId || !!loadingTaskId">导出抽帧 ZIP</button>
+      <span v-if="loadingTaskId">正在加载任务，请稍候…</span>
       <button v-if="summary && summary.failed" @click="retryFailedCases(null)" :disabled="retrySubmitting || ['queued','running'].includes(repairStatus)">
         {{ retrySubmitting ? '提交中…' : '重跑全部失败项' }}
       </button>
@@ -409,6 +416,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20260910_retry_progress"></script>
+  <script type="module" src="/static/app.js?v=20260910_background_export"></script>
 </body>
 </html>

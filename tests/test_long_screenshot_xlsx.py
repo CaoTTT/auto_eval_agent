@@ -11,6 +11,7 @@ import pytest
 from PIL import Image, PngImagePlugin
 
 from auto_eval.web import history, server
+from auto_eval.web.tasks import _task_from_snapshot
 
 
 NS = {
@@ -263,14 +264,19 @@ def test_old_video_exports_do_not_add_image_parts(mode):
     assert_valid_package(archive)
 
 
-def test_existing_export_endpoint_includes_original_images(tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_existing_export_endpoint_includes_original_images(tmp_path, monkeypatch):
     path = tmp_path / "a.png"
     raw = make_image(path)
     data = snapshot([screenshot_item([path, path])])
-    monkeypatch.setattr(server, "peek_task", lambda *a, **k: None)
-    monkeypatch.setattr(server, "load_snapshot", lambda *a: data)
-    response = server.api_export("task", "xlsx")
+    async def peek(_id):
+        return _task_from_snapshot(data, "task")
+    monkeypatch.setattr(server, "peek_task_async", peek)
+    monkeypatch.setattr(server, "RUNS_DIR", tmp_path)
+    response = await server.api_export("task", "xlsx")
     assert response.status_code == 200
     assert response.media_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    archive, sheets = workbook(response.body)
+    archive, sheets = workbook(Path(response.path).read_bytes())
     assert embedded_cells(archive, sheets["原始长截图"]) == {"D2": raw, "E2": raw}
+    await response.background()
+    assert not Path(response.path).exists()

@@ -31,6 +31,7 @@ from ..observability import (
 )
 from ..schema import EvalItem
 from .history import save_task
+from .persistence import queue_task_save
 from .video_prepare import (
     prepare_session_rich_content_item,
     prepare_session_visual_compare_item,
@@ -62,37 +63,36 @@ COMPARE_AGGREGATION_DIMENSIONS = tuple(
 
 # 持久化节流：普通调用走 debounce（默认 2s，环境变量可调）或每 N 题强刷一次，
 # 避免大任务每完成一题就把 items+全部 results+progress_events 全量 json.dumps
-# （O(n²) 序列化、瞬时内存峰值约快照大小的 2-3 倍）。force=True 立即落盘，
-# 用于终态/异常/退休前。语义变化：进程崩溃最多丢 debounce 窗口内的结果；
-# 任务正常终态保证盘上完整（eval_errors.jsonl 与 judge trace 仍即时写）。
+# （O(n²) 序列化、瞬时内存峰值约快照大小的 2-3 倍）。force=True 立即排入
+# 顺序后台写队列；终态/退休前显式等待写完。异常退出可能丢失尚未落盘的
+# debounce/写队列内结果；正常关闭会排空队列，快照格式保持不变。
 _PERSIST_DEBOUNCE_S = float(os.environ.get("AUTO_EVAL_PERSIST_DEBOUNCE_S", "2.0"))
 _PERSIST_FORCE_EVERY_N = 20
 _pending_flush: dict[str, asyncio.TimerHandle] = {}
 _unpersisted: dict[str, int] = {}
 
 
-def _flush_now(task: Task) -> None:
-    """立即落盘：取消 pending 定时器、重算 summary、save_task。"""
+def _flush_now(task: Task) -> asyncio.Future | None:
+    """取消定时器，冻结最新快照并排入后台写入队列。"""
     handle = _pending_flush.pop(task.id, None)
     if handle is not None:
         handle.cancel()
     _unpersisted.pop(task.id, None)
     task.summary = _summarize(task)
     try:
-        save_task(task)
+        return queue_task_save(task, save=save_task)
     except Exception:
         logger.exception("unexpected task snapshot failure: task_id=%s", task.id)
 
 
-def _persist_task(task: Task, *, force: bool = False) -> None:
+def _persist_task(task: Task, *, force: bool = False) -> asyncio.Future | None:
     """Persist without allowing history I/O to break the evaluation/SSE.
 
     TimerHandle 闭包直接持 task 引用（不按 id 回查 TASKS）：退休前必先
     force 强刷，届时 pending 定时器已被取消，不存在退休后再刷盘的窗口。
     """
     if force:
-        _flush_now(task)
-        return
+        return _flush_now(task)
     n = _unpersisted.get(task.id, 0) + 1
     _unpersisted[task.id] = n
     if task.id in _pending_flush:
@@ -109,6 +109,12 @@ def _persist_task(task: Task, *, force: bool = False) -> None:
         _PERSIST_DEBOUNCE_S,
         lambda t=task: _flush_now(t),
     )
+
+
+async def _persist_task_and_wait(task: Task) -> None:
+    pending = _persist_task(task, force=True)
+    if pending is not None:
+        await asyncio.shield(pending)
 
 
 def _record_progress(task: Task, item_index: int, payload: dict) -> dict:
@@ -182,22 +188,22 @@ async def run_eval(task: Task, cfg: AppConfig) -> None:
     try:
         await task.publish("start", {"total": len(task.items), "mode": task.mode})
         task.status = "running"
-        _persist_task(task, force=True)
+        await _persist_task_and_wait(task)
         try:
             await _run(task, cfg)
             task.summary = _summarize(task)
             task.status = "done"
             await task.publish("done", {"summary": task.summary, "total": len(task.items)})
-            _persist_task(task, force=True)
+            await _persist_task_and_wait(task)
         except Exception as e:
             task.status = "error"
             task.error = f"{type(e).__name__}: {e}"
             await task.publish("error", {"message": task.error})
-            _persist_task(task, force=True)
+            await _persist_task_and_wait(task)
     finally:
         task.active_runs -= 1
         _mark_interrupted_if_stuck(task)
-        _persist_task(task, force=True)  # 退休前最后一次落盘，磁盘先于内存下线
+        await _persist_task_and_wait(task)  # 退休前最后一次落盘，磁盘先于内存下线
         retire_task(task)
 
 
@@ -627,7 +633,7 @@ async def run_retry(task: Task, cfg: AppConfig, retry_id: str) -> None:
             "retry_result",
             {"retry_id": retry_id, "index": idx, **item_state},
         )
-        _persist_task(task, force=True)
+        await _persist_task_and_wait(task)
 
     async def mark_dependency_skipped(indices: list[int], reason: str) -> None:
         for idx in indices:
@@ -724,7 +730,7 @@ async def run_retry(task: Task, cfg: AppConfig, retry_id: str) -> None:
             await _aclose_judge_clients(clients)
         retry["finished_at"] = time.time()
         task.active_runs = max(0, task.active_runs - 1)
-        _persist_task(task, force=True)
+        await _persist_task_and_wait(task)
         task._fanout(
             "done",
             {"summary": task.summary, "total": len(task.items), "retry": retry},
@@ -787,11 +793,11 @@ async def _run_update_batch_body(
     one, clients = _make_item_evaluator(
         task, cfg, options=options, on_result=_merge_on_result
     )
-    if manage_status:
-        task.status = "running"
-        _persist_task(task, force=True)
     current: tuple[int, dict] | None = None
     try:
+        if manage_status:
+            task.status = "running"
+            await _persist_task_and_wait(task)
         # 整批一个串行会话：前轮总结在批次内本地链式注入，
         # 不从 task.results 读回，不受并行批次覆盖影响。
         prior_summary = ""
@@ -826,7 +832,7 @@ async def _run_update_batch_body(
             await task.publish(
                 "done", {"summary": task.summary, "total": len(task.items)}
             )
-            _persist_task(task, force=True)
+            await _persist_task_and_wait(task)
     except Exception as e:
         # one() 内部已把单题异常转成 error res；这里只兜底批级异常
         # （如持久化 I/O 崩溃），避免静默吞掉。
@@ -837,7 +843,7 @@ async def _run_update_batch_body(
             task.status = "error"
             task.error = f"{type(e).__name__}: {e}"
             await task.publish("error", {"message": task.error})
-        _persist_task(task, force=True)
+        await _persist_task_and_wait(task)
     finally:
         await _aclose_judge_clients(clients)
 
@@ -864,7 +870,7 @@ async def run_update_batch(
         task.active_runs -= 1
         idle = task.active_runs <= 0
         interrupted = _mark_interrupted_if_stuck(task) if idle else False
-        _persist_task(task, force=True)  # 退休前最后一次落盘，磁盘先于内存下线
+        await _persist_task_and_wait(task)  # 退休前最后一次落盘，磁盘先于内存下线
         if idle and not manage_status and not interrupted and task.status in {"done", "error"}:
             # R4：manage_status=False 的批不发 start/done 终态事件，SSE 订阅者
             # 会一直等；最后一个批结束时补发一次终态（先 persist 再发，summary

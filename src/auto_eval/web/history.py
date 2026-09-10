@@ -12,6 +12,7 @@ import math
 import os
 import re
 import time
+import threading
 import uuid
 import zipfile
 from datetime import datetime
@@ -26,6 +27,7 @@ from .xlsx_images import CELL_IMAGE_REL, CellImage, OriginalImageError, WpsCellI
 
 HISTORY_DIR = RUNS_DIR / "web_history"
 logger = logging.getLogger(__name__)
+_xlsx_slot = threading.BoundedSemaphore(1)
 
 
 def _safe_name(value: str) -> str:
@@ -1248,6 +1250,18 @@ def _original_screenshot_rows(snapshot: dict, images: WpsCellImages) -> list[dic
 
 def build_xlsx(snapshot: dict) -> bytes:
     """生成评分数据及 WPS 原始长截图页；图片按原字节嵌入，不影响正式评分列。"""
+    buf = BytesIO()
+    write_xlsx(snapshot, buf)
+    return buf.getvalue()
+
+
+def write_xlsx(snapshot: dict, destination) -> None:
+    """直接写入文件/二进制流，线上下载不把完整工作簿缓存在内存中。"""
+    with _xlsx_slot:
+        _write_xlsx(snapshot, destination)
+
+
+def _write_xlsx(snapshot: dict, destination) -> None:
     sheets = {name: rows for name, rows in export_rows(snapshot).items() if rows}
     if snapshot.get("mode") == "compare" and not _compare_snapshot_uses_product3(snapshot):
         for sheet_name in ("数据集明细", "逐题结果"):
@@ -1263,8 +1277,7 @@ def build_xlsx(snapshot: dict) -> bytes:
     if not sheets:
         sheets = {"逐题结果": []}
 
-    buf = BytesIO()
-    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+    with zipfile.ZipFile(destination, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         images = WpsCellImages(zf)
         screenshot_rows = _original_screenshot_rows(snapshot, images)
         if screenshot_rows:
@@ -1277,7 +1290,6 @@ def build_xlsx(snapshot: dict) -> bytes:
         zf.writestr("xl/styles.xml", _styles_xml(bool(screenshot_rows)))
         for i, (name, rows) in enumerate(sheets.items(), start=1):
             zf.writestr(f"xl/worksheets/sheet{i}.xml", _sheet_xml(rows, picture_sheet=name == "原始长截图"))
-    return buf.getvalue()
 
 
 def _headers(rows: list[dict]) -> list[str]:

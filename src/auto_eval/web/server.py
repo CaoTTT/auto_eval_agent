@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import time
 import uuid
@@ -28,7 +29,7 @@ from ..media import probe_duration
 from ..paths import RUNS_DIR
 from .parse_input import Mode, compare_evidence_mode, parse_csv, parse_jsonl, parse_text
 from .history import (
-    build_xlsx,
+    write_xlsx,
     delete_snapshot,
     export_rows,
     list_snapshots,
@@ -47,6 +48,8 @@ from .video_prepare import (
 )
 from .runner import run_eval, run_retry, run_update_batch, spawn_background
 from .scheduler import EvalScheduler
+from .exports import XlsxExports
+from .persistence import queue_task_save, wait_task_save, task_save_pending
 from .tasks import (
     TASKS,
     get_task,
@@ -68,6 +71,7 @@ load_dotenv(BASE_DIR / ".env", override=True)  # 注入 .env 的 key；以 .env 
 app = FastAPI(title="auto_eval 评估台")
 _state: dict = {}
 EVAL_SCHEDULER = EvalScheduler()
+XLSX_EXPORTS = XlsxExports(RUNS_DIR / "exports")
 
 
 @app.on_event("startup")
@@ -79,6 +83,7 @@ async def _load():
 @app.on_event("shutdown")
 async def _shutdown():
     await EVAL_SCHEDULER.stop()
+    await XLSX_EXPORTS.close()
 
 
 def cfg():
@@ -503,9 +508,9 @@ async def api_eval_items(req: EvalItemsReq):
             ),
         )
     batch, replaced_ids, added_ids = merge_items_by_id(task, req.items)
-    save_task(task)  # items 定义立即落快照；结果仍在各题完成后才覆盖合并
     effective_options = {**task.options, **req.options}
     task.active_runs += 1  # R1：提交时同步 pin（同 api_eval；run_update_batch 的 finally 负责解除）
+    pending_save = queue_task_save(task, save=save_task)
 
     async def _start_later():
         # 先把合并结果响应出去，再启动可能较重的评测（与 /api/eval 同模式）。
@@ -519,6 +524,8 @@ async def api_eval_items(req: EvalItemsReq):
         )
 
     spawn_background(_start_later())
+    if pending_save is not None:
+        await asyncio.shield(pending_save)
     return {
         "task_id": task.id,
         "created": created,
@@ -716,6 +723,8 @@ def api_history_detail(task_id: str):
 
 @app.delete("/api/history/{task_id}")
 async def api_history_delete(task_id: str):
+    if task_save_pending(task_id):
+        raise HTTPException(409, "任务正在保存，请稍后再删除")
     # R6：TASKS 增删必须发生在事件循环线程（原同步 def 在线程池执行，与
     # move_to_end/_enforce_capacity 迭代竞争触发 RuntimeError）。全程无
     # await：检查-删盘-清内存相对提交端点的同步 pin（同样无 await 前置）
@@ -742,27 +751,62 @@ async def api_history_note(task_id: str, req: HistoryNoteReq):
     if len(note) > 1000:
         raise HTTPException(422, "备注不能超过 1000 个字符")
     task.note = note
-    if not await asyncio.to_thread(save_task, task):
+    if not await wait_task_save(task, save=save_task):
         raise HTTPException(500, "备注保存失败")
     return {"ok": True, "task_id": task.id, "note": task.note}
 
 
+@app.post("/api/eval/{task_id}/exports", status_code=202)
+async def api_prepare_xlsx(task_id: str):
+    return XLSX_EXPORTS.create(task_id)
+
+
+@app.get("/api/exports/{export_id}")
+async def api_xlsx_status(export_id: str):
+    return XLSX_EXPORTS.view(export_id)
+
+
+@app.get("/api/exports/{export_id}/download")
+async def api_xlsx_download(export_id: str):
+    state = XLSX_EXPORTS.view(export_id)
+    if state["status"] != "ready":
+        raise HTTPException(409, state.get("error") or "Excel 尚未生成完成")
+    return FileResponse(
+        XLSX_EXPORTS.jobs[export_id]["path"],
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=f"eval_{state['task_id']}.xlsx",
+    )
+
+
 @app.get("/api/eval/{task_id}/export")
-def api_export(task_id: str, format: str = "json"):
-    task = peek_task(task_id, touch=False)  # 导出只读视图不驻留内存；touch=False：线程池端点不变异 TASKS
-    data = task_to_snapshot(task) if task else load_snapshot(task_id)
-    if not data:
+async def api_export(task_id: str, format: str = "json"):
+    task = await peek_task_async(task_id)
+    if task is None:
         raise HTTPException(404, "task not found")
+    data = copy.deepcopy(task_to_snapshot(task))
+    return await asyncio.to_thread(_export_snapshot, task_id, format, data)
+
+
+def _export_snapshot(task_id: str, format: str, data: dict):
 
     if format == "json":
         return JSONResponse(snapshot_payload(data))
 
     if format == "xlsx":
-        content = build_xlsx(data)
-        return Response(
-            content,
+        # 保留原 GET 下载入口，改为文件响应；新页面使用有状态的后台导出。
+        export_dir = RUNS_DIR / "exports"
+        export_dir.mkdir(parents=True, exist_ok=True)
+        archive_path = export_dir / f".xlsx-{uuid.uuid4().hex}.xlsx"
+        try:
+            write_xlsx(data, archive_path)
+        except Exception:
+            archive_path.unlink(missing_ok=True)
+            raise
+        return FileResponse(
+            archive_path,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": f"attachment; filename=eval_{task_id}.xlsx"},
+            filename=f"eval_{task_id}.xlsx",
+            background=BackgroundTask(archive_path.unlink, missing_ok=True),
         )
 
     if format in {"frames", "frames_zip"}:
