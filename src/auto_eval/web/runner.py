@@ -118,7 +118,11 @@ def _record_progress(task: Task, item_index: int, payload: dict) -> dict:
     sequence = int(events[-1].get("sequence", 0)) + 1 if events else 1
     event_payload = {**payload, "sequence": sequence}
     previous = task.item_progress.get(key) or {}
-    if "started_at" not in event_payload and previous.get("started_at") is not None:
+    if (
+        "started_at" not in event_payload
+        and previous.get("started_at") is not None
+        and event_payload.get("request_id") == previous.get("request_id")
+    ):
         event_payload["started_at"] = previous["started_at"]
     events.append(event_payload)
     if len(events) > MAX_PROGRESS_EVENTS_PER_ITEM:

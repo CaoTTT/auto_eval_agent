@@ -617,7 +617,7 @@ async def api_upload_video(file: UploadFile = File(...)):
 
 
 @app.get("/api/eval/{task_id}/stream")
-async def api_stream(task_id: str):
+async def api_stream(task_id: str, compact: bool = False):
     # 只读视图：终态任务回放完即返回不驻留；运行中任务 peek 命中活对象，订阅正常
     task = peek_task(task_id)
     if not task:
@@ -629,17 +629,31 @@ async def api_stream(task_id: str):
         # 幂等）。旧实现的共享单队列还有多连接互相瓜分事件的正确性问题。
         q = task.subscribe()
         try:
+            if compact:
+                # 新页面按题回放日志，避免每条历史日志触发一次页面渲染。
+                # 首次 yield 前固定全部快照；回放期间的新事件由 q 按序补齐。
+                histories = [(key, list(events)) for key, events in task.progress_events.items()]
+                yield _sse("replay_state", {
+                    "results": list(task.results),
+                    "item_progress": dict(task.item_progress),
+                    "progress": task.done_total,
+                    "total": len(task.items),
+                    "repair_status": task.repair_status,
+                    "retry": max(task.retry_runs.values(), key=lambda row: float(row.get("created_at") or 0), default=None),
+                })
+                for key, events in histories:
+                    yield _sse("progress_history", {"item_index": int(key), "events": events})
             # 回放有界事件历史，供 Web 展示与文件日志同源的逐行调用记录。
             # 内层列表同样快照（R8）：yield 挂起期间 _record_progress 会并发
             # append/del 同一列表，遍历活列表会跳帧/重帧。
-            for item_events in list(task.progress_events.values()):
+            for item_events in ([] if compact else list(task.progress_events.values())):
                 for progress_event in list(item_events):
                     yield _sse("progress_event", progress_event)
             # 回放每题最新进度，断线重连后能立即恢复当前阶段。
-            for progress_item in list(task.item_progress.values()):
+            for progress_item in ([] if compact else list(task.item_progress.values())):
                 yield _sse("item_progress", progress_item)
             # 先回放已有结果（断线重连不丢已完成的）
-            for r in list(task.results):
+            for r in ([] if compact else list(task.results)):
                 yield _sse("result", {"progress": task.done_total, "total": len(task.items), "result": r})
             # 终态判定叠加 active_runs（R4）：更新批 manage_status=False 全程
             # status=done，仅看 status 会在批运行中立即下发伪 done；批结束时

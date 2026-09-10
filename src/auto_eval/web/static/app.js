@@ -39,6 +39,7 @@ createApp({
     const runError = ref("");
     const itemProgress = ref({});
     const progressEvents = ref({});
+    const expandedProgressLogs = ref({});
     const resultBrowser = ref(null);
     const activeSkill = ref("");
     const resultQuery = ref("");
@@ -120,25 +121,29 @@ createApp({
       }));
     });
 
-    const progressRows = computed(() =>
-      items.value.map((item, index) => {
+    const progressResultByIndex = computed(() => new Map(results.value.map((entry) => [entry.index, entry])));
+    const progressPageCount = computed(() => Math.max(1, Math.ceil(items.value.length / pageSize)));
+    const pagedProgressRows = computed(() => {
+      const page = Math.min(progressPage.value, progressPageCount.value);
+      const start = (page - 1) * pageSize;
+      return items.value.slice(start, start + pageSize).map((item, offset) => {
+        const index = start + offset;
         const current = itemProgress.value[index] || {};
-        const result = results.value.find((entry) => entry.index === index);
+        const result = progressResultByIndex.value.get(index);
         const events = progressEvents.value[index] || [];
         const startedAt = Number(current.started_at || 0);
-        const finishedAt = Number(current.finished_at || 0);
+        const terminal = ["done", "error"].includes(current.status);
+        const finishedAt = Number(current.finished_at || (terminal && Date.parse(current.updated_at || "")) || 0);
         const resultElapsed = Number(result?.latency_s);
-        const elapsedSeconds = Number.isFinite(resultElapsed)
-          ? resultElapsed
-          : startedAt > 0
-            ? Math.max(0, ((finishedAt || clockNow.value) - startedAt) / 1000)
-            : null;
+        const elapsedSeconds = startedAt > 0
+          ? Math.max(0, ((finishedAt || clockNow.value) - startedAt) / 1000)
+          : (!current.status || terminal) && Number.isFinite(resultElapsed) ? resultElapsed : null;
         return {
           index,
           itemId: item.id || `q${index}`,
           query: item.query || item.question || "",
           percent: current.percent ?? 0,
-          status: current.status || "pending",
+          status: current.status || (result ? (result.error ? "error" : "done") : "pending"),
           message: current.message || "排队中",
           requestId: current.request_id || "",
           module: current.module || "",
@@ -149,13 +154,7 @@ createApp({
           events,
           latestEvents: events.slice(-2),
         };
-      })
-    );
-    const progressPageCount = computed(() => Math.max(1, Math.ceil(progressRows.value.length / pageSize)));
-    const pagedProgressRows = computed(() => {
-      const page = Math.min(progressPage.value, progressPageCount.value);
-      const start = (page - 1) * pageSize;
-      return progressRows.value.slice(start, start + pageSize);
+      });
     });
 
     function progressStageRank(progressItem) {
@@ -167,44 +166,58 @@ createApp({
     }
 
     function mergeItemProgress(incoming) {
-      appendProgressEvent(incoming);
       const index = incoming.item_index;
-      const previous = itemProgress.value[index] || {};
+      if (index == null) return;
+      const existing = itemProgress.value[index] || {};
+      if (incoming.sequence != null && existing.sequence != null && incoming.sequence <= existing.sequence) return;
+      appendProgressEvent(incoming);
+      const newAttempt = incoming.request_id && incoming.request_id !== existing.request_id;
+      const previous = newAttempt ? {} : existing;
       const previousRank = previous.stage_rank ?? progressStageRank(previous);
       const incomingRank = progressStageRank(incoming);
       const terminal = incoming.status === "done" || incoming.status === "error";
       const updatedAt = Date.parse(incoming.updated_at || "");
-      itemProgress.value = {
-        ...itemProgress.value,
-        [index]: {
-          ...previous,
-          ...incoming,
-          // Agent Loop 总轮数未知，宏观阶段只前进、不倒退。
-          stage_rank: incoming.status === "done"
-            ? 4
-            : Math.max(previousRank, incomingRank),
-          finished_at: terminal
-            ? (previous.finished_at || (Number.isFinite(updatedAt) ? updatedAt : Date.now()))
-            : previous.finished_at,
-        },
+      itemProgress.value[index] = {
+        ...previous,
+        ...incoming,
+        // 同一次请求的阶段只前进；补跑使用新的 request_id 重新计时。
+        stage_rank: incoming.status === "done"
+          ? 4
+          : Math.max(previousRank, incomingRank),
+        finished_at: terminal
+          ? (previous.finished_at || (Number.isFinite(updatedAt) ? updatedAt : Date.now()))
+          : undefined,
       };
+    }
+
+    function progressEventKey(incoming) {
+      return incoming.sequence != null
+        ? `seq:${incoming.sequence}`
+        : [incoming.request_id, incoming.updated_at, incoming.module, incoming.event,
+            incoming.judge, incoming.round, incoming.message].join("|");
+    }
+
+    function normalizeProgressEvents(events) {
+      const unique = new Map((events || []).map((event) => {
+        const key = progressEventKey(event);
+        return [key, { ...event, _key: key }];
+      }));
+      return [...unique.values()].slice(-100);
+    }
+
+    function restoreProgressEvents(events) {
+      progressEvents.value = Object.fromEntries(Object.entries(events || {}).map(
+        ([index, rows]) => [index, normalizeProgressEvents(rows)]
+      ));
     }
 
     function appendProgressEvent(incoming) {
       const index = incoming.item_index;
       if (index == null) return;
       const previous = progressEvents.value[index] || [];
-      const eventKey = incoming.sequence != null
-        ? `seq:${incoming.sequence}`
-        : [
-            incoming.updated_at, incoming.module, incoming.event,
-            incoming.judge, incoming.round, incoming.message,
-          ].join("|");
-      if (previous.some((entry) => entry._key === eventKey)) return;
-      progressEvents.value = {
-        ...progressEvents.value,
-        [index]: [...previous, { ...incoming, _key: eventKey }].slice(-100),
-      };
+      const eventKey = progressEventKey(incoming);
+      if (previous.some((entry) => (entry._key || progressEventKey(entry)) === eventKey)) return;
+      progressEvents.value[index] = [...previous, { ...incoming, _key: eventKey }].slice(-100);
     }
 
     function progressStageClass(row, stageIndex) {
@@ -244,15 +257,13 @@ createApp({
       return parts.join(" · ");
     }
 
+    const progressTimeFormatter = new Intl.DateTimeFormat("zh-CN", {
+      hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit",
+    });
     function formatProgressEventTime(value) {
       const date = new Date(value || "");
       if (Number.isNaN(date.getTime())) return "--:--:--";
-      return date.toLocaleTimeString("zh-CN", {
-        hour12: false,
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-      });
+      return progressTimeFormatter.format(date);
     }
 
     function progressEventMeta(event) {
@@ -282,10 +293,12 @@ createApp({
       return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     }
 
-    function scrollProgressLog(event) {
-      if (!event.currentTarget.open) return;
+    function scrollProgressLog(event, index) {
+      const details = event.currentTarget;
+      expandedProgressLogs.value[index] = details.open;
+      if (!details.open) return;
       nextTick(() => {
-        const panel = event.currentTarget.querySelector(".progress-log-scroll");
+        const panel = details.querySelector(".progress-log-scroll");
         if (panel) panel.scrollTop = panel.scrollHeight;
       });
     }
@@ -761,6 +774,7 @@ createApp({
       results.value = [];
       summary.value = null;
       progressEvents.value = {};
+      expandedProgressLogs.value = {};
       activeSkill.value = "";
       resultQuery.value = "";
       resultPage.value = 1;
@@ -845,7 +859,7 @@ createApp({
       const snapshotResults = snapshot?.results || results.value;
       const resultByIndex = new Map(snapshotResults.map((entry) => [entry.index, entry]));
       const snapshotProgress = snapshot?.item_progress || {};
-      progressEvents.value = snapshot?.progress_events || progressEvents.value;
+      if (snapshot?.progress_events) restoreProgressEvents(snapshot.progress_events);
       const reconciled = {};
       items.value.forEach((item, index) => {
         const previous = itemProgress.value[index] || {};
@@ -885,9 +899,25 @@ createApp({
 
     function connectSSE(streamTaskId = taskId.value) {
       closeActiveStream();
-      const es = new EventSource(`/api/eval/${streamTaskId}/stream`);
+      const es = new EventSource(`/api/eval/${streamTaskId}/stream?compact=true`);
       activeEventSource = es;
-      const isSelected = () => taskId.value === streamTaskId;
+      const isSelected = () => taskId.value === streamTaskId && activeEventSource === es;
+      es.addEventListener("replay_state", (e) => {
+        if (!isSelected()) return;
+        const data = JSON.parse(e.data);
+        // 一次恢复结果和当前进度，旧结果不能覆盖正在补跑的状态。
+        results.value = data.results || [];
+        itemProgress.value = data.item_progress || {};
+        progressEvents.value = {};
+        progress.value = data.progress;
+        repairStatus.value = data.repair_status || "idle";
+        activeRetry.value = data.retry || null;
+      });
+      es.addEventListener("progress_history", (e) => {
+        if (!isSelected()) return;
+        const data = JSON.parse(e.data);
+        progressEvents.value[data.item_index] = normalizeProgressEvents(data.events);
+      });
       es.addEventListener("start", () => {
         if (!isSelected()) return;
         selectedTaskStatus.value = "running";
@@ -928,16 +958,13 @@ createApp({
         progress.value = d.progress;
         if (index != null) {
           const previous = itemProgress.value[index] || {};
-          itemProgress.value = {
-            ...itemProgress.value,
-            [index]: {
-              ...previous,
-              status: d.result.error ? "error" : "done",
-              percent: 100,
-              message: d.result.error ? "评测失败" : "评测完成",
-              stage_rank: d.result.error ? (previous.stage_rank ?? 0) : 4,
-              finished_at: Date.now(),
-            },
+          itemProgress.value[index] = {
+            ...previous,
+            status: d.result.error ? "error" : "done",
+            percent: 100,
+            message: d.result.error ? "评测失败" : "评测完成",
+            stage_rank: d.result.error ? (previous.stage_rank ?? 0) : 4,
+            finished_at: Date.now(),
           };
         }
       });
@@ -948,15 +975,12 @@ createApp({
         if (!Number.isInteger(index)) return;
         const previous = itemProgress.value[index] || {};
         const status = data.status === "succeeded" ? "done" : (data.status === "failed" ? "error" : previous.status);
-        itemProgress.value = {
-          ...itemProgress.value,
-          [index]: {
-            ...previous,
-            status,
-            percent: 100,
-            message: data.status === "succeeded" ? "补跑成功" : (data.status === "failed" ? "补跑仍失败" : "补跑已跳过"),
-            finished_at: Date.now(),
-          },
+        itemProgress.value[index] = {
+          ...previous,
+          status,
+          percent: 100,
+          message: data.status === "succeeded" ? "补跑成功" : (data.status === "failed" ? "补跑仍失败" : "补跑已跳过"),
+          finished_at: Date.now(),
         };
       });
       es.addEventListener("done", (e) => {
@@ -1258,7 +1282,8 @@ createApp({
       items.value = d.items || [];
       results.value = d.results || [];
       itemProgress.value = d.item_progress || {};
-      progressEvents.value = d.progress_events || {};
+      restoreProgressEvents(d.progress_events);
+      expandedProgressLogs.value = {};
       summary.value = d.summary || null;
       repairStatus.value = d.repair_status || "idle";
       const retryRuns = Object.values(d.retry_runs || {});
@@ -1325,7 +1350,7 @@ createApp({
       queueState, queueEntries, selectedTaskStatus, queueNotice, taskStatusLabel, queueKindLabel,
       repairStatus, retryStatusLabel, retrySubmitting, selectedRetryIndexes, activeRetry,
       failedResultIndexes, retryIndexSelected, toggleRetryIndex, retryFailedCases,
-      itemProgress, progressEvents, progressRows, pagedProgressRows, progressStages,
+      itemProgress, progressEvents, expandedProgressLogs, pagedProgressRows, progressStages,
       historyItems, historyNoteDrafts, historyNoteEditing, loadingHistory, pageSize,
       opPage, opPageSize, opPageCount, opJumpPage,
       progressPage, progressPageCount, progressJumpPage,
