@@ -11,7 +11,7 @@ Use Python 3.10 or later. Install the editable package and development/web depen
 ```bash
 python -m pip install -e ".[dev,web]"
 python -m pytest -q
-python -m uvicorn auto_eval.web.server:app --host 127.0.0.1 --port 8503
+python -m uvicorn auto_eval.web.server:app --host 127.0.0.1 --port 8054
 ```
 
 The test command runs the suite with asyncio support enabled. The Uvicorn command serves both the API and static UI; there is no CLI entry point — all evaluation goes through the web UI or `auto_eval.web.runner`.

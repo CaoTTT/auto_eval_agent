@@ -1,6 +1,6 @@
 """FastAPI 后端：路由 + SSE 实时流 + 静态前端挂载。
 
-启动：python -m auto_eval.web.server  （默认 http://localhost:8503）
+启动：python -m auto_eval.web.server  （默认 http://localhost:8054）
 """
 from __future__ import annotations
 
@@ -860,4 +860,4 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8503)
+    uvicorn.run(app, host="0.0.0.0", port=8054)
