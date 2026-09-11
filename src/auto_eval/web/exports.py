@@ -17,6 +17,14 @@ from .tasks import peek_task_async
 logger = logging.getLogger(__name__)
 
 
+def xlsx_download_name(dataset_name: str, task_id: str) -> str:
+    """Use the uploaded dataset basename on both Windows and Linux servers."""
+    basename = str(dataset_name or "").replace("\\", "/").rsplit("/", 1)[-1]
+    stem = Path(basename).stem if basename else str(task_id or "测评数据")
+    stem = re.sub(r'[<>:"/\\|?*\x00-\x1f\ud800-\udfff\ufffe\uffff]', "_", stem).strip(" .")
+    return f"{stem or '测评数据'}_模型测评结果.xlsx"
+
+
 class XlsxExports:
     def __init__(self, directory: Path, *, capacity: int = 4, ttl: float = 1800):
         self.directory = directory
@@ -58,7 +66,8 @@ class XlsxExports:
         job = self.jobs.get(key)
         if not job:
             raise HTTPException(404, "导出记录已过期，请重新导出")
-        return {"export_id": key, "task_id": job["task_id"], "status": job["status"], "error": job.get("error", "")}
+        return {"export_id": key, "task_id": job["task_id"], "status": job["status"],
+                "error": job.get("error", ""), "filename": job.get("filename", "")}
 
     def create(self, task_id: str) -> dict:
         self.cleanup()
@@ -89,6 +98,7 @@ class XlsxExports:
                     raise ValueError("任务不存在或已删除")
                 # 快照在开始生成时固定；运行中的原任务可以继续更新。
                 snapshot = copy.deepcopy(task_to_snapshot(task))
+                job["filename"] = xlsx_download_name(snapshot.get("dataset_name", ""), job["task_id"])
                 await asyncio.to_thread(self._write, snapshot, job["path"])
                 job["status"] = "ready"
         except Exception as exc:

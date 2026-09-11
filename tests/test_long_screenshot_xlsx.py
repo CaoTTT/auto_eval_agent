@@ -308,9 +308,12 @@ def test_old_video_exports_do_not_add_image_parts(mode):
 
 @pytest.mark.asyncio
 async def test_existing_export_endpoint_includes_original_images(tmp_path, monkeypatch):
+    from urllib.parse import unquote
+
     path = tmp_path / "a.png"
     raw = make_image(path)
     data = snapshot([screenshot_item([path, path])])
+    data["dataset_name"] = "测试数据.jsonl"
     async def peek(_id):
         return _task_from_snapshot(data, "task")
     monkeypatch.setattr(server, "peek_task_async", peek)
@@ -318,6 +321,7 @@ async def test_existing_export_endpoint_includes_original_images(tmp_path, monke
     response = await server.api_export("task", "xlsx")
     assert response.status_code == 200
     assert response.media_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    assert unquote(response.headers["content-disposition"]).endswith("测试数据_模型测评结果.xlsx")
     archive, sheets = workbook(Path(response.path).read_bytes())
     assert embedded_cells(archive, sheets["原始长截图"]) == {"D2": raw, "E2": raw}
     await response.background()

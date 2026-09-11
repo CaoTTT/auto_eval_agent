@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <title>auto_eval 评估台</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260911_image_collapse">
+  <link rel="stylesheet" href="/static/style.css?v=20260911_export_feedback">
   <style>
     .op-cards { display:flex; flex-direction:column; gap:12px; }
     .op-card { border:1px solid #e2e8f0; border-radius:8px; padding:12px; background:#fafbfc; }
@@ -77,7 +77,7 @@
             <td>{{ h.preview }}</td>
             <td style="white-space:nowrap">
               <button @click="loadHistoryTask(h.task_id)">{{ loadingTaskId === h.task_id ? '加载中…' : '加载' }}</button>
-              <button @click="exportXlsx(h.task_id)" :disabled="!!exportingTaskId">导出 Excel</button>
+              <button @click="exportXlsx(h.task_id)" :disabled="!!exportingTaskId">{{ exportingTaskId === h.task_id ? '正在生成 Excel…' : '导出 Excel' }}</button>
               <button @click="delHistory(h.task_id)" class="btn-danger">删除</button>
             </td>
             <td class="history-note-cell">
@@ -105,9 +105,13 @@
     </div>
     <p v-else class="hint">暂无历史记录。</p>
   </details>
-  <section v-if="exportMessage || exportError" aria-live="polite">
+  <section v-if="exportMessage || exportError" class="export-notice" role="status" aria-live="polite" aria-atomic="true" :aria-busy="!!exportingTaskId">
+    <div class="export-notice-heading">
+      <strong>{{ exportError ? 'Excel 导出失败' : (exportingTaskId ? '正在准备 Excel' : 'Excel 已生成') }}</strong>
+      <button v-if="!exportingTaskId" @click="exportMessage=''; exportError=''; exportDownloadUrl=''" aria-label="关闭导出提示">关闭</button>
+    </div>
     <p v-if="exportMessage">{{ exportMessage }}</p>
-    <p v-if="exportError" class="error">{{ exportError }}</p>
+    <p v-if="exportError" class="err">{{ exportError }}</p>
     <a v-if="exportDownloadUrl" :href="exportDownloadUrl" download>下载 Excel 文件</a>
   </section>
   <section>
@@ -322,7 +326,7 @@
     <h2>③ 结果
       <button @click="exportCsv" :disabled="!taskId || !!loadingTaskId">导出 CSV</button>
       <button @click="exportJson" :disabled="!taskId || !!loadingTaskId">导出 JSON</button>
-      <button @click="exportXlsx()" :disabled="!taskId || !!loadingTaskId || !!exportingTaskId">导出 XLSX（完整）</button>
+      <button @click="exportXlsx()" :disabled="!taskId || !!loadingTaskId || !!exportingTaskId">{{ exportingTaskId === taskId ? '正在生成 Excel…' : '导出 XLSX（完整）' }}</button>
       <button v-if="isVideoMode" @click="exportFrames" :disabled="!taskId || !!loadingTaskId">导出视觉证据 ZIP</button>
       <span v-if="loadingTaskId">正在加载任务，请稍候…</span>
       <button v-if="summary && summary.failed" @click="retryFailedCases(null)" :disabled="retrySubmitting || ['queued','running'].includes(repairStatus)">
@@ -478,6 +482,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20260911_image_collapse"></script>
+  <script type="module" src="/static/app.js?v=20260911_export_filename"></script>
 </body>
 </html>

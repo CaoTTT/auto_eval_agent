@@ -4,6 +4,15 @@ body {
   margin: 0; padding: 24px; color: #1f2937; background: #f9fafb;
 }
 #app { width: 100%; max-width: 1800px; margin: 0 auto; }
+.export-notice {
+  position: fixed; right: 20px; bottom: 20px; z-index: 1000;
+  width: min(440px, calc(100vw - 32px)); max-height: calc(100vh - 40px); overflow: auto;
+  margin: 0; border-color: #93c5fd; box-shadow: 0 8px 28px #1e3a8a26;
+  overflow-wrap: anywhere;
+}
+.export-notice-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.export-notice p { margin: 10px 0; font-size: 14px; line-height: 1.6; }
+.export-notice a { display: inline-block; color: #1d4ed8; font-weight: 600; }
 h1 { font-size: 22px; margin: 0 0 16px; color: #1e3a8a; }
 h1 small { font-size: 13px; color: #6b7280; font-weight: normal; }
 h2 { font-size: 16px; margin: 0 0 10px; color: #1e40af; }

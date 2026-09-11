@@ -1477,7 +1477,21 @@ createApp({
         if (disposed) return;
         if (data.status !== "ready") throw new Error(data.error || "生成 Excel 失败");
         exportDownloadUrl.value = `/api/exports/${encodeURIComponent(data.export_id)}/download`;
-        exportMessage.value = `任务 ${id}：Excel 已生成，请点击下载（30 分钟内有效）。`;
+        exportMessage.value = `任务 ${id}：Excel 已生成。若未开始下载，请点击下方链接（30 分钟内有效）。`;
+        // Use a same-origin download link: no popup and no full-file blob in memory.
+        const link = document.createElement("a");
+        link.href = exportDownloadUrl.value;
+        link.download = data.filename || "";
+        link.hidden = true;
+        document.body.appendChild(link);
+        try {
+          link.click();
+        } catch (error) {
+          // A browser may block automatic downloads; keep the manual link available.
+          console.warn("自动下载未能触发，请使用下载链接", error);
+        } finally {
+          link.remove();
+        }
       } catch (error) {
         exportMessage.value = "";
         exportError.value = `任务 ${id} 导出失败：${error?.message || "网络错误"}。可再次点击导出重试。`;

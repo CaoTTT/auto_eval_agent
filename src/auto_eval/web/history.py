@@ -1493,7 +1493,7 @@ def _sheet_xml(rows: list[dict], *, picture_sheet: bool = False) -> str:
             ):
                 cells.append(f'<c r="{ref}"{style}><v>{value}</v></c>')
             else:
-                cells.append(f'<c r="{ref}" t="inlineStr"{style}><is><t>{escape(_cell(value))}</t></is></c>')
+                cells.append(f'<c r="{ref}" t="inlineStr"{style}><is><t xml:space="preserve">{_xlsx_text(value)}</t></is></c>')
         height = ' ht="240" customHeight="1"' if picture_sheet and r_idx > 1 else ""
         if not picture_sheet and r_idx > 1 and any(isinstance(value, CellImage) for value in row):
             height = ' ht="96" customHeight="1"'
@@ -1514,6 +1514,17 @@ def _sheet_xml(rows: list[dict], *, picture_sheet: bool = False) -> str:
         f"{views}<cols>{cols}</cols><sheetData>{''.join(rows_xml)}</sheetData>"
         "</worksheet>"
     )
+
+
+def _xlsx_text(value: Any) -> str:
+    """Render XML-invalid characters visibly without changing stored results."""
+    text = re.sub(
+        r"[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]",
+        lambda match: f"\\u{ord(match.group()):04x}",
+        _cell(value),
+    )
+    # XML parsers normalize literal carriage returns; keep the original text.
+    return escape(text).replace("\r", "&#13;")
 
 
 def _col(idx: int) -> str:

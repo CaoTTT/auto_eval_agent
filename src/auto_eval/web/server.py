@@ -52,7 +52,7 @@ from .video_prepare import (
 )
 from .runner import run_eval, run_retry, run_update_batch, spawn_background
 from .scheduler import EvalScheduler
-from .exports import XlsxExports
+from .exports import XlsxExports, xlsx_download_name
 from .persistence import queue_task_save, wait_task_save, task_save_pending
 from .tasks import (
     TASKS,
@@ -840,7 +840,7 @@ async def api_xlsx_download(export_id: str):
     return FileResponse(
         XLSX_EXPORTS.jobs[export_id]["path"],
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        filename=f"eval_{state['task_id']}.xlsx",
+        filename=state["filename"],
     )
 
 
@@ -871,7 +871,7 @@ def _export_snapshot(task_id: str, format: str, data: dict):
         return FileResponse(
             archive_path,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            filename=f"eval_{task_id}.xlsx",
+            filename=xlsx_download_name(data.get("dataset_name", ""), task_id),
             background=BackgroundTask(archive_path.unlink, missing_ok=True),
         )
 

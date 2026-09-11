@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import zipfile
 from pathlib import Path
+from urllib.parse import unquote
 
 import httpx
 import pytest
@@ -113,6 +114,7 @@ async def test_export_other_task_while_generation_is_busy(tmp_path, monkeypatch,
         hashes.add(hashlib.sha256(path.read_bytes()).hexdigest())
         item[f"screenshot{n}" if mode == "long_screenshot" else f"video{n}"] = str(path)
     historical = Task(id="B", mode="compare", status="done", items=[item], options={}, results=[{"index": 0, "error": "old failure"}])
+    historical.dataset_name = "测试数据.v1.jsonl"
     running = Task(id="A", mode="compare", status="running", active_runs=1, items=[], options={})
     async def peek(key):
         return {"A": running, "B": historical}.get(key)
@@ -137,11 +139,14 @@ async def test_export_other_task_while_generation_is_busy(tmp_path, monkeypatch,
             assert (await client.post("/api/eval/B/exports")).json()["export_id"] == key
             # Export is a frozen view; subsequent result changes cannot corrupt it.
             historical.items[0]["query"] = "changed later"
+            historical.dataset_name = "另一个文件.jsonl"
         finally:
             release.set()
         await wait_until(lambda: manager.jobs[key]["status"] == "ready")
         download = await client.get(f"/api/exports/{key}/download")
         assert download.status_code == 200
+        assert unquote(download.headers["content-disposition"]).endswith("测试数据.v1_模型测评结果.xlsx")
+        assert (await client.get(f"/api/exports/{key}")).json()["filename"] == "测试数据.v1_模型测评结果.xlsx"
         archive = zipfile.ZipFile(io.BytesIO(download.content))
         assert archive.testzip() is None
         images = [name for name in archive.namelist() if name.startswith("xl/media/")]
