@@ -66,6 +66,27 @@ async function main() {
   items[3].screenshot3='c.png';
   items[3].query_image_meta=items[1].query_image_meta;
   assert.equal(app.evidenceImages({index:3}).length,4,'one query image plus three product screenshots');
+  // Image folding is page-local and must not alter case inputs or results.
+  app.modalityFilter.value='';
+  app.results.value=Array.from({length:15},(_,index)=>({index}));
+  const inputsBefore=JSON.stringify(app.opItems.value);
+  const resultsBefore=JSON.stringify(app.results.value);
+  app.setPageEvidenceExpanded(false);
+  assert.equal(app.evidenceExpanded({index:0}),false);
+  assert.equal(app.evidenceExpanded({index:10}),true);
+  app.setEvidenceExpanded({index:0},true);
+  assert.equal(app.evidenceExpanded({index:0}),true);
+  assert.equal(app.evidenceExpanded({index:1}),false);
+  app.resultPage.value=2;
+  app.setPageEvidenceExpanded(false);
+  assert.equal(app.evidenceExpanded({index:10}),false);
+  app.setPageEvidenceExpanded(true);
+  assert.equal(app.evidenceExpanded({index:10}),true);
+  assert.equal(app.evidenceExpanded({index:1}),false,'page two controls must not expand page one');
+  assert.equal(JSON.stringify(app.opItems.value),inputsBefore);
+  assert.equal(JSON.stringify(app.results.value),resultsBefore);
+  app.taskId.value='another-task';
+  assert.equal(app.evidenceExpanded({index:1}),true,'another task has independent folding state');
   console.log('VQA mixed import, edit, filter, submit and history checks passed');
 }
 main().catch(error=>{console.error(error);process.exitCode=1;});

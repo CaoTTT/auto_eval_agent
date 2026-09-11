@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <title>auto_eval 评估台</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260910_vqa_images">
+  <link rel="stylesheet" href="/static/style.css?v=20260911_image_collapse">
   <style>
     .op-cards { display:flex; flex-direction:column; gap:12px; }
     .op-card { border:1px solid #e2e8f0; border-radius:8px; padding:12px; background:#fafbfc; }
@@ -357,6 +357,11 @@
         <input v-model="resultQuery" @input="resetResultPage" placeholder="搜索题号、query、context、回答或理由">
         <select v-if="mode==='compare'" v-model="modalityFilter" @change="resetResultPage"><option value="">全部题型</option><option value="text">文字题</option><option value="text_image">图文题</option></select>
         <span class="result-count">共 {{ filteredResults.length }} 条</span>
+        <template v-if="pagedResults.some(r => evidenceImages(r).length)">
+          <span class="hint">当前页图片</span>
+          <button @click="setPageEvidenceExpanded(false)">全部折叠图片</button>
+          <button @click="setPageEvidenceExpanded(true)">全部展开图片</button>
+        </template>
       </div>
       <div class="result-table-wrap">
         <details v-if="summary && summary.by_input_modality">
@@ -419,9 +424,9 @@
                 </td>
               </tr>
               <tr v-if="evidenceImages(r).length"><td colspan="99" class="query-image-panel">
-                <details open>
-                  <summary>输入图片与回答长截图 · {{ evidenceImages(r).length }} 张</summary>
-                  <div class="evidence-gallery">
+                <div>
+                  <button @click="setEvidenceExpanded(r, !evidenceExpanded(r))" :aria-expanded="evidenceExpanded(r)">{{ evidenceExpanded(r) ? '折叠' : '展开' }}输入图片与回答长截图 · {{ evidenceImages(r).length }} 张</button>
+                  <div v-if="evidenceExpanded(r)" class="evidence-gallery">
                     <figure v-for="picture in evidenceImages(r)" :key="picture.key" class="evidence-card">
                       <figcaption>{{ picture.label }}</figcaption>
                       <p v-if="evidenceImageErrors[picture.key]" class="err">图片不可用或原文件已变化，请检查源文件。</p>
@@ -432,7 +437,7 @@
                       <small v-if="picture.longScreenshot">可上下滚动查看完整长截图</small>
                     </figure>
                   </div>
-                </details>
+                </div>
               </td></tr>
               <tr v-if="r.error" class="result-error-detail"><td colspan="99">评估失败：{{ r.error }}</td></tr>
             </template>
@@ -473,6 +478,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20260910_vqa_images"></script>
+  <script type="module" src="/static/app.js?v=20260911_image_collapse"></script>
 </body>
 </html>

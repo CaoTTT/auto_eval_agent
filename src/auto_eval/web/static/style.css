@@ -3,7 +3,7 @@ body {
   font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
   margin: 0; padding: 24px; color: #1f2937; background: #f9fafb;
 }
-#app { max-width: 1180px; margin: 0 auto; }
+#app { width: 100%; max-width: 1800px; margin: 0 auto; }
 h1 { font-size: 22px; margin: 0 0 16px; color: #1e3a8a; }
 h1 small { font-size: 13px; color: #6b7280; font-weight: normal; }
 h2 { font-size: 16px; margin: 0 0 10px; color: #1e40af; }

@@ -52,6 +52,16 @@ createApp({
       return r.query_image_meta || items.value[r.index]?.query_image_meta || [];
     }
     const evidenceImageErrors = ref({});
+    const collapsedEvidence = ref({});
+    function evidenceExpanded(row) {
+      return !collapsedEvidence.value[`${taskId.value}:${row.index}`];
+    }
+    function setEvidenceExpanded(row, expanded) {
+      collapsedEvidence.value[`${taskId.value}:${row.index}`] = !expanded;
+    }
+    function setPageEvidenceExpanded(expanded) {
+      pagedResults.value.forEach(row => setEvidenceExpanded(row, expanded));
+    }
     const evidenceRevisions = ref({});
     let nextEvidenceRevision = 0;
     function refreshEvidence(resultRows) {
@@ -1526,7 +1536,7 @@ createApp({
       resultBrowser,
       activeSkill, resultQuery, resultPage, resultPageSize,
       modalityFilter, modalityCounts, queryImageMetas, onQueryImage, setQueryImagePath,
-      evidenceImages, evidenceImageErrors,
+      evidenceImages, evidenceImageErrors, evidenceExpanded, setEvidenceExpanded, setPageEvidenceExpanded,
       skillTabs, filteredResults, pagedResults, pageCount, resultTableWidth,
       formatHint, resultCols, opItems, pagedOpItems, opPreparing, canSubmit,
       switchMode, onOpManifestFile, submit, cell, columnWidth, exportCsv, exportJson, exportXlsx, exportFrames, itemArtifactUrl, addOpItem, removeOpItem, onOpVideo, onOpDrop,
