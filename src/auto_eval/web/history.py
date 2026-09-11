@@ -304,7 +304,7 @@ def _load_meta_row(path: Path) -> dict | None:
     return row
 
 
-def list_snapshots(limit: int = 50) -> list[dict]:
+def list_snapshots(limit: int | None = 50) -> list[dict]:
     HISTORY_DIR.mkdir(parents=True, exist_ok=True)
     rows: list[dict] = []
     for path in HISTORY_DIR.glob("*.json"):

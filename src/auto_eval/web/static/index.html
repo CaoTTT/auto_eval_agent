@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <title>auto_eval 评估台</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260911_export_feedback">
+  <link rel="stylesheet" href="/static/style.css?v=20260911_dataset_reuse">
   <style>
     .op-cards { display:flex; flex-direction:column; gap:12px; }
     .op-card { border:1px solid #e2e8f0; border-radius:8px; padding:12px; background:#fafbfc; }
@@ -115,10 +115,12 @@
     <a v-if="exportDownloadUrl" :href="exportDownloadUrl" download>下载 Excel 文件</a>
   </section>
   <section>
-    <h2>① 批量输入</h2>
+    <h2>{{ mode==='compare' ? '① 测试数据' : '① 批量输入' }}</h2>
     <p class="hint">{{ formatHint }}</p>
 
-    <div v-if="isVideoMode" class="op-cards">
+    <compare-dataset-panel v-if="mode==='compare'" :items="opItems" :dataset-name="datasetName" :source-task-id="datasetSourceTaskId" :revision="datasetRevision" :busy="opPreparing || opItems.some(item => item.queryUploading)" :errors="errors"
+      @upload="onOpManifestFile" @use="useComparisonDataset" @add="addOpItem" @remove="removeOpItem" @query-upload="onQueryImage" @query-path="setQueryImagePath"></compare-dataset-panel>
+    <div v-if="isVideoMode && mode!=='compare'" class="op-cards">
       <div class="op-import">
         <div class="op-import-row">
           <label class="op-upload-btn">
@@ -157,35 +159,7 @@
         <div v-if="entry.item.videoPath" class="op-path">{{ entry.item.videoPath }}</div>
         <textarea v-model="entry.item.answer" rows="2" placeholder="(可选) answer_text，只辅助理解回答语义，不能证明画面中存在挂卡或蓝色链接"></textarea>
       </div>
-      <template v-if="mode==='compare'">
-        <p class="hint">文字题 {{ modalityCounts.text }} · 图文题 {{ modalityCounts.text_image }} · 全部使用本任务所选标准。每题可选一张提问图片。</p>
-        <div v-for="entry in pagedOpItems" :key="entry.item._uiKey" class="op-card">
-          <div class="op-card-head"><strong>题目 {{ entry.index+1 }} · {{ entry.item.queryImages.length ? '图文题' : '文字题' }}</strong>
-            <button v-if="opItems.length>1" @click="removeOpItem(entry.index)" class="btn-danger">删除</button></div>
-          <textarea v-model="entry.item.query" rows="2" placeholder="用户问题（必填）"></textarea>
-          <textarea v-model="entry.item.context" rows="2" placeholder="共享背景（可选）"></textarea>
-          <div class="query-image-panel">
-            <strong>用户提问图片（可选）</strong>
-            <input :value="entry.item.queryImages[0] || ''" @input="setQueryImagePath(entry.item, $event.target.value)" placeholder="授权本地图片路径，留空为文字题" :disabled="entry.item.queryUploading">
-            <label class="op-upload-btn"><input type="file" accept=".png,.jpg,.jpeg,.webp" @change="onQueryImage($event, entry.index)" :disabled="entry.item.queryUploading" hidden>上传 / 替换提问图片</label>
-            <button v-if="entry.item.queryImages.length" @click="setQueryImagePath(entry.item, '')" :disabled="entry.item.queryUploading">移除图片</button>
-            <span v-if="entry.item.queryUploading">上传中…</span><span class="err">{{ entry.item.queryUploadError }}</span>
-            <span v-for="meta in entry.item.queryImageMeta" :key="meta.image_id">
-              <a :href="meta.preview_url" target="_blank" rel="noopener"><img :src="meta.preview_url" class="query-image-preview" alt="用户提问图片">查看图片</a>
-              <a :href="meta.preview_url+'?original=true'" class="row-export-link">下载原图</a>
-            </span>
-          </div>
-          <label>回答证据 <select v-model="entry.item.evidenceMode"><option value="video_frames">录屏视频</option><option value="long_screenshot">回答长截图</option></select></label>
-          <label>产品数 <select v-model.number="entry.item.productCount"><option :value="2">2</option><option :value="3">3</option></select></label>
-          <div v-for="n in entry.item.productCount" :key="n" class="answer-evidence-panel">
-            <strong>产品 {{ n }} 回答证据</strong>
-            <input v-if="entry.item.evidenceMode==='long_screenshot'" v-model="entry.item['screenshot'+n+'Path']" placeholder="回答长截图路径">
-            <input v-else v-model="entry.item['video'+n+'Path']" placeholder="录屏视频路径">
-            <textarea v-model="entry.item['answer'+n]" rows="2" placeholder="产品回答文字（可选）"></textarea>
-            <input v-model="entry.item['context'+n]" placeholder="产品背景（可选）">
-          </div>
-        </div>
-      </template>
+
       <div class="pagination" v-if="opPageCount>1">
         <span class="page-size page-size-fixed">每页 {{ opPageSize }} 条</span>
         <button @click="changeOpPage(-1)" :disabled="opPage<=1">上一页</button>
@@ -482,6 +456,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20260911_export_filename"></script>
+  <script type="module" src="/static/app.js?v=20260911_dataset_reuse"></script>
 </body>
 </html>

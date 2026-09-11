@@ -1,4 +1,4 @@
-import { createApp, ref, computed, onMounted, onUnmounted, nextTick } from "https://unpkg.com/vue@3/dist/vue.esm-browser.js";
+import { createApp, ref, computed, onMounted, onUnmounted, nextTick } from "./compare-data.js?v=20260911_dataset_reuse";
 
 createApp({
   setup() {
@@ -12,6 +12,9 @@ createApp({
     const mode = ref("rich_content");
     const isVideoMode = computed(() => true);
     const datasetName = ref("");
+    const datasetSourceTaskId = ref("");
+    const datasetRevision = ref(0);
+    let datasetBaseline = "", datasetImportVersion = 0;
     const items = ref([]);
     let opItemSequence = 0;
     const opItems = ref([newOpItem()]);
@@ -587,6 +590,10 @@ createApp({
     }
 
     function switchMode(k) {
+      datasetImportVersion++;
+      opPreparing.value=false;
+      datasetSourceTaskId.value = "";
+      datasetBaseline = "";
       cancelHistoryLoad();
       mode.value = k;
       selectedJudges.value = defaultJudgeSelection();
@@ -603,6 +610,50 @@ createApp({
     // —— 视频评测：逐题卡片（query + 可选 context + 视频上传 + 可选 answer_text）——
     function newOpItem() {
       return { _uiKey: ++opItemSequence, id: "", query: "", queryImages: [], queryImageMeta: [], queryUploading: false, queryUploadError: "", evidenceMode: "video_frames", screenshot1Path: "", screenshot2Path: "", screenshot3Path: "", context: "", category: "", productCount: 2, videoName: "", videoPath: "", video1Path: "", video2Path: "", video3Path: "", frames: [], frameCount: 0, duration: 0, answer: "", answer1: "", answer2: "", answer3: "", context1: "", context2: "", context3: "", taskStartTime: null, taskEndTime: null, sourceLine: null, sourceData: null, sessionGroup: null, turnIndex: null, uploading: false, uploadError: "" };
+    }
+    function draftFingerprint() {
+      const keys = ['id','query','queryImages','context','category','productCount','evidenceMode',
+        'taskStartTime','taskEndTime','video1Path','video2Path','video3Path','screenshot1Path',
+        'screenshot2Path','screenshot3Path','answer1','answer2','answer3','context1','context2','context3'];
+      return JSON.stringify(opItems.value.map(item => Object.fromEntries(keys.map(key => [key,item[key]]))));
+    }
+    function confirmDatasetReplacement() {
+      const changed = datasetBaseline ? draftFingerprint() !== datasetBaseline : opItems.value.length > 1 || opItems.value.some(item =>
+        item.queryImages.length || item.productCount !== 2 || item.evidenceMode !== 'video_frames' ||
+        ['id','query','context','category','video1Path','video2Path','video3Path','screenshot1Path',
+          'screenshot2Path','screenshot3Path','answer1','answer2','answer3','context1','context2','context3'].some(key=>item[key]));
+      return !changed || confirm('当前数据有未提交的修改。使用新数据会替换输入区，是否继续？');
+    }
+    function comparisonDraftRows(rows) {
+      return rows.map(raw => {
+        const item = {...(raw.source_data || {}), ...raw};
+        return {...newOpItem(), id:item.id || '', query:item.query || item.question || '',
+          context:item.context || '', category:item.category || '',
+          queryImages:[...(item.query_images || [])], queryImageMeta:item.query_image_meta || [],
+          productCount:item.product_count || (item.video3 || item.screenshot3 ? 3 : 2),
+          evidenceMode:item.evidence_mode || (item.screenshot1 ? 'long_screenshot' : 'video_frames'),
+          ...Object.fromEntries([1,2,3].flatMap(n => [
+            [`video${n}Path`,item[`video${n}`] || ''], [`screenshot${n}Path`,item[`screenshot${n}`] || ''],
+            [`answer${n}`,item[`answer${n}`] || ''], [`context${n}`,item[`context${n}`] || ''],
+            [`screenshotMeta${n}`,item[`screenshot_meta${n}`] || {}],
+          ])), taskStartTime:item.task_start_time ?? null, taskEndTime:item.task_end_time ?? null,
+          sourceLine:item.source_line ?? null, sourceData:raw.source_data || null,
+          sessionGroup:item.session_group ?? null, turnIndex:item.turn_index ?? null};
+      });
+    }
+    function detachResultView() {
+      closeActiveStream();taskId.value='';results.value=[];summary.value=null;
+      itemProgress.value={};progressEvents.value={};running.value=false;selectedTaskStatus.value='';
+      repairStatus.value='idle';activeRetry.value=null;selectedRetryIndexes.value=[];
+      runError.value='';queueNotice.value='';progress.value=0;total.value=0;
+    }
+    function useComparisonDataset(data) {
+      if (mode.value !== 'compare' || !confirmDatasetReplacement()) return;
+      datasetImportVersion++;opPreparing.value=false;cancelHistoryLoad();detachResultView();
+      items.value=JSON.parse(JSON.stringify(data.items));
+      opItems.value=comparisonDraftRows(items.value);
+      datasetName.value=data.dataset_name || '历史测评数据';datasetSourceTaskId.value=data.task_id;
+      opPage.value=1;errors.value=[];datasetBaseline=draftFingerprint();datasetRevision.value++;
     }
     async function onQueryImage(event, index) {
       const item = opItems.value[index];
@@ -669,13 +720,10 @@ createApp({
       const file = e.target.files && e.target.files[0];
       e.target.value = "";
       if (!file) return;
-      datasetName.value = file.name || "";
+      const importVersion = ++datasetImportVersion;
+      const importMode = mode.value;
       opPreparing.value = true;
       errors.value = [];
-      items.value = [];
-      opItems.value = [newOpItem()];
-      opPage.value = 1;
-      opJumpPage.value = "";
       try {
         const content = await file.text();
         const isCsv = /\.csv$/i.test(file.name || "");
@@ -689,6 +737,7 @@ createApp({
           body: JSON.stringify(parseBody),
         });
         const parsed = await parseResponse.json().catch(() => ({}));
+        if (importVersion !== datasetImportVersion || importMode !== mode.value) return;
         console.log("[onOpManifestFile] response ok:", parseResponse.ok, "items:", (parsed.items || []).length, "errors:", (parsed.errors || []).length);
         if (!parseResponse.ok) throw new Error(parsed.detail || (isCsv ? "CSV 解析请求失败" : "JSONL 解析请求失败"));
         const importErrors = [...(parsed.errors || [])];
@@ -698,6 +747,10 @@ createApp({
           return;
         }
 
+        if (mode.value === 'compare' && !confirmDatasetReplacement()) return;
+        if (mode.value === 'compare') { cancelHistoryLoad();detachResultView(); }
+        datasetName.value = file.name || '';
+        datasetSourceTaskId.value = '';
         errors.value = importErrors;
         const imported = parsed.items || [];
         if (imported.length) {
@@ -735,20 +788,23 @@ createApp({
             turnIndex: item.turn_index ?? null,
           }));
           opPage.value = 1;
+          if (mode.value === 'compare') opItems.value = comparisonDraftRows(imported);
+          datasetBaseline = draftFingerprint();datasetRevision.value++;
           console.log("[onOpManifestFile] opItems mapped:", opItems.value.length, "first videoPath:", opItems.value[0]?.videoPath, "first query:", opItems.value[0]?.query);
         }
       } catch (error) {
         console.error("[onOpManifestFile] error:", error);
+        if (importVersion !== datasetImportVersion) return;
         errors.value = ["批量导入失败：" + (error?.message || String(error))];
       } finally {
-        opPreparing.value = false;
+        if (importVersion === datasetImportVersion) opPreparing.value = false;
       }
     }
 
     function opItemReady(it) {
       if (!it.query.trim()) return false;
       if (mode.value !== "compare") return Boolean((it.frames || []).length || it.videoPath);
-      const productCount = Number(it.productCount) === 3 || it.video3Path || it.screenshot3Path ? 3 : 2;
+      const productCount = Number(it.productCount) === 3 ? 3 : 2;
       if (it.evidenceMode === "long_screenshot") {
         return Boolean(it.screenshot1Path && it.screenshot2Path && (productCount === 2 || it.screenshot3Path));
       }
@@ -768,7 +824,11 @@ createApp({
       cancelHistoryLoad();
       const submitViewVersion = historyLoadVersion;
       runError.value = "";
-      const valid = opItems.value.filter(opItemReady);
+      const valid = mode.value === 'compare' ? opItems.value : opItems.value.filter(opItemReady);
+      if (mode.value === 'compare' && valid.some(item => !opItemReady(item))) {
+        runError.value = '存在未填写问题或缺少产品证据的 Case，请展开检查；不会跳过这些条目提交。';
+        return;
+      }
       if (!valid.length) {
         alert("请为每题填写 query，并导入完整的长截图或录屏路径后再评估。");
         return;
@@ -782,7 +842,7 @@ createApp({
         };
         if (mode.value === "compare") {
           item.query_images = [...(it.queryImages || [])];
-          const productCount = Number(it.productCount) === 3 || it.video3Path || it.screenshot3Path ? 3 : 2;
+          const productCount = Number(it.productCount) === 3 ? 3 : 2;
           item.product_count = productCount;
           if (it.evidenceMode === "long_screenshot") {
             item.evidence_mode = "long_screenshot";
@@ -826,6 +886,7 @@ createApp({
         dataset_name: datasetName.value || "手动录入",
         evaluation_profile: mode.value === "compare" ? selectedEvaluationProfile.value : null,
         options: {
+          ...(mode.value === 'compare' && datasetSourceTaskId.value ? {dataset_source_task_id:datasetSourceTaskId.value} : {}),
           judges: selectedJudges.value,
           concurrency: concurrency.value,
           eval_timeout_s: evalTimeout.value,
@@ -858,6 +919,7 @@ createApp({
       }
       closeActiveStream();
       items.value = submittedItems;
+      datasetBaseline = draftFingerprint();
       errors.value = [];
       results.value = [];
       summary.value = null;
@@ -1366,6 +1428,8 @@ createApp({
     }
 
     async function loadHistoryTask(id) {
+      datasetImportVersion++;
+      opPreparing.value=false;
       cancelHistoryLoad();
       const version = historyLoadVersion;
       let loaded = false;
@@ -1408,6 +1472,11 @@ createApp({
             sessionGroup: item.session_group ?? null, turnIndex: item.turn_index ?? null,
           }));
           opPage.value = 1;
+        }
+        if (d.mode === 'compare') {
+          opItems.value = comparisonDraftRows(items.value);
+          datasetSourceTaskId.value = d.task_id || id;
+          datasetBaseline = draftFingerprint();datasetRevision.value++;
         }
         modalityFilter.value = "";
         results.value = d.results || [];
@@ -1528,6 +1597,7 @@ createApp({
 
     onUnmounted(() => {
       disposed = true;
+      datasetImportVersion++;
       cancelHistoryLoad();
       if (progressClockTimer != null) window.clearInterval(progressClockTimer);
       if (queueRefreshTimer != null) window.clearInterval(queueRefreshTimer);
@@ -1536,6 +1606,7 @@ createApp({
 
     return {
       modes, mode, modeLabel, isVideoMode, items, errors, judges, visibleJudges, selectedJudges, datasetName,
+      datasetSourceTaskId, datasetRevision, useComparisonDataset,
       evaluationProfiles, compareProfiles, selectedEvaluationProfile, evaluationProfileLabel,
       concurrency, evalTimeout, submitting, running, progress, total, results, summary, taskId, runError,
       queueState, queueEntries, selectedTaskStatus, queueNotice, taskStatusLabel, queueKindLabel,
