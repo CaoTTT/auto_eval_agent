@@ -302,7 +302,11 @@ def test_old_video_exports_do_not_add_image_parts(mode):
     archive, sheets = workbook(history.build_xlsx(data))
     assert "原始长截图" not in sheets
     assert not any("cellimages" in name or "/media/" in name for name in archive.namelist())
-    assert len(ET.fromstring(archive.read("xl/styles.xml")).find("s:cellXfs", NS)) == 2
+    styles = ET.fromstring(archive.read("xl/styles.xml")).find("s:cellXfs", NS)
+    # Comparison statistics append six numeric/header styles, without adding
+    # image parts or changing the two original data/header styles.
+    assert len(styles) == (8 if mode == "compare" else 2)
+    assert [style.attrib["numFmtId"] for style in list(styles)[:2]] == ["0", "0"]
     assert_valid_package(archive)
 
 

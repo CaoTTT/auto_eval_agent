@@ -22,6 +22,8 @@ from pathlib import Path
 from typing import Any
 
 from ..paths import PROJECT_ROOT, RUNS_DIR
+from .compare_statistics import SHEET_NAME as COMPARE_STATISTICS_SHEET, build_compare_statistics
+from .compare_statistics_xlsx import statistics_cell_styles, statistics_sheet_xml
 from .xlsx_images import CELL_IMAGE_REL, CellImage, OriginalImageError, WpsCellImages
 
 
@@ -360,8 +362,15 @@ def export_rows(snapshot: dict) -> dict[str, list[dict]]:
     """
     results = _results_with_identity(snapshot)
     aligned_results = _aligned_results(snapshot, results)
-    summary = snapshot.get("summary") or {}
+    summary = dict(snapshot.get("summary") or {})
     mode = snapshot.get("mode")
+    if mode == "compare" and summary:
+        # Older snapshots counted unfinished cases as failures. Refresh these
+        # counters from the same frozen rows used by the statistics worksheet.
+        failed = sum(bool(r.get("error")) or r.get("评估状态") == "评估失败" for r in aligned_results)
+        done = sum(r.get("评估状态") == "已完成" and not r.get("error") for r in aligned_results)
+        summary.update(total=len(aligned_results), done=done, failed=failed,
+                       unfinished=len(aligned_results) - done - failed)
 
     if mode == "rich_content":
         result_rows = _rich_content_export_rows(aligned_results)
@@ -1302,6 +1311,10 @@ def write_xlsx(snapshot: dict, destination) -> None:
 
 def _write_xlsx(snapshot: dict, destination) -> None:
     sheets = {name: rows for name, rows in export_rows(snapshot).items() if rows}
+    statistics = (
+        build_compare_statistics(snapshot, _aligned_results(snapshot, _results_with_identity(snapshot)))
+        if snapshot.get("mode") == "compare" else []
+    )
     if snapshot.get("mode") == "compare" and not _compare_snapshot_uses_product3(snapshot):
         for sheet_name in ("数据集明细", "逐题结果"):
             if sheet_name in sheets:
@@ -1338,14 +1351,21 @@ def _write_xlsx(snapshot: dict, destination) -> None:
             for sheet_name, query_header in (("数据集明细", "query"), ("逐题结果", "题目"), ("原始长截图", "query")):
                 if sheet_name in sheets:
                     sheets[sheet_name] = _insert_query_image_column(sheets[sheet_name], query_cells, query_header)
+        if statistics:
+            sheets[COMPARE_STATISTICS_SHEET] = []
         images.write_parts()
         zf.writestr("[Content_Types].xml", _content_types(len(sheets), images.content_types_xml()))
         zf.writestr("_rels/.rels", _root_rels())
-        zf.writestr("xl/workbook.xml", _workbook_xml(list(sheets), bool(screenshot_rows or query_rows)))
+        zf.writestr("xl/workbook.xml", _workbook_xml(list(sheets), bool(screenshot_rows or query_rows or statistics)))
         zf.writestr("xl/_rels/workbook.xml.rels", _workbook_rels(len(sheets), bool(images.images)))
-        zf.writestr("xl/styles.xml", _styles_xml(bool(screenshot_rows or query_rows)))
+        picture_styles = bool(screenshot_rows or query_rows)
+        zf.writestr("xl/styles.xml", _styles_xml(picture_styles, statistics=bool(statistics)))
         for i, (name, rows) in enumerate(sheets.items(), start=1):
-            zf.writestr(f"xl/worksheets/sheet{i}.xml", _sheet_xml(rows, picture_sheet=name in {"原始长截图", "提问图片"}))
+            xml = statistics_sheet_xml(
+                statistics, style_start=3 if picture_styles else 2,
+                escape_text=_xlsx_text, column_name=_col,
+            ) if name == COMPARE_STATISTICS_SHEET else _sheet_xml(rows, picture_sheet=name in {"原始长截图", "提问图片"})
+            zf.writestr(f"xl/worksheets/sheet{i}.xml", xml)
 
 
 def _insert_query_image_column(rows: list[dict], images: list[CellImage | str], query_header: str) -> list[dict]:
@@ -1452,22 +1472,27 @@ def _workbook_rels(sheet_count: int, has_cell_images: bool = False) -> str:
     )
 
 
-def _styles_xml(picture_sheet: bool = False) -> str:
+def _styles_xml(picture_sheet: bool = False, *, statistics: bool = False) -> str:
     picture_style = (
         '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1">'
         '<alignment vertical="top" wrapText="1"/></xf>'
     ) if picture_sheet else ""
+    extra_font = '<font><b/><sz val="12"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font>' if statistics else ""
+    extra_fills = (
+        '<fill><patternFill patternType="solid"><fgColor rgb="FF1E3A5F"/><bgColor indexed="64"/></patternFill></fill>'
+        '<fill><patternFill patternType="solid"><fgColor rgb="FFE6EEF7"/><bgColor indexed="64"/></patternFill></fill>'
+    ) if statistics else ""
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'
         '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
-        '<fonts count="2"><font><sz val="11"/><name val="Calibri"/></font>'
-        '<font><b/><sz val="11"/><name val="Calibri"/></font></fonts>'
-        '<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>'
+        f'<fonts count="{3 if statistics else 2}"><font><sz val="11"/><name val="Calibri"/></font>'
+        f'<font><b/><sz val="11"/><name val="Calibri"/></font>{extra_font}</fonts>'
+        f'<fills count="{4 if statistics else 2}"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill>{extra_fills}</fills>'
         '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'
         '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
-        f'<cellXfs count="{3 if picture_sheet else 2}"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
+        f'<cellXfs count="{(3 if picture_sheet else 2) + (6 if statistics else 0)}"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
         '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0"/>'
-        f'{picture_style}</cellXfs>'
+        f'{picture_style}{statistics_cell_styles() if statistics else ""}</cellXfs>'
         '</styleSheet>'
     )
 
