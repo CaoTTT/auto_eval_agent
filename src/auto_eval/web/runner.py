@@ -13,7 +13,11 @@ from datetime import datetime
 from pathlib import Path
 
 from ..paths import RUNS_DIR
-from ..preparation import run_preparation
+from ..preparation import run_preparation, preparation_limit
+from ..request_throttle import (
+    PREPARATION_CONCURRENCY, recommended_concurrency, supports_bailian_pacing,
+    wait_for_active,
+)
 from ..config import AppConfig, VisualModeProfile
 from ..query_images import prepare_query_images, QueryImageError, PREPARED_FIELDS
 from ..judges import (
@@ -273,7 +277,14 @@ def _make_item_evaluator(
     )
     # 垂域→中文显示名映射（rich_content.yaml 的 category_display）
     category_display = rich_profile.category_display if rich_profile else {}
-    sem = asyncio.Semaphore(int(runtime_options.get("concurrency", 4)))
+    capacity = max(1, min(128, int(runtime_options.get("concurrency", recommended_concurrency(judges_cfg)))))
+    sem = asyncio.Semaphore(capacity)
+    media_sem = asyncio.Semaphore(PREPARATION_CONCURRENCY) if any(supports_bailian_pacing(j) for j in judges_cfg) else None
+    if media_sem is not None:
+        log_event("请求调度", "启用百炼平滑调度", details={
+            "Case容量": capacity, "媒体并发": PREPARATION_CONCURRENCY,
+            "RPM目标": 480, "TPM目标": 800_000,
+        })
     eval_timeout = float(runtime_options.get("eval_timeout_s") or runtime_options.get("eval_timeout") or 300.0)
     loop = asyncio.get_running_loop()
 
@@ -462,7 +473,7 @@ def _make_item_evaluator(
                                     progress=15,
                                     progress_message="正在重新执行单题评测",
                                 )
-                            res = await asyncio.wait_for(
+                            res = await wait_for_active(
                                 _eval_one(
                                     task.mode, idx, item_dict,
                                     rich_judges=rich_judges,
@@ -547,7 +558,11 @@ def _make_item_evaluator(
             await finish(idx, res, started)
             return res
 
-    return one, clients
+    async def limited_one(idx: int, item_dict: dict) -> dict:
+        with preparation_limit(media_sem):
+            return await one(idx, item_dict)
+
+    return limited_one, clients
 
 
 async def _aclose_judge_clients(clients: list[JudgeClient]) -> None:

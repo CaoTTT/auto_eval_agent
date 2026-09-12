@@ -12,6 +12,7 @@ import httpx
 from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimitError
 
 from .observability import current_context, error_details, log_event
+from .request_throttle import RequestThrottle, estimate_input_tokens
 
 
 class StreamProtocolError(RuntimeError):
@@ -156,6 +157,9 @@ def _provider_stream_error(error: Any) -> ProviderStreamError:
                 "aborted",
                 "timeout",
                 "rate_limit",
+                "throttling",
+                "limit_requests",
+                "limit_burst_rate",
                 "rate limit",
                 "too many requests",
                 "overloaded",
@@ -348,6 +352,7 @@ async def stream_chat_completion(
     max_attempts: int = 4,
     retry_base_s: float = 1.0,
     retry_max_s: float = 20.0,
+    throttle: RequestThrottle | None = None,
 ):
     """始终使用流式接口，成功后返回与完整响应等价的聚合对象。
 
@@ -355,6 +360,41 @@ async def stream_chat_completion(
     """
     if max_attempts < 1:
         raise ValueError("max_attempts 必须大于等于 1")
+
+    input_tokens = await asyncio.to_thread(estimate_input_tokens, kwargs) if throttle else 0
+    request_kind = "vision" if any(
+        isinstance(message.get("content"), list) and any(
+            part.get("type") == "image_url" for part in message["content"]
+        ) for message in kwargs.get("messages", [])
+    ) else "text"
+
+    async def send(include_usage: bool):
+        reservation = None
+        response = None
+        failure = None
+        request = kwargs
+        if throttle is not None:
+            log_event("请求调度", "等待发送额度", progress=30,
+                      progress_message="等待模型请求额度（请求数 / Token / 在途上限）")
+            reservation = await throttle.acquire(
+                throttle.estimate(input_tokens, request_kind),
+                input_proxy=input_tokens, kind=request_kind,
+            )
+            request = {**kwargs, "extra_headers": {
+                "X-DashScope-Wait-Timeout": "30", **(kwargs.get("extra_headers") or {}),
+            }}
+        try:
+            response, chunks, stats = await asyncio.wait_for(
+                _collect_stream(client, request, include_usage=include_usage),
+                timeout=total_timeout_s,
+            )
+            return response, chunks, stats
+        except BaseException as exc:
+            failure = exc
+            raise
+        finally:
+            if reservation is not None:
+                throttle.finish(reservation, getattr(response, "usage", None), failure)
 
     last_exc: BaseException | None = None
     use_usage = include_usage
@@ -378,10 +418,7 @@ async def stream_chat_completion(
         )
         try:
             try:
-                response, chunks, stats = await asyncio.wait_for(
-                    _collect_stream(client, kwargs, include_usage=use_usage),
-                    timeout=total_timeout_s,
-                )
+                response, chunks, stats = await send(use_usage)
             except APIStatusError as exc:
                 # 一些内部 OpenAI 兼容网关支持 stream，但不接受 stream_options。
                 if use_usage and _rejects_stream_usage(exc):
@@ -392,10 +429,7 @@ async def stream_chat_completion(
                         level=logging.WARNING,
                         details={"HTTP状态": _status_code(exc)},
                     )
-                    response, chunks, stats = await asyncio.wait_for(
-                        _collect_stream(client, kwargs, include_usage=False),
-                        timeout=total_timeout_s,
-                    )
+                    response, chunks, stats = await send(False)
                 else:
                     raise
             if callback is not None:

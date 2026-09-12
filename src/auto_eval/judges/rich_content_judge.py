@@ -141,7 +141,9 @@ class RichContentJudge:
                 for path in frames
             ]
 
-        user_images = await asyncio.to_thread(prepare_images)
+        from ..preparation import run_preparation
+
+        user_images = await run_preparation(prepare_images, timeout=60)
         started = time.perf_counter()
         raw_output = await self.client.complete(
             system,

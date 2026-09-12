@@ -245,10 +245,14 @@ def _validate_batch_item_ids(items: list[dict]) -> None:
 
 @app.get("/api/config")
 def api_config():
+    from ..request_throttle import recommended_concurrency, supports_bailian_pacing
+
     c = cfg()
     return {
         "judges": [
-            {"name": j.name, "display": j.display or j.name}
+            {"name": j.name, "display": j.display or j.name,
+             "recommended_concurrency": recommended_concurrency([j]),
+             "request_pacing": supports_bailian_pacing(j)}
             for j in c.judges
         ],
         "evaluation_profiles": [
@@ -276,6 +280,17 @@ async def api_eval(req: EvalReq):
         raise HTTPException(400, "items 为空")
     app_cfg = cfg()
     _validate_eval_request(req, app_cfg)
+    from ..request_throttle import recommended_concurrency
+
+    selected = req.options.get("judges") or [app_cfg.judges[0].name]
+    judges = [j for j in app_cfg.judges if j.name in selected] or app_cfg.judges[:1]
+    req.options.setdefault("concurrency", recommended_concurrency(judges))
+    try:
+        capacity = int(req.options["concurrency"])
+    except (ValueError, TypeError):
+        raise HTTPException(422, "并发容量须为 1–128 的整数")
+    if isinstance(req.options["concurrency"], bool) or capacity != req.options["concurrency"] or not 1 <= capacity <= 128:
+        raise HTTPException(422, "并发容量须为 1–128 的整数")
     protocol = (
         _compare_protocol_or_422(req.evaluation_profile)
         if req.mode == "compare"

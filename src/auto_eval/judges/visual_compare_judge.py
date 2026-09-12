@@ -391,8 +391,7 @@ class VisualCompareJudge:
             return user_images, user_image_refs, content_parts, image_metadata
 
         user_images, user_image_refs, content_parts, image_metadata = (
-            await run_preparation(prepare_images, timeout=60) if query_metas
-            else await asyncio.to_thread(prepare_images)
+            await run_preparation(prepare_images, timeout=60)
         )
 
         started = time.perf_counter()

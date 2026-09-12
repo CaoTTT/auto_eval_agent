@@ -385,6 +385,8 @@ class JudgeClient:
         max_attempts: int | None = None,
     ):
         """流式调用 LLM，逐 token 回调，同时累积完整响应。"""
+        from ..request_throttle import shared_throttle
+
         return await stream_chat_completion(
             self.client,
             kwargs,
@@ -394,4 +396,5 @@ class JudgeClient:
             max_attempts=max_attempts or self.cfg.max_attempts,
             retry_base_s=self.cfg.retry_base_s,
             retry_max_s=self.cfg.retry_max_s,
+            throttle=shared_throttle(self.cfg),
         )

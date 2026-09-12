@@ -195,14 +195,15 @@
       <span class="hint">任务创建后版本冻结；失败补跑沿用原版本。</span>
     </div>
     <div class="row">
-      <span class="lbl">并发：</span>
-      <input type="number" min="1" max="16" v-model.number="concurrency" style="width:70px">
-      <span class="hint">（裁判单轮直出多模态调用，过高易触发限流）</span>
+      <span class="lbl">并发容量：</span>
+      <input type="number" min="1" max="128" v-model.number="concurrency" style="width:70px">
+      <span v-if="requestPacing" class="hint">百炼自动平滑发送：最多 480 次/分钟、预估 80 万 Token/分钟，保留 20% 余量；媒体同时处理最多 4 条。可调低容量。</span>
+      <span v-else class="hint">同时处理的 Case 数量；请根据模型服务额度设置。</span>
     </div>
     <div class="row">
       <span class="lbl">单题超时：</span>
       <input type="number" min="30" max="3600" step="30" v-model.number="evalTimeout" style="width:90px">
-      <span class="hint">秒；复杂题/多裁判建议 300–900，防止真正卡死。</span>
+      <span class="hint">秒；复杂题/多裁判建议 300–900，等待本地发送额度不计入。</span>
     </div>
   </section>
 
@@ -456,6 +457,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20260911_dataset_reuse"></script>
+  <script type="module" src="/static/app.js?v=20260911_bailian_pacing"></script>
 </body>
 </html>

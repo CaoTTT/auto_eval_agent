@@ -31,6 +31,10 @@ createApp({
       evaluationProfiles.value.filter((profile) => (profile.modes || []).includes("compare"))
     );
     const concurrency = ref(4);
+    const requestPacing = computed(() => {
+      const selected = judges.value.filter((j) => selectedJudges.value.includes(j.name));
+      return selected.length > 0 && selected.every((j) => j.request_pacing);
+    });
     const evalTimeout = ref(300);
     const submitting = ref(false);
     const running = ref(false);
@@ -1590,6 +1594,8 @@ createApp({
       evaluationProfiles.value = d.evaluation_profiles || [];
       selectedEvaluationProfile.value = defaultEvaluationProfile();
       selectedJudges.value = defaultJudgeSelection();
+      const selectedJudge = judges.value.find((j) => j.name === selectedJudges.value[0]);
+      concurrency.value = selectedJudge?.recommended_concurrency || 4;
       loadHistory();
       loadQueue();
       queueRefreshTimer = window.setInterval(loadQueue, 2000);
@@ -1608,7 +1614,7 @@ createApp({
       modes, mode, modeLabel, isVideoMode, items, errors, judges, visibleJudges, selectedJudges, datasetName,
       datasetSourceTaskId, datasetRevision, useComparisonDataset,
       evaluationProfiles, compareProfiles, selectedEvaluationProfile, evaluationProfileLabel,
-      concurrency, evalTimeout, submitting, running, progress, total, results, summary, taskId, runError,
+      concurrency, requestPacing, evalTimeout, submitting, running, progress, total, results, summary, taskId, runError,
       queueState, queueEntries, selectedTaskStatus, queueNotice, taskStatusLabel, queueKindLabel,
       repairStatus, retryStatusLabel, retrySubmitting, selectedRetryIndexes, activeRetry,
       failedResultIndexes, retryIndexSelected, toggleRetryIndex, retryFailedCases,

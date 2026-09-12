@@ -28,6 +28,16 @@ class _Scope:
 
 
 _scope: ContextVar[_Scope | None] = ContextVar("preparation_scope", default=None)
+_limit: ContextVar[asyncio.Semaphore | None] = ContextVar("preparation_limit", default=None)
+
+
+@contextmanager
+def preparation_limit(limit: asyncio.Semaphore | None):
+    token = _limit.set(limit)
+    try:
+        yield
+    finally:
+        _limit.reset(token)
 
 
 def check_preparation() -> None:
@@ -37,6 +47,20 @@ def check_preparation() -> None:
 
 
 async def run_preparation(fn: Callable[..., T], *args, timeout: float, **kwargs) -> T:
+    limit = _limit.get()
+    if limit is None:
+        return await _run_preparation(fn, *args, timeout=timeout, **kwargs)
+    from .request_throttle import admission_wait
+
+    with admission_wait():
+        await limit.acquire()
+    try:
+        return await _run_preparation(fn, *args, timeout=timeout, **kwargs)
+    finally:
+        limit.release()
+
+
+async def _run_preparation(fn: Callable[..., T], *args, timeout: float, **kwargs) -> T:
     """Keep ownership of the worker until it has released its resources.
 
     Cancellation cannot interrupt a Pillow/NumPy operation mid-call. Checkpoints
