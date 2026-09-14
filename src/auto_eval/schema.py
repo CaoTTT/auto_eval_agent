@@ -1,27 +1,23 @@
 """核心数据模型。
 
 所有跨模块流转的结构都在这里定义，用 pydantic v2。
-注意 `EvalItem.reference` 仅用于元评测，禁止流入作答与盲评（见 dataset.to_prompt 的强制隔离）。
+仅保留垂域视觉评测（rich_content）与垂域视觉对比评测（compare）所需模型。
 """
 from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
-Correctness = Literal["right", "wrong", "partial", "unclear"]
-LowLevel = Literal["yes", "no"]
-Winner = Literal["a", "b", "tie"]
-Difficulty = Literal["easy", "medium", "hard"]
 AnswerCoverage = Literal["complete", "partial", "unclear"]
-CardRelation = Literal["direct", "supporting", "weak", "unrelated", "unclear"]
-CardSuitability = Literal[
-    "suitable",
-    "partially_suitable",
-    "unsuitable",
-    "unclear",
-    "not_applicable",
-]
+CompareWinner = Literal["answer1", "answer2", "tie"]
+ConflictVerdict = Literal["yes", "no", "unclear"]
+GateStatus = Literal["pass", "fail", "unclear"]
+JudgeConfidence = Literal["low", "medium", "high"]
+InputStatus = Literal["complete", "partial", "failed"]
+ProductId = Literal["product1", "product2", "product3"]
+QualityScore = Literal[0, 1, 2, 3]
+VerificationStatus = Literal["verified", "partial", "unverifiable", "not_required"]
 
 
 # --------------------------------------------------------------------------- #
@@ -32,73 +28,27 @@ class EvalItem(BaseModel):
 
     id: str
     question: str
+    query_images: list[str] = Field(default_factory=list, max_length=1)
+    input_modality: Literal["text", "text_image"] = "text"
     context: str | None = None  # 可选背景/多模态描述
-    has_ref: bool = True
-    reference: str | None = None  # ⚠️ 仅元评测使用，禁止进入作答/盲评
-    key_points: list[str] = Field(default_factory=list)  # 可接受要点（仅元评测辅助）
-    category: str | list[str] = "default"  # 类目（切片用）
-    difficulty: Difficulty = "medium"
-    tags: list[str] = Field(default_factory=list)
-    trace: str | None = None  # 被测 agent 的推理/工具轨迹（仅过程盲评使用）
+    category: str = "default"  # 垂域（分组展示用）
     media: list[str] = Field(default_factory=list)  # 任务类评测：录屏/图片本地路径（裁判抽帧后以 image_url 多图盲评）
     metadata: dict[str, Any] = Field(default_factory=dict)
 
-    def categories(self) -> list[str]:
-        return [self.category] if isinstance(self.category, str) else list(self.category)
+    @model_validator(mode="after")
+    def normalize_question_images(self):
+        if any(not path.strip() for path in self.query_images):
+            raise ValueError("提问图片路径不能为空")
+        modality = "text_image" if self.query_images else "text"
+        if "input_modality" in self.model_fields_set and self.input_modality != modality:
+            raise ValueError("input_modality 与提问图片声明冲突")
+        self.input_modality = modality
+        return self
 
 
 # --------------------------------------------------------------------------- #
-# 模型作答
+# 垂域视觉评测（rich_content）
 # --------------------------------------------------------------------------- #
-class ModelOutput(BaseModel):
-    """一个被测模型对一道题的盲答（不含 reference）。"""
-
-    item_id: str
-    model: str
-    answer: str
-    latency_ms: int = 0
-    tokens_in: int = 0
-    tokens_out: int = 0
-    cost: float = 0.0
-    error: str | None = None  # 调用失败时填错误信息，answer 为空
-    raw: dict[str, Any] = Field(default_factory=dict)
-
-    @property
-    def ok(self) -> bool:
-        return self.error is None and bool(self.answer)
-
-
-# --------------------------------------------------------------------------- #
-# 盲评：单裁判原始记录（多裁判集成的输入）
-# --------------------------------------------------------------------------- #
-class SingleScore(BaseModel):
-    """单个裁判对「一个答案」的一次 rubric 评分。"""
-
-    item_id: str
-    model: str
-    judge: str
-    persona: str | None = None
-    run_idx: int = 0  # 重复采样索引
-    rubric: dict[str, int] = Field(default_factory=dict)  # 各维度分（通常 1–5）
-    rubric_reasons: dict[str, str] = Field(default_factory=dict)  # 各一级维度打分理由
-    na_dimensions: list[str] = Field(default_factory=list)  # 被裁判标记为 N/A（不适用）的一级维度名
-    total: float = 0.0
-    correctness: Correctness = "unclear"
-    error_type: str | None = None
-    is_low_level: LowLevel = "no"  # 任务类：意图简单清晰但发生可归责的低级错误
-    rationale: str = ""
-    top_issue_1_dim: str | None = None  # 首要问题维度
-    top_issue_2_dim: str | None = None  # 次要问题维度
-    top_issue_3_dim: str | None = None  # 第三问题维度
-    top_issues_desc: str | None = None  # 问题描述（按行列出）
-    analysis: str = ""  # 裁判深度思考过程（意图理解/理想画像/多角度分析）
-    used_search: bool = False
-    search_queries: list[str] = Field(default_factory=list)
-    tool_trace: list[str] = Field(default_factory=list)  # 评测 agent 的工具调用轨迹
-    truncated: bool = False  # 是否被 max_rounds 截断（已强制判定兜底）
-    latency_ms: int = 0
-
-
 class RichContentCard(BaseModel):
     """视觉裁判识别到的一张结构化富内容挂卡。"""
 
@@ -106,10 +56,6 @@ class RichContentCard(BaseModel):
     entity: str = ""
     visible_content: str = ""
     answer_position: str = ""
-    relation_to_query: CardRelation = "unclear"
-    suitability: CardSuitability = "unclear"
-    suitability_score: int | None = Field(default=None, ge=1, le=5)
-    reason: str = ""
     evidence_frames: list[int] = Field(default_factory=list)
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
 
@@ -125,117 +71,206 @@ class RichContentSuperlink(BaseModel):
 
 
 class RichContentObservation(BaseModel):
-    """一次垂域挂卡 / Superlink 视频视觉识别结果。"""
+    """一次垂域视觉评测视频识别结果。"""
 
     answer_coverage: AnswerCoverage = "unclear"
     visual_description: str = ""  # 纯客观视觉描述（Part 1），不包含评价性语言
+    turn_summary: str = ""  # 本轮总结(≤120字)：用户意图+核心结果/关键实体+是否闭环，供多轮下一轮 context 用
     cards: list[RichContentCard] = Field(default_factory=list)
     superlinks: list[RichContentSuperlink] = Field(default_factory=list)
     needs_review: bool = False
     review_reason: str = ""
+    card_suitability: str = ""  # Part 2：卡片是否合适（"ok"/"nok"/""）
+    card_suitability_reason: str = ""  # Part 2：卡片是否合适的原因
+    superlink_suitability: str = ""  # Part 2：Superlink是否合适（"ok"/"nok"/""）
+    superlink_suitability_reason: str = ""  # Part 2：Superlink是否合适的原因
+    problem_solved: str = ""  # Part 2：是否解决了用户问题（"ok"/"nok"/"need_review"）
+    problem_solved_reason: str = ""  # Part 2：评价的原因
+    answer_issues: str = ""  # Part 2：回答的内容有什么问题（分类标签：具体描述）
     rationale: str = ""
 
 
-class SinglePair(BaseModel):
-    """单个裁判对「一对答案」的一次成对盲比较。
+# --------------------------------------------------------------------------- #
+# 垂域视觉对比评测（compare）
+# --------------------------------------------------------------------------- #
+class VisualCompareObservation(BaseModel):
+    """V0.3 多模态对比结果。
 
-    `order` 记录呈现给裁判时 model_a/model_b 的左右顺序，用于位置偏差分析；
-    `winner` 始终相对于固定的 (model_a, model_b) 归一化。
+    继续采用扁平字段，避免重写 Web/Excel 链路；answer3 为增量字段。
+    旧五维字段仅作为产品1/产品2兼容投影，不代表三产品正式总排名。
     """
 
-    item_id: str
-    model_a: str
-    model_b: str
-    judge: str
-    run_idx: int = 0
-    order: Literal["ab", "ba"] = "ab"
-    winner: Winner = "tie"
+    relevance: CompareWinner | None = None
+    relevance_reason: str = ""
+    safety: CompareWinner | None = None
+    safety_reason: str = ""
+    content_quality: CompareWinner | None = None
+    content_quality_reason: str = ""
+    need_closure: CompareWinner | None = None
+    need_closure_reason: str = ""
+    personalization: CompareWinner | None = None
+    personalization_reason: str = ""
+
+    has_conflict: ConflictVerdict = "unclear"
+    conflict_reason: str = ""
+
+    needs_review: bool = False
+    review_reason: str = ""
     rationale: str = ""
 
+    standard_id: str = "qa_competitor_compare"
+    standard_version: str = "0.3"
+    evaluation_datetime: str = ""
+    product_count: Literal[2, 3] = 3
 
-# --------------------------------------------------------------------------- #
-# 盲评：聚合结论（多裁判集成后）
-# --------------------------------------------------------------------------- #
-class Verdict(BaseModel):
-    """一道题 × 一个模型的聚合盲评结论。"""
+    answer1_input_status: InputStatus = "complete"
+    answer2_input_status: InputStatus = "complete"
+    answer3_input_status: InputStatus | None = "complete"
 
-    item_id: str
-    model: str
-    rubric: dict[str, float] = Field(default_factory=dict)  # 各维度均分
-    rubric_reasons: dict[str, str] = Field(default_factory=dict)  # 各一级维度打分理由（多裁判合并）
-    na_dimensions: list[str] = Field(default_factory=list)  # 多裁判共识的 N/A 维度（所有裁判均标 N/A）
-    total: float = 0.0
-    correctness: Correctness = "unclear"
-    error_type: str | None = None
-    is_low_level: LowLevel = "no"
-    rationale: str = ""
-    top_issue_1_dim: str | None = None
-    top_issue_2_dim: str | None = None
-    top_issue_3_dim: str | None = None
-    top_issues_desc: str | None = None
-    # —— 可靠性信号 —— #
-    n_judges: int = 0
-    judges_agreement: float | None = None  # 多裁判一致率（0–1）
-    repeat_std: float | None = None  # 同裁判重复采样的总分标准差
-    low_agreement: bool = False  # 一致率/稳定性低于阈值 → 标红人工复核
-    single_scores: list[SingleScore] = Field(default_factory=list)
-    # —— 主席仲裁（仅 low_agreement 触发；仲裁后 correctness/total/rubric 即主席最终结论）—— #
-    arbitrated: bool = False
-    arbitrator_confidence: float | None = None
-    arbitrator_rationale: str | None = None
+    answer1_response_gate: GateStatus = "unclear"
+    answer1_response_gate_reason: str = ""
+    answer2_response_gate: GateStatus = "unclear"
+    answer2_response_gate_reason: str = ""
+    answer1_safety_gate: GateStatus = "unclear"
+    answer1_safety_gate_reason: str = ""
+    answer2_safety_gate: GateStatus = "unclear"
+    answer2_safety_gate_reason: str = ""
+    answer3_response_gate: GateStatus | None = "unclear"
+    answer3_response_gate_reason: str | None = None
+    answer3_safety_gate: GateStatus | None = "unclear"
+    answer3_safety_gate_reason: str | None = None
+
+    understanding_applicable: bool = True
+    understanding_verification_status: VerificationStatus = "not_required"
+    understanding_evidence: list[str] = Field(default_factory=list)
+    understanding_primary_issue: str = ""
+    understanding_reason: str = ""
+    answer1_understanding_score: QualityScore | None = None
+    answer2_understanding_score: QualityScore | None = None
+    answer3_understanding_score: QualityScore | None = None
+    understanding_rank_groups: list[list[ProductId]] = Field(default_factory=list)
+    understanding_winner: CompareWinner | None = None
+
+    accuracy_applicable: bool = True
+    accuracy_verification_status: VerificationStatus = "unverifiable"
+    accuracy_evidence: list[str] = Field(default_factory=list)
+    accuracy_primary_issue: str = ""
+    accuracy_reason: str = ""
+    answer1_accuracy_score: QualityScore | None = None
+    answer2_accuracy_score: QualityScore | None = None
+    answer3_accuracy_score: QualityScore | None = None
+    accuracy_rank_groups: list[list[ProductId]] = Field(default_factory=list)
+    accuracy_winner: CompareWinner | None = None
+
+    service_closure_applicable: bool = False
+    service_closure_verification_status: VerificationStatus = "not_required"
+    service_closure_evidence: list[str] = Field(default_factory=list)
+    service_closure_primary_issue: str = ""
+    service_closure_reason: str = ""
+    answer1_service_closure_score: QualityScore | None = None
+    answer2_service_closure_score: QualityScore | None = None
+    answer3_service_closure_score: QualityScore | None = None
+    service_closure_rank_groups: list[list[ProductId]] = Field(default_factory=list)
+    service_closure_winner: CompareWinner | None = None
+
+    scenario_fulfillment_applicable: bool = False
+    scenario_fulfillment_verification_status: VerificationStatus = "not_required"
+    scenario_fulfillment_evidence: list[str] = Field(default_factory=list)
+    scenario_fulfillment_primary_issue: str = ""
+    scenario_fulfillment_reason: str = ""
+    answer1_scenario_fulfillment_score: QualityScore | None = None
+    answer2_scenario_fulfillment_score: QualityScore | None = None
+    answer3_scenario_fulfillment_score: QualityScore | None = None
+    scenario_fulfillment_rank_groups: list[list[ProductId]] = Field(default_factory=list)
+    scenario_fulfillment_winner: CompareWinner | None = None
+
+    intuitive_efficiency_applicable: bool = True
+    intuitive_efficiency_verification_status: VerificationStatus = "not_required"
+    intuitive_efficiency_evidence: list[str] = Field(default_factory=list)
+    intuitive_efficiency_primary_issue: str = ""
+    intuitive_efficiency_reason: str = ""
+    answer1_intuitive_efficiency_score: QualityScore | None = None
+    answer2_intuitive_efficiency_score: QualityScore | None = None
+    answer3_intuitive_efficiency_score: QualityScore | None = None
+    intuitive_efficiency_rank_groups: list[list[ProductId]] = Field(default_factory=list)
+    intuitive_efficiency_winner: CompareWinner | None = None
+
+    evidence_quality_applicable: bool = False
+    evidence_quality_verification_status: VerificationStatus = "not_required"
+    evidence_quality_evidence: list[str] = Field(default_factory=list)
+    evidence_quality_primary_issue: str = ""
+    evidence_quality_reason: str = ""
+    answer1_evidence_quality_score: QualityScore | None = None
+    answer2_evidence_quality_score: QualityScore | None = None
+    answer3_evidence_quality_score: QualityScore | None = None
+    evidence_quality_rank_groups: list[list[ProductId]] = Field(default_factory=list)
+    evidence_quality_winner: CompareWinner | None = None
+
+    guided_recommendation_applicable: bool = False
+    guided_recommendation_verification_status: VerificationStatus = "not_required"
+    guided_recommendation_evidence: list[str] = Field(default_factory=list)
+    guided_recommendation_primary_issue: str = ""
+    guided_recommendation_reason: str = ""
+    answer1_guided_recommendation_score: QualityScore | None = None
+    answer2_guided_recommendation_score: QualityScore | None = None
+    answer3_guided_recommendation_score: QualityScore | None = None
+    guided_recommendation_rank_groups: list[list[ProductId]] = Field(default_factory=list)
+    guided_recommendation_winner: CompareWinner | None = None
+
+    answer1_total_score: float | None = Field(default=None, ge=0.0, le=100.0)
+    answer2_total_score: float | None = Field(default=None, ge=0.0, le=100.0)
+    answer3_total_score: float | None = Field(default=None, ge=0.0, le=100.0)
+    overall_winner: CompareWinner | None = None
+    overall_ranking: list[list[ProductId]] | None = None
+    evidence: list[str] = Field(default_factory=list)
+    confidence: JudgeConfidence = "low"
+    needs_human_review: bool = False
+    review_reasons: list[str] = Field(default_factory=list)
 
 
-class PairResult(BaseModel):
-    """一道题上 (model_a vs model_b) 的聚合成对比较结果。"""
+    @model_validator(mode="after")
+    def normalize_compare_states(self) -> "VisualCompareObservation":
+        """规范化 applicable / verifiable / score 的状态关系。
 
-    item_id: str
-    model_a: str
-    model_b: str
-    a_wins: int = 0
-    b_wins: int = 0
-    ties: int = 0
-    winner: Winner = "tie"  # 多数投票归一化结果
-    win_rate_a: float = 0.0  # a 的胜率 = a_wins / (a_wins+b_wins+ties)，tie 计半
-    rationale: str = ""
-    agreement: float | None = None
-    bidirectional_consistent: bool = True  # 双向比较是否一致
-    low_agreement: bool = False
-    single_pairs: list[SinglePair] = Field(default_factory=list)
+        这里以“兼容旧结果”为优先：对模型可确定修复的状态直接归一化，
+        不因单个派生字段不一致让整条评测解析失败。真正需要人工复核的
+        情况由 visual_compare_judge 的确定性收尾逻辑统一标记。
+        """
+        dimensions = (
+            "understanding", "accuracy", "service_closure",
+            "scenario_fulfillment", "intuitive_efficiency",
+            "evidence_quality", "guided_recommendation",
+        )
+        product_nos = (1, 2, 3) if self.product_count == 3 else (1, 2)
 
+        if self.product_count == 2:
+            self.answer3_input_status = None
+            self.answer3_response_gate = None
+            self.answer3_response_gate_reason = None
+            self.answer3_safety_gate = None
+            self.answer3_safety_gate_reason = None
+            for dimension in dimensions:
+                setattr(self, f"answer3_{dimension}_score", None)
 
-# --------------------------------------------------------------------------- #
-# 元评测（用 reference 校验评测 agent 本身）
-# --------------------------------------------------------------------------- #
-class MetaResult(BaseModel):
-    """一道题 × 一个模型的元评测：盲评结论 vs 参考答案客观真值。"""
+        # N/A 维度必须没有绝对分。
+        for dimension in dimensions:
+            if not getattr(self, f"{dimension}_applicable"):
+                for answer_no in (1, 2, 3):
+                    setattr(self, f"answer{answer_no}_{dimension}_score", None)
+                setattr(self, f"{dimension}_winner", None)
+                setattr(self, f"{dimension}_rank_groups", [])
 
-    item_id: str
-    model: str
-    has_ref: bool
-    category: str = "default"
-    difficulty: Difficulty = "medium"
-    # 客观真值（由 reference 派生）
-    objective: dict[str, float] = Field(default_factory=dict)  # {em, f1, sim}
-    objective_correct: Literal["right", "wrong", "partial", "na"] = "na"
-    # 盲评结论
-    judge_correctness: Correctness | None = None
-    judge_total: float | None = None
-    # 对照
-    agree: bool | None = None  # 盲判对错 == 客观对错
-    delta_total_vs_sim: float | None = None  # 盲评分(归一) − 语义相似度
+        # 无法核验时禁止保留猜测分；输入失败或任一 Gate 失败时不评分。
+        # Gate=unclear 是人工复核信号，但证据足够的后续维度仍需评分。
+        for dimension in dimensions:
+            if getattr(self, f"{dimension}_verification_status") == "unverifiable":
+                for answer_no in product_nos:
+                    setattr(self, f"answer{answer_no}_{dimension}_score", None)
+            for answer_no in product_nos:
+                input_failed = getattr(self, f"answer{answer_no}_input_status") == "failed"
+                response_failed = getattr(self, f"answer{answer_no}_response_gate") == "fail"
+                safety_failed = getattr(self, f"answer{answer_no}_safety_gate") == "fail"
+                if input_failed or response_failed or safety_failed:
+                    setattr(self, f"answer{answer_no}_{dimension}_score", None)
 
-
-# --------------------------------------------------------------------------- #
-# 运行级配置与产物索引
-# --------------------------------------------------------------------------- #
-class RunManifest(BaseModel):
-    """一次运行的元信息，写入 runs/<run_id>/manifest.json。"""
-
-    run_id: str
-    dataset: str
-    n_items: int
-    models: list[str]
-    judges: list[str]
-    started_at: str
-    finished_at: str | None = None
-    config_snapshot: dict[str, Any] = Field(default_factory=dict)
+        return self

@@ -1,25 +1,16 @@
 import { createApp, ref, computed, onMounted, onUnmounted, nextTick } from "https://unpkg.com/vue@3/dist/vue.esm-browser.js";
-import * as echarts from "https://unpkg.com/echarts@5/dist/echarts.esm.min.js";
 
 createApp({
   setup() {
     const modes = [
-      { key: "single", label: "垂域问答类" },
-      { key: "compare", label: "两回答对比" },
-      { key: "online", label: "接模型在线评估" },
-      { key: "process", label: "过程盲评(含轨迹)" },
-      { key: "operation", label: "任务类（录屏）" },
-      { key: "rich_content", label: "垂域挂卡 / Superlink" },
-      { key: "rich_content_quality", label: "垂域挂卡综合评测" },
+      { key: "rich_content", label: "垂域视觉评测" },
+      { key: "compare", label: "垂域视觉对比" },
     ];
     function modeLabel(key) {
       return modes.find((item) => item.key === key)?.label || key;
     }
-    const mode = ref("single");
-    const isVideoMode = computed(() => ["operation", "rich_content", "rich_content_quality"].includes(mode.value));
-    const text = ref("");
-    const fileText = ref("");
-    const isJsonl = ref(false);
+    const mode = ref("rich_content");
+    const isVideoMode = computed(() => true);
     const datasetName = ref("");
     const items = ref([]);
     let opItemSequence = 0;
@@ -29,17 +20,16 @@ createApp({
     const opPreparing = ref(false);
     const errors = ref([]);
     const judges = ref([]);
-    const models = ref([]);
     const selectedJudges = ref([]);
-    const visibleJudges = computed(() => {
-      if (mode.value !== "operation") return judges.value;
-      const judge = terminalUserJudge();
-      return judge ? [judge] : [];
-    });
-    const visualJudge = ref("");  // rich_content_quality 模式：挂卡识别裁判
-    const selectedModel = ref("");
+    const visibleJudges = computed(() => judges.value);
+    const evaluationProfiles = ref([]);
+    const selectedEvaluationProfile = ref("");
+    const compareProfiles = computed(() =>
+      evaluationProfiles.value.filter((profile) => (profile.modes || []).includes("compare"))
+    );
     const concurrency = ref(4);
     const evalTimeout = ref(300);
+    const submitting = ref(false);
     const running = ref(false);
     const progress = ref(0);
     const total = ref(0);
@@ -49,66 +39,131 @@ createApp({
     const runError = ref("");
     const itemProgress = ref({});
     const progressEvents = ref({});
-    const pieChart = ref(null);
-    const barChartRefs = ref([]);
+    const expandedProgressLogs = ref({});
     const resultBrowser = ref(null);
     const activeSkill = ref("");
     const resultQuery = ref("");
-    const correctnessFilter = ref("");
-    const problemDimFilter = ref("");
+    const modalityFilter = ref("");
+    const modalityCounts = computed(() => ({
+      text: opItems.value.filter(it => !(it.queryImages || []).length).length,
+      text_image: opItems.value.filter(it => (it.queryImages || []).length).length,
+    }));
+    function queryImageMetas(r) {
+      return r.query_image_meta || items.value[r.index]?.query_image_meta || [];
+    }
+    const evidenceImageErrors = ref({});
+    const collapsedEvidence = ref({});
+    function evidenceExpanded(row) {
+      return !collapsedEvidence.value[`${taskId.value}:${row.index}`];
+    }
+    function setEvidenceExpanded(row, expanded) {
+      collapsedEvidence.value[`${taskId.value}:${row.index}`] = !expanded;
+    }
+    function setPageEvidenceExpanded(expanded) {
+      pagedResults.value.forEach(row => setEvidenceExpanded(row, expanded));
+    }
+    const evidenceRevisions = ref({});
+    let nextEvidenceRevision = 0;
+    function refreshEvidence(resultRows) {
+      for (const row of resultRows) {
+        if (row && row.index != null) evidenceRevisions.value[row.index] = ++nextEvidenceRevision;
+      }
+      evidenceImageErrors.value = {};
+    }
+    function evidenceImages(r) {
+      const images = queryImageMetas(r).filter(meta => meta.preview_url).map(meta => ({
+        key: meta.preview_url, label: `用户提问图片 ${meta.query_image_id || 'QI1'}`,
+        previewUrl: meta.preview_url, downloadUrl: `${meta.preview_url}?original=true`, longScreenshot: false,
+      }));
+      const index = Number(r.index);
+      const item = items.value[index] || {};
+      if (!taskId.value || !Number.isInteger(index) || index < 0) return images;
+      const source = item.source_data || {};
+      if (item.evidence_mode === 'video_frames') return images;
+      const count = item.product_count || (item.screenshot3 || source.screenshot3 ? 3 : 2);
+      for (let n = 1; n <= count; n++) {
+        if (!(item[`screenshot${n}`] || item[`screenshot_meta${n}`]?.original_path || source[`screenshot${n}`])) continue;
+        const url = `/api/eval/${encodeURIComponent(taskId.value)}/items/${index}/screenshots/${n}?revision=${evidenceRevisions.value[index] || 0}`;
+        images.push({key:url, label:`产品 ${n} 回答长截图`, previewUrl:url, downloadUrl:`${url}&download=true`, longScreenshot:true});
+      }
+      return images;
+    }
     const resultPage = ref(1);
     const resultPageSize = ref(10);
-    const previewPage = ref(1);
     const progressPage = ref(1);
     const resultJumpPage = ref("");
-    const previewJumpPage = ref("");
     const progressJumpPage = ref("");
     const cellTooltip = ref({ visible: false, text: "", style: {} });
     const historyItems = ref([]);
     const historyNoteDrafts = ref({});
     const historyNoteEditing = ref({});
     const loadingHistory = ref(false);
+    const loadingTaskId = ref("");
+    const exportingTaskId = ref("");
+    const exportMessage = ref("");
+    const exportError = ref("");
+    const exportDownloadUrl = ref("");
+    let historyLoadVersion = 0;
+    let historyLoadController = null;
+    let disposed = false;
+    const queueState = ref({ running: null, queued: [] });
+    const selectedTaskStatus = ref("");
+    const queueNotice = ref("");
+    const repairStatus = ref("idle");
+    const retrySubmitting = ref(false);
+    const selectedRetryIndexes = ref([]);
+    const activeRetry = ref(null);
     const clockNow = ref(Date.now());
     let tooltipHideTimer = null;
     let progressClockTimer = null;
+    let queueRefreshTimer = null;
+    let activeEventSource = null;
     const pageSize = 10;
     const opPageSize = 10;
     const progressStages = ["排队", "分类", "模型/裁判", "聚合", "完成"];
+    const queueEntries = computed(() => {
+      const entries = [];
+      if (queueState.value.running) entries.push(queueState.value.running);
+      entries.push(...(queueState.value.queued || []));
+      return entries;
+    });
+    const failedResultIndexes = computed(() =>
+      results.value
+        .filter((result) => result && result.error && Number.isInteger(Number(result.index)))
+        .map((result) => Number(result.index))
+    );
+
+    function retryStatusLabel(status) {
+      return ({ idle: "", queued: "补跑排队中", running: "补跑中", completed: "补跑完成", partial: "补跑后仍有失败", error: "补跑异常", cancelled: "补跑已取消" })[status] || status;
+    }
+
+    function retryIndexSelected(index) {
+      return selectedRetryIndexes.value.includes(Number(index));
+    }
+
+    function toggleRetryIndex(index) {
+      const value = Number(index);
+      selectedRetryIndexes.value = retryIndexSelected(value)
+        ? selectedRetryIndexes.value.filter((item) => item !== value)
+        : [...selectedRetryIndexes.value, value];
+    }
+
+    function taskStatusLabel(status) {
+      return ({ queued: "排队中", running: "运行中", done: "已完成", error: "失败", cancelled: "已取消" })[status] || status;
+    }
+
+    function queueKindLabel(kind) {
+      return kind === "retry" ? "失败补跑" : "全量评测";
+    }
 
     const formatHint = computed(
       () =>
         ({
-          single: "每行一题：query [||| @context: 背景] ||| answer [||| competitor] [||| reference]   （context 可选且视为可信前提）",
-          compare: "每行一题：query [||| @context: 背景] ||| answerA ||| answerB [||| reference]",
-          online: "每行一题：query [||| @context: 背景] [||| reference]   （后端现场调模型生成回答，再盲评）",
-          process: "每行一题：query [||| @context: 背景] ||| answer ||| trace [||| reference]",
-          operation: "可逐题上传，也可导入 JSONL：query、context(可选)、video_path、agent_statement(可选)、task_start_time/task_end_time(可选，单位秒)；相对视频路径以项目根目录为基准。",
-          rich_content: "可逐题上传，也可导入 JSONL：query、context(可选)、video_path、category/answer_text/content_start_time/content_end_time(均可选)；普通图片不算挂卡，回答区域蓝色文字按 Superlink 统计。",
-          rich_content_quality: "综合评测：先视觉识别挂卡/Superlink（需选识别裁判），再将结果注入盲评裁判做回答质量评测（可多选）。格式与垂域挂卡相同。",
-        }[mode.value])
-    );
-    const placeholder = computed(
-      () =>
-        ({
-          single: "附近有什么餐厅？ ||| @context: 当前时间19:00，地点上海人民广场 ||| 推荐南京大牌档\n中国最长的河流？ ||| 长江",
-          compare: "附近有什么餐厅？ ||| @context: 当前时间19:00，地点上海人民广场 ||| 回答A ||| 回答B\n推荐一部科幻电影 ||| 星际穿越 ||| 流浪地球",
-          online: "附近有什么餐厅？ ||| @context: 当前时间19:00，地点上海人民广场\n计算 17 × 24 等于多少？",
-          process: "规划回家路线 ||| @context: 当前位于上海人民广场，目的地徐家汇 ||| 最终回答 ||| 推理轨迹\n某函数是否正确？ ||| 正确 ||| def f(n): return 1 if n<=1 else n*f(n-1)",
-          operation: "",
-          rich_content: "",
-          rich_content_quality: "",
+          compare: "支持文字题与图文题混合导入：query_images 可选填一张提问图片路径；product_count 为2或3；同题统一用 screenshot1/2/3 或 video1/2/3，不同题可以不同。整批使用同一标准。",
+          rich_content: "可逐题上传，也可导入 JSONL：query、context(可选)、video_path、category/answer_text/task_start_time/task_end_time(均可选)；普通图片不算挂卡，回答区域蓝色文字按 Superlink 统计。",
         }[mode.value])
     );
 
-    const previewKeys = computed(() => {
-      if (!items.value.length) return [];
-      const keys = ["query", "context"];
-      if (mode.value === "single") keys.push("answer", "reference");
-      else if (mode.value === "compare") keys.push("answer_a", "answer_b", "reference");
-      else if (mode.value === "process") keys.push("answer", "trace", "reference");
-      else keys.push("reference");
-      return keys.filter((k) => items.value.some((it) => it[k] != null && it[k] !== ""));
-    });
     const opPageCount = computed(() => Math.max(1, Math.ceil(opItems.value.length / opPageSize)));
     const pagedOpItems = computed(() => {
       const page = Math.min(opPage.value, opPageCount.value);
@@ -118,35 +173,30 @@ createApp({
         index: start + offset,
       }));
     });
-    const previewPageCount = computed(() => Math.max(1, Math.ceil(items.value.length / pageSize)));
-    const pagedPreviewItems = computed(() => {
-      const page = Math.min(previewPage.value, previewPageCount.value);
-      const start = (page - 1) * pageSize;
-      return items.value.slice(start, start + pageSize).map((item, offset) => ({
-        item,
-        index: start + offset,
-      }));
-    });
 
-    const progressRows = computed(() =>
-      items.value.map((item, index) => {
+    const progressResultByIndex = computed(() => new Map(results.value.map((entry) => [entry.index, entry])));
+    const progressPageCount = computed(() => Math.max(1, Math.ceil(items.value.length / pageSize)));
+    const pagedProgressRows = computed(() => {
+      const page = Math.min(progressPage.value, progressPageCount.value);
+      const start = (page - 1) * pageSize;
+      return items.value.slice(start, start + pageSize).map((item, offset) => {
+        const index = start + offset;
         const current = itemProgress.value[index] || {};
-        const result = results.value.find((entry) => entry.index === index);
+        const result = progressResultByIndex.value.get(index);
         const events = progressEvents.value[index] || [];
         const startedAt = Number(current.started_at || 0);
-        const finishedAt = Number(current.finished_at || 0);
+        const terminal = ["done", "error"].includes(current.status);
+        const finishedAt = Number(current.finished_at || (terminal && Date.parse(current.updated_at || "")) || 0);
         const resultElapsed = Number(result?.latency_s);
-        const elapsedSeconds = Number.isFinite(resultElapsed)
-          ? resultElapsed
-          : startedAt > 0
-            ? Math.max(0, ((finishedAt || clockNow.value) - startedAt) / 1000)
-            : null;
+        const elapsedSeconds = startedAt > 0
+          ? Math.max(0, ((finishedAt || clockNow.value) - startedAt) / 1000)
+          : (!current.status || terminal) && Number.isFinite(resultElapsed) ? resultElapsed : null;
         return {
           index,
           itemId: item.id || `q${index}`,
           query: item.query || item.question || "",
           percent: current.percent ?? 0,
-          status: current.status || "pending",
+          status: current.status || (result ? (result.error ? "error" : "done") : "pending"),
           message: current.message || "排队中",
           requestId: current.request_id || "",
           module: current.module || "",
@@ -157,63 +207,70 @@ createApp({
           events,
           latestEvents: events.slice(-2),
         };
-      })
-    );
-    const progressPageCount = computed(() => Math.max(1, Math.ceil(progressRows.value.length / pageSize)));
-    const pagedProgressRows = computed(() => {
-      const page = Math.min(progressPage.value, progressPageCount.value);
-      const start = (page - 1) * pageSize;
-      return progressRows.value.slice(start, start + pageSize);
+      });
     });
-    const skillOverviewRows = computed(() => summary.value?.by_skill?.overview || []);
 
     function progressStageRank(progressItem) {
       if (progressItem.status === "done") return 4;
       if (progressItem.module === "结果聚合") return 3;
-      if (["模型裁判", "工具调用", "被测模型", "单题评测"].includes(progressItem.module)) return 2;
+      if (["模型裁判", "被测模型", "单题评测"].includes(progressItem.module)) return 2;
       if (progressItem.module === "垂域分类") return 1;
       return 0;
     }
 
     function mergeItemProgress(incoming) {
-      appendProgressEvent(incoming);
       const index = incoming.item_index;
-      const previous = itemProgress.value[index] || {};
+      if (index == null) return;
+      const existing = itemProgress.value[index] || {};
+      if (incoming.sequence != null && existing.sequence != null && incoming.sequence <= existing.sequence) return;
+      appendProgressEvent(incoming);
+      const newAttempt = incoming.request_id && incoming.request_id !== existing.request_id;
+      const previous = newAttempt ? {} : existing;
       const previousRank = previous.stage_rank ?? progressStageRank(previous);
       const incomingRank = progressStageRank(incoming);
       const terminal = incoming.status === "done" || incoming.status === "error";
       const updatedAt = Date.parse(incoming.updated_at || "");
-      itemProgress.value = {
-        ...itemProgress.value,
-        [index]: {
-          ...previous,
-          ...incoming,
-          // Agent Loop 总轮数未知，宏观阶段只前进、不倒退。
-          stage_rank: incoming.status === "done"
-            ? 4
-            : Math.max(previousRank, incomingRank),
-          finished_at: terminal
-            ? (previous.finished_at || (Number.isFinite(updatedAt) ? updatedAt : Date.now()))
-            : previous.finished_at,
-        },
+      itemProgress.value[index] = {
+        ...previous,
+        ...incoming,
+        // 同一次请求的阶段只前进；补跑使用新的 request_id 重新计时。
+        stage_rank: incoming.status === "done"
+          ? 4
+          : Math.max(previousRank, incomingRank),
+        finished_at: terminal
+          ? (previous.finished_at || (Number.isFinite(updatedAt) ? updatedAt : Date.now()))
+          : undefined,
       };
+    }
+
+    function progressEventKey(incoming) {
+      return incoming.sequence != null
+        ? `seq:${incoming.sequence}`
+        : [incoming.request_id, incoming.updated_at, incoming.module, incoming.event,
+            incoming.judge, incoming.round, incoming.message].join("|");
+    }
+
+    function normalizeProgressEvents(events) {
+      const unique = new Map((events || []).map((event) => {
+        const key = progressEventKey(event);
+        return [key, { ...event, _key: key }];
+      }));
+      return [...unique.values()].slice(-100);
+    }
+
+    function restoreProgressEvents(events) {
+      progressEvents.value = Object.fromEntries(Object.entries(events || {}).map(
+        ([index, rows]) => [index, normalizeProgressEvents(rows)]
+      ));
     }
 
     function appendProgressEvent(incoming) {
       const index = incoming.item_index;
       if (index == null) return;
       const previous = progressEvents.value[index] || [];
-      const eventKey = incoming.sequence != null
-        ? `seq:${incoming.sequence}`
-        : [
-            incoming.updated_at, incoming.module, incoming.event,
-            incoming.judge, incoming.round, incoming.message,
-          ].join("|");
-      if (previous.some((entry) => entry._key === eventKey)) return;
-      progressEvents.value = {
-        ...progressEvents.value,
-        [index]: [...previous, { ...incoming, _key: eventKey }].slice(-100),
-      };
+      const eventKey = progressEventKey(incoming);
+      if (previous.some((entry) => (entry._key || progressEventKey(entry)) === eventKey)) return;
+      progressEvents.value[index] = [...previous, { ...incoming, _key: eventKey }].slice(-100);
     }
 
     function progressStageClass(row, stageIndex) {
@@ -253,15 +310,13 @@ createApp({
       return parts.join(" · ");
     }
 
+    const progressTimeFormatter = new Intl.DateTimeFormat("zh-CN", {
+      hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit",
+    });
     function formatProgressEventTime(value) {
       const date = new Date(value || "");
       if (Number.isNaN(date.getTime())) return "--:--:--";
-      return date.toLocaleTimeString("zh-CN", {
-        hour12: false,
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-      });
+      return progressTimeFormatter.format(date);
     }
 
     function progressEventMeta(event) {
@@ -291,10 +346,12 @@ createApp({
       return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     }
 
-    function scrollProgressLog(event) {
-      if (!event.currentTarget.open) return;
+    function scrollProgressLog(event, index) {
+      const details = event.currentTarget;
+      expandedProgressLogs.value[index] = details.open;
+      if (!details.open) return;
       nextTick(() => {
-        const panel = event.currentTarget.querySelector(".progress-log-scroll");
+        const panel = details.querySelector(".progress-log-scroll");
         if (panel) panel.scrollTop = panel.scrollHeight;
       });
     }
@@ -332,7 +389,7 @@ createApp({
         }
         if (!r.category) return;
         const key = r.category;
-        const displayLabel = key === "operation" ? "任务类" : (r.category_display || key);
+        const displayLabel = r.category_display || key;
         const current = map.get(key) || { key, label: displayLabel, count: 0 };
         current.count += 1;
         map.set(key, current);
@@ -350,140 +407,71 @@ createApp({
       return results.value.filter((r) => !r.error && r.category === activeSkill.value);
     });
 
-    const rubricDims = computed(() => {
-      const dims = [];
-      skillResults.value.forEach((r) => {
-        Object.keys(r.rubric || {}).forEach((d) => {
-          if (!dims.includes(d)) dims.push(d);
-        });
-        // 也收集 N/A 维度，确保列始终存在（不同 case 可能 N/A 不同维度）
-        (r.na_dimensions || []).forEach((d) => {
-          if (!dims.includes(d)) dims.push(d);
-        });
-      });
-      return dims;
-    });
-
     const resultCols = computed(() => {
       const contextCols = results.value.some((r) => r.context != null && r.context !== "")
         ? [{ key: "context", label: "背景" }]
         : [];
       if (mode.value === "compare")
         return [
+          { key: "item_id", label: "题号" },
           { key: "query", label: "题目" },
           ...contextCols,
-          { key: "answer_a", label: "回答 A" },
-          { key: "answer_b", label: "回答 B" },
-          { key: "winner", label: "胜者" },
-          { key: "bidirectional_consistent", label: "双向一致" },
-          { key: "rationale", label: "理由" },
-        { key: "latency_s", label: "耗时" },
-        ];
-      if (mode.value === "operation")
-        return [
-          { key: "item_id", label: "题号" },
-          { key: "query", label: "操作意图" },
-          ...contextCols,
-          { key: "correctness", label: "完成判定" },
-          { key: "error_type", label: "错误类型" },
-          { key: "is_low_level", label: "是否低级" },
-          { key: "total", label: "总分" },
-          ...rubricDims.value.map((d) => ({ key: `rubric:${d}`, label: d, rubricDim: d })),
-          { key: "arbitrated", label: "仲裁" },
-          { key: "rationale", label: "步骤与证据" },
-          { key: "latency_s", label: "耗时" },
-        ];
-      if (mode.value === "rich_content")
-        return [
-          { key: "item_id", label: "题号" },
-          { key: "query", label: "Query" },
-          ...contextCols,
-          { key: "category_display", label: "垂域" },
-          { key: "card_presence", label: "挂卡" },
-          { key: "card_count", label: "挂卡数" },
-          { key: "card_types", label: "挂卡类型" },
-          { key: "card_contents", label: "挂卡内容" },
-          { key: "card_suitability", label: "挂卡适配性" },
-          { key: "card_suitability_score", label: "适配分" },
-          { key: "superlink_presence", label: "Superlink" },
-          { key: "superlink_count", label: "链接数" },
-          { key: "superlink_count_type", label: "计数类型" },
-          { key: "superlink_texts", label: "链接文字" },
-          { key: "answer_coverage", label: "回答覆盖" },
-          { key: "needs_review", label: "需人工复核" },
-          { key: "rationale", label: "识别结论" },
-          { key: "latency_s", label: "耗时" },
-        ];
-      if (mode.value === "rich_content_quality")
-        return [
-          { key: "item_id", label: "题号" },
-          { key: "query", label: "Query" },
-          ...contextCols,
-          { key: "category_display", label: "垂域" },
-          { key: "answer", label: "回答" },
-          { key: "card_presence", label: "挂卡" },
-          { key: "card_count", label: "挂卡数" },
-          { key: "card_types", label: "挂卡类型" },
-          { key: "card_contents", label: "挂卡内容" },
-          { key: "card_suitability", label: "挂卡适配性" },
-          { key: "card_suitability_score", label: "适配分" },
-          { key: "superlink_presence", label: "Superlink" },
-          { key: "superlink_count", label: "链接数" },
-          { key: "superlink_texts", label: "链接文字" },
-          { key: "answer_coverage", label: "回答覆盖" },
-          { key: "correctness", label: "判定" },
-          { key: "total", label: "总分" },
-          ...rubricDims.value.map((d) => ({ key: `rubric:${d}`, label: d, rubricDim: d })),
-          { key: "used_search", label: "联网" },
-          { key: "truncated", label: "截断" },
-          { key: "arbitrated", label: "仲裁" },
-          { key: "top_issue_1_dim", label: "首要问题维度" },
-          { key: "top_issue_2_dim", label: "次要问题维度" },
-          { key: "top_issue_3_dim", label: "第三问题维度" },
-          { key: "top_issues_desc", label: "问题描述" },
-          { key: "needs_review", label: "需人工复核" },
+          { key: "product_count", label: "产品数" },
+          { key: "input_status_summary", label: "输入状态" },
+          { key: "response_gate_summary", label: "响应体验Gate" },
+          { key: "safety_gate_summary", label: "安全稳定Gate" },
+          { key: "understanding_summary", label: "准确理解需求" },
+          { key: "accuracy_summary", label: "内容准确（暂不汇总）" },
+          { key: "service_closure_summary", label: "服务闭环" },
+          { key: "scenario_fulfillment_summary", label: "场景化满足" },
+          { key: "intuitive_efficiency_summary", label: "直观高效" },
+          { key: "evidence_quality_summary", label: "有理有据" },
+          { key: "guided_recommendation_summary", label: "引导推荐" },
+          { key: "has_conflict", label: "内容冲突" },
+          { key: "needs_human_review", label: "需人工复核" },
           { key: "rationale", label: "理由" },
           { key: "latency_s", label: "耗时" },
         ];
-      const dims = rubricDims.value.map((d) => ({ key: `rubric:${d}`, label: d, rubricDim: d }));
+      // rich_content（默认）
       return [
         { key: "item_id", label: "题号" },
-        { key: "query", label: "题目" },
+        { key: "query", label: "Query" },
         ...contextCols,
-        { key: mode.value === "online" ? "generated_answer" : "answer", label: mode.value === "online" ? "生成回答" : "回答" },
-        { key: "correctness", label: "判定" },
-        { key: "total", label: "总分" },
-        ...dims,
-        { key: "used_search", label: "联网" },
-        { key: "truncated", label: "截断" },
-        { key: "arbitrated", label: "仲裁" },
-        { key: "agree", label: "与真值" },
-        { key: "top_issue_1_dim", label: "首要问题维度" },
-        { key: "top_issue_2_dim", label: "次要问题维度" },
-        { key: "top_issue_3_dim", label: "第三问题维度" },
-        { key: "top_issues_desc", label: "问题描述" },
-        { key: "rationale", label: "理由" },
+        { key: "category_display", label: "垂域" },
+        { key: "answer_text", label: "answer_text" },
+        { key: "card_presence", label: "是否有卡片" },
+        { key: "card_count", label: "卡片数量" },
+        { key: "card_types", label: "卡片种类" },
+        { key: "card_contents", label: "卡片内容" },
+        { key: "superlink_presence", label: "Superlink是否存在" },
+        { key: "superlink_count", label: "Superlink数量" },
+        { key: "superlink_texts", label: "Superlink文字" },
+        { key: "card_suitability", label: "卡片是否合适" },
+        { key: "card_suitability_reason", label: "卡片不合适原因" },
+        { key: "superlink_suitability", label: "Superlink是否合适" },
+        { key: "superlink_suitability_reason", label: "Superlink不合适原因" },
+        { key: "answer_coverage", label: "回答覆盖" },
+        { key: "needs_review", label: "需人工复核" },
+        { key: "review_reason", label: "复核原因" },
+        { key: "problem_solved", label: "是否解决用户问题" },
+        { key: "problem_solved_reason", label: "评价原因" },
+        { key: "answer_issues", label: "回答内容问题" },
+        { key: "rationale", label: "识别结论" },
         { key: "latency_s", label: "耗时" },
       ];
     });
 
     function columnWidth(c) {
-      const compact = c.rubricDim
-        || [
-          "correctness", "winner", "total", "used_search", "truncated", "arbitrated",
-          "agree", "latency_s", "bidirectional_consistent", "is_low_level",
-          "card_presence", "card_count", "card_suitability_score", "superlink_presence",
-          "superlink_count", "answer_coverage", "needs_review",
-        ].includes(c.key);
-      const textColumn = ["query", "context", "answer", "generated_answer", "answer_a", "answer_b", "rationale", "top_issues_desc"].includes(c.key);
+      const compact = [
+        "latency_s", "card_presence", "card_count", "superlink_presence",
+        "superlink_count", "answer_coverage", "needs_review", "problem_solved",
+      ].includes(c.key);
+      const textColumn = ["query", "context", "answer_text", "rationale", "answer_issues", "problem_solved_reason"].includes(c.key);
       let minWidth = compact ? 80 : textColumn ? 150 : 96;
       let maxWidth = compact ? 120 : c.key === "rationale" ? 380 : textColumn ? 320 : 200;
       if (c.key === "item_id") {
         minWidth = 110;
         maxWidth = 160;
-      } else if (c.key === "query" && mode.value === "operation") {
-        minWidth = 140;
-        maxWidth = 240;
       }
       const visualLength = (value) => Array.from(String(value ?? "")).reduce(
         (sum, char) => sum + (char.charCodeAt(0) > 255 ? 2 : 1),
@@ -503,26 +491,12 @@ createApp({
       () => 48 + resultCols.value.reduce((sum, c) => sum + columnWidth(c), 0) + (isVideoMode.value ? 300 : 0)
     );
 
-    function isFrozenResultColumn(column) {
-      return mode.value === "operation" && ["item_id", "query"].includes(column.key);
-    }
-
-    function frozenResultColumnStyle(column, columnIndex) {
-      if (!isFrozenResultColumn(column)) return {};
-      const left = 48 + resultCols.value
-        .slice(0, columnIndex)
-        .reduce((sum, previous) => sum + columnWidth(previous), 0);
-      return { left: `${left}px` };
-    }
-
     const filteredResults = computed(() => {
       const q = resultQuery.value.trim().toLowerCase();
-      const threshold = (summary.value && summary.value.by_skill && summary.value.by_skill.threshold) || 2;
       return skillResults.value.filter((r) => {
-        if (correctnessFilter.value && r.correctness !== correctnessFilter.value) return false;
-        if (problemDimFilter.value && (r.rubric || {})[problemDimFilter.value] > threshold) return false;
-        if (problemDimFilter.value && (r.rubric || {})[problemDimFilter.value] == null) return false;
-        if (q && !`${r.item_id || ""} ${r.query || ""} ${r.context || ""} ${r.answer || ""} ${(r.card_contents || []).join(" ")} ${(r.superlink_texts || []).join(" ")} ${r.rationale || ""}`.toLowerCase().includes(q)) return false;
+        const modality = r.input_modality || ((items.value[r.index]?.query_images || []).length ? "text_image" : "text");
+        if (modalityFilter.value && modality !== modalityFilter.value) return false;
+        if (q && !`${r.item_id || ""} ${r.query || ""} ${r.context || ""} ${r.answer_text || ""} ${r.answer1 || ""} ${r.answer2 || ""} ${r.answer3 || ""} ${(r.card_contents || []).join(" ")} ${(r.superlink_texts || []).join(" ")} ${r.rationale || ""}`.toLowerCase().includes(q)) return false;
         return true;
       });
     });
@@ -534,30 +508,10 @@ createApp({
       return filteredResults.value.slice(start, start + resultPageSize.value);
     });
 
-    const fallbackStat = computed(() => {
-      const bs = summary.value && summary.value.by_skill;
-      if (!bs || !bs.overview) return null;
-      const total = bs.overview.reduce((s, r) => s + (r.n_items || 0), 0);
-      const fbCount = bs.overview.reduce((s, r) => s + (r.fallback_count || 0), 0);
-      return { total, fbCount, rate: total ? fbCount / total : 0 };
-    });
-
     function selectSkill(key) {
       activeSkill.value = key;
-      problemDimFilter.value = "";
       resultPage.value = 1;
       progressPage.value = 1;
-    }
-    function drillDownDimension(skill, dimension) {
-      activeSkill.value = skill;
-      problemDimFilter.value = dimension;
-      correctnessFilter.value = "";
-      resultPage.value = 1;
-      nextTick(() => resultBrowser.value && resultBrowser.value.scrollIntoView({ behavior: "smooth", block: "start" }));
-    }
-    function clearDimensionDrillDown() {
-      problemDimFilter.value = "";
-      resultPage.value = 1;
     }
     function resetResultPage() {
       resultPage.value = 1;
@@ -582,7 +536,6 @@ createApp({
       const configs = {
         result: [resultPage, pageCount, resultJumpPage],
         operation: [opPage, opPageCount, opJumpPage],
-        preview: [previewPage, previewPageCount, previewJumpPage],
         progress: [progressPage, progressPageCount, progressJumpPage],
       };
       const config = configs[kind];
@@ -600,9 +553,6 @@ createApp({
     function changeOpPage(delta) {
       setTablePage("operation", opPage.value + delta);
     }
-    function changePreviewPage(delta) {
-      setTablePage("preview", previewPage.value + delta);
-    }
     function changeProgressPage(delta) {
       setTablePage("progress", progressPage.value + delta);
     }
@@ -610,7 +560,6 @@ createApp({
       const jumpValues = {
         result: resultJumpPage.value,
         operation: opJumpPage.value,
-        preview: previewJumpPage.value,
         progress: progressJumpPage.value,
       };
       setTablePage(kind, jumpValues[kind]);
@@ -622,67 +571,60 @@ createApp({
       resultJumpPage.value = "";
     }
 
-    function trunc(v) {
-      if (v == null) return "";
-      const s = String(v);
-      return s.length > 50 ? s.slice(0, 50) + "…" : s;
-    }
-
-    function defaultJudgeSelection(targetMode) {
-      if (["single", "operation", "rich_content"].includes(targetMode)) {
-        const endUserJudge = terminalUserJudge();
-        if (endUserJudge) return [endUserJudge.name];
-      }
-      if (targetMode === "rich_content_quality") {
-        // 综合评测：挂卡识别默认用第一位裁判，回答评测默认选所有非产品专家
-        visualJudge.value = judges.value.length ? judges.value[0].name : "";
-        const rubricJudges = judges.value
-          .filter((j) => j.persona !== "product_expert")
-          .map((j) => j.name);
-        return rubricJudges.length ? rubricJudges : (judges.value.length ? [judges.value[0].name] : []);
-      }
+    function defaultJudgeSelection() {
       return judges.value.length ? [judges.value[0].name] : [];
     }
 
-    function terminalUserJudge() {
-      return judges.value.find(
-        (judge) => String(judge.display || "").trim() === "终端用户",
-      ) || judges.value.find((judge) => judge.persona === "end_user");
+    function defaultEvaluationProfile() {
+      return compareProfiles.value.find((profile) => profile.status === "stable")?.id
+        || compareProfiles.value[0]?.id
+        || "";
+    }
+
+    function evaluationProfileLabel(id) {
+      if (!id) return "—";
+      return evaluationProfiles.value.find((profile) => profile.id === id)?.display || id;
     }
 
     function switchMode(k) {
+      cancelHistoryLoad();
       mode.value = k;
-      selectedJudges.value = defaultJudgeSelection(k);
+      selectedJudges.value = defaultJudgeSelection();
+      if (k === "compare") selectedEvaluationProfile.value = defaultEvaluationProfile();
       items.value = [];
-      previewPage.value = 1;
       progressPage.value = 1;
       errors.value = [];
-      fileText.value = "";
-      isJsonl.value = false;
       datasetName.value = "";
-      if (["operation", "rich_content", "rich_content_quality"].includes(k)) {
-        opItems.value = [newOpItem()];
-        opPage.value = 1;
-        opJumpPage.value = "";
-      }
+      opItems.value = [newOpItem()];
+      opPage.value = 1;
+      opJumpPage.value = "";
     }
 
-    function onFile(e) {
-      const f = e.target.files[0];
-      if (!f) return;
-      datasetName.value = f.name || "";
-      const r = new FileReader();
-      r.onload = () => {
-        fileText.value = r.result;
-        text.value = r.result;
-        isJsonl.value = true;
-      };
-      r.readAsText(f, "utf-8");
-    }
-
-    // —— 任务类（录屏）评测：逐题卡片（query + 可选 context + 视频上传 + 可选 agent 自述）——
+    // —— 视频评测：逐题卡片（query + 可选 context + 视频上传 + 可选 answer_text）——
     function newOpItem() {
-      return { _uiKey: ++opItemSequence, id: "", query: "", context: "", category: "", videoName: "", videoPath: "", frames: [], frameCount: 0, duration: 0, answer: "", taskStartTime: null, taskEndTime: null, contentStartTime: null, contentEndTime: null, sourceLine: null, sourceData: null, uploading: false, uploadError: "" };
+      return { _uiKey: ++opItemSequence, id: "", query: "", queryImages: [], queryImageMeta: [], queryUploading: false, queryUploadError: "", evidenceMode: "video_frames", screenshot1Path: "", screenshot2Path: "", screenshot3Path: "", context: "", category: "", productCount: 2, videoName: "", videoPath: "", video1Path: "", video2Path: "", video3Path: "", frames: [], frameCount: 0, duration: 0, answer: "", answer1: "", answer2: "", answer3: "", context1: "", context2: "", context3: "", taskStartTime: null, taskEndTime: null, sourceLine: null, sourceData: null, sessionGroup: null, turnIndex: null, uploading: false, uploadError: "" };
+    }
+    async function onQueryImage(event, index) {
+      const item = opItems.value[index];
+      const file = event.target.files?.[0];
+      if (!file || !item) return;
+      item.queryUploading = true;
+      item.queryUploadError = "";
+      try {
+        const form = new FormData();
+        form.append("file", file);
+        const response = await fetch("/api/upload/query-image", { method: "POST", body: form });
+        const data = await response.json();
+        if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : data.detail?.message || "上传失败");
+        item.queryImages = [data.original_path];
+        item.queryImageMeta = [data];
+      } catch (error) { item.queryUploadError = error.message; }
+      finally { item.queryUploading = false; event.target.value = ""; }
+    }
+    function setQueryImagePath(item, path) {
+      item.queryImages = path.trim() ? [path.trim()] : [];
+      item.queryImageMeta = [];
+      item.queryUploadError = "";
     }
     function addOpItem() {
       opItems.value.push(newOpItem());
@@ -736,16 +678,23 @@ createApp({
       opJumpPage.value = "";
       try {
         const content = await file.text();
+        const isCsv = /\.csv$/i.test(file.name || "");
+        console.log("[onOpManifestFile] mode:", mode.value, "csv:", isCsv, "file size:", content.length);
+        const parseBody = isCsv
+          ? { mode: mode.value, csv: content }
+          : { mode: mode.value, jsonl: content };
         const parseResponse = await fetch("/api/parse", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ mode: mode.value, jsonl: content }),
+          body: JSON.stringify(parseBody),
         });
         const parsed = await parseResponse.json().catch(() => ({}));
-        if (!parseResponse.ok) throw new Error(parsed.detail || "JSONL 解析请求失败");
+        console.log("[onOpManifestFile] response ok:", parseResponse.ok, "items:", (parsed.items || []).length, "errors:", (parsed.errors || []).length);
+        if (!parseResponse.ok) throw new Error(parsed.detail || (isCsv ? "CSV 解析请求失败" : "JSONL 解析请求失败"));
         const importErrors = [...(parsed.errors || [])];
         if (!(parsed.items || []).length) {
           errors.value = importErrors.length ? importErrors : ["JSONL 中没有可导入的数据"];
+          console.warn("[onOpManifestFile] no items parsed");
           return;
         }
 
@@ -757,137 +706,133 @@ createApp({
             ...newOpItem(),
             id: item.id || "",
             query: item.query || "",
+            queryImages: [...(item.query_images || [])],
+            queryImageMeta: item.query_image_meta || [],
             context: item.context || "",
             category: item.category === "default" ? "" : (item.category || ""),
             videoName: String(item.video_path || "").split(/[\\/]/).pop(),
-            videoPath: item.video_path || "",
-            answer: (mode.value === "rich_content" || mode.value === "rich_content_quality") ? (item.answer_text || "") : (item.answer || ""),
+            videoPath: item.video_path || item.video1 || "",
+            productCount: item.product_count || (item.video3 || item.screenshot3 ? 3 : 2),
+            evidenceMode: item.evidence_mode || (item.screenshot1 ? "long_screenshot" : "video_frames"),
+            screenshot1Path: item.screenshot1 || "",
+            screenshot2Path: item.screenshot2 || "",
+            screenshot3Path: item.screenshot3 || "",
+            answer: mode.value === "compare" ? (item.answer1 || "") : (item.answer_text || ""),
+            answer1: item.answer1 || "",
+            answer2: item.answer2 || "",
+            answer3: item.answer3 || "",
+            context1: item.context1 || "",
+            context2: item.context2 || "",
+            context3: item.context3 || "",
+            video1Path: item.video1 || "",
+            video2Path: item.video2 || "",
+            video3Path: item.video3 || "",
             taskStartTime: item.task_start_time ?? null,
             taskEndTime: item.task_end_time ?? null,
-            contentStartTime: item.content_start_time ?? null,
-            contentEndTime: item.content_end_time ?? null,
             sourceLine: item.source_line ?? null,
             sourceData: item.source_data || null,
+            sessionGroup: item.session_group ?? null,
+            turnIndex: item.turn_index ?? null,
           }));
           opPage.value = 1;
+          console.log("[onOpManifestFile] opItems mapped:", opItems.value.length, "first videoPath:", opItems.value[0]?.videoPath, "first query:", opItems.value[0]?.query);
         }
       } catch (error) {
+        console.error("[onOpManifestFile] error:", error);
         errors.value = ["批量导入失败：" + (error?.message || String(error))];
       } finally {
         opPreparing.value = false;
       }
     }
 
-    const canSubmit = computed(() => {
-      if (isVideoMode.value)
-        return !opPreparing.value && opItems.value.some(
-          (it) => it.query.trim() && ((it.frames || []).length || it.videoPath)
-        );
-      return !!text.value;
-    });
-
-    async function doParse() {
-      const body = { mode: mode.value };
-      if (isJsonl.value && fileText.value) body.jsonl = fileText.value;
-      else body.text = text.value;
-      const r = await fetch("/api/parse", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      const d = await r.json();
-      items.value = d.items;
-      errors.value = d.errors;
-      previewPage.value = 1;
-      if (errors.value.length) console.log("解析错误：", errors.value);
+    function opItemReady(it) {
+      if (!it.query.trim()) return false;
+      if (mode.value !== "compare") return Boolean((it.frames || []).length || it.videoPath);
+      const productCount = Number(it.productCount) === 3 || it.video3Path || it.screenshot3Path ? 3 : 2;
+      if (it.evidenceMode === "long_screenshot") {
+        return Boolean(it.screenshot1Path && it.screenshot2Path && (productCount === 2 || it.screenshot3Path));
+      }
+      return Boolean(
+        (it.video1Path || it.videoPath)
+        && it.video2Path
+        && (productCount === 2 || it.video3Path)
+      );
     }
 
+    const canSubmit = computed(() =>
+      !opPreparing.value && !opItems.value.some(it => it.queryUploading) && opItems.value.some(opItemReady)
+    );
+
     async function submit() {
+      if (submitting.value) return;
+      cancelHistoryLoad();
+      const submitViewVersion = historyLoadVersion;
       runError.value = "";
-      if (isVideoMode.value) {
-        const valid = opItems.value.filter(
-          (it) => it.query.trim() && ((it.frames || []).length || it.videoPath)
-        );
-        if (!valid.length) {
-          alert("请为每题填写 query，并提供视频路径或上传视频后再评估。");
-          return;
-        }
-        items.value = valid.map((it, idx) => {
-          const item = {
-            id: it.id || `${mode.value === "operation" ? "op" : "rich"}${idx + 1}`,
-            query: it.query.trim(),
-            context: (it.context || "").trim(),
-            video_path: it.videoPath,
-          };
-          if (mode.value === "operation") {
-            item.category = "operation";
-            item.answer = (it.answer || "").trim();
-          } else {
-            // rich_content / rich_content_quality
-            item.category = (it.category || "").trim() || "default";
-            item.answer_text = (it.answer || "").trim();
-          }
-          if ((it.frames || []).length) {
-            item.media = [it.videoPath];
-            item.frames = it.frames;
-          }
-          if (Number.isFinite(it.taskStartTime)) item.task_start_time = it.taskStartTime;
-          if (Number.isFinite(it.taskEndTime)) item.task_end_time = it.taskEndTime;
-          if (Number.isFinite(it.contentStartTime)) item.content_start_time = it.contentStartTime;
-          if (Number.isFinite(it.contentEndTime)) item.content_end_time = it.contentEndTime;
-          if (Number.isFinite(it.sourceLine)) item.source_line = it.sourceLine;
-          if (it.sourceData) item.source_data = it.sourceData;
-          return item;
-        });
-        errors.value = [];
-      } else {
-        // 自动解析最新输入（用户可跳过手动"解析预览"）
-        await doParse();
-        if (!items.value.length) {
-          alert("解析后没有可评估的题。请检查格式：每行『问题 ||| 回答』。");
-          return;
-        }
+      const valid = opItems.value.filter(opItemReady);
+      if (!valid.length) {
+        alert("请为每题填写 query，并导入完整的长截图或录屏路径后再评估。");
+        return;
       }
-      results.value = [];
-      summary.value = null;
-      progressEvents.value = {};
-      barChartRefs.value = [];
-      activeSkill.value = "";
-      resultQuery.value = "";
-      correctnessFilter.value = "";
-      problemDimFilter.value = "";
-      resultPage.value = 1;
-      progress.value = 0;
-      total.value = items.value.length;
-      itemProgress.value = Object.fromEntries(
-        items.value.map((item, index) => [
-          index,
-          {
-            item_index: index,
-            item_id: item.id || `q${index}`,
-            status: "pending",
-            percent: 0,
-            message: "排队中",
-            stage_rank: 0,
-          },
-        ])
-      );
-      running.value = true;
+      const submittedItems = valid.map((it, idx) => {
+        const prefix = mode.value === "compare" ? "cmp" : "rich";
+        const item = {
+          id: it.id || `${prefix}${idx + 1}`,
+          query: it.query.trim(),
+          context: (it.context || "").trim(),
+        };
+        if (mode.value === "compare") {
+          item.query_images = [...(it.queryImages || [])];
+          const productCount = Number(it.productCount) === 3 || it.video3Path || it.screenshot3Path ? 3 : 2;
+          item.product_count = productCount;
+          if (it.evidenceMode === "long_screenshot") {
+            item.evidence_mode = "long_screenshot";
+            item.screenshot1 = it.screenshot1Path;
+            item.screenshot2 = it.screenshot2Path;
+            if (productCount === 3) item.screenshot3 = it.screenshot3Path;
+          } else {
+            item.video1 = it.video1Path || it.videoPath || "";
+            item.video2 = it.video2Path || "";
+            if (productCount === 3) item.video3 = it.video3Path || "";
+          }
+          item.context1 = (it.context1 || "").trim();
+          item.context2 = (it.context2 || "").trim();
+          item.answer1 = (it.answer1 || it.answer || "").trim();
+          item.answer2 = (it.answer2 || "").trim();
+          if (productCount === 3) {
+            item.context3 = (it.context3 || "").trim();
+            item.answer3 = (it.answer3 || "").trim();
+          }
+          item.category = (it.category || "").trim() || "default";
+        } else {
+          item.video_path = it.videoPath;
+          item.category = (it.category || "").trim() || "default";
+          item.answer_text = (it.answer || "").trim();
+        }
+        if ((it.frames || []).length) {
+          item.media = [it.videoPath];
+          item.frames = it.frames;
+        }
+        if (Number.isFinite(it.taskStartTime)) item.task_start_time = it.taskStartTime;
+        if (Number.isFinite(it.taskEndTime)) item.task_end_time = it.taskEndTime;
+        if (Number.isFinite(it.sourceLine)) item.source_line = it.sourceLine;
+        if (it.sourceData) item.source_data = it.sourceData;
+        if (it.sessionGroup != null) item.session_group = it.sessionGroup;
+        if (it.turnIndex != null) item.turn_index = it.turnIndex;
+        return item;
+      });
       const body = {
         mode: mode.value,
-        items: items.value,
-        dataset_name: datasetName.value || (isVideoMode.value ? "手动录入" : (isJsonl.value ? "未命名数据集.jsonl" : "文本输入")),
+        items: submittedItems,
+        dataset_name: datasetName.value || "手动录入",
+        evaluation_profile: mode.value === "compare" ? selectedEvaluationProfile.value : null,
         options: {
-          judges: mode.value === "operation"
-            ? defaultJudgeSelection("operation")
-            : selectedJudges.value,
-          visual_judge: visualJudge.value,
-          model: selectedModel.value,
+          judges: selectedJudges.value,
           concurrency: concurrency.value,
           eval_timeout_s: evalTimeout.value,
         },
       };
       let r;
+      submitting.value = true;
       try {
         r = await fetch("/api/eval", {
           method: "POST",
@@ -895,33 +840,119 @@ createApp({
           body: JSON.stringify(body),
         });
       } catch (error) {
-        running.value = false;
-        itemProgress.value = {};
+        submitting.value = false;
         runError.value = "无法启动评估：" + (error?.message || "网络错误");
         return;
       }
       const d = await r.json().catch(() => ({}));
+      submitting.value = false;
       if (!r.ok || !d.task_id) {
-        running.value = false;
-        itemProgress.value = {};
         const detail = typeof d.detail === "string" ? d.detail : "服务端拒绝了评估请求";
         runError.value = "无法启动评估：" + detail;
         return;
       }
+      if (submitViewVersion !== historyLoadVersion) {
+        loadQueue();
+        loadHistory();
+        return;
+      }
+      closeActiveStream();
+      items.value = submittedItems;
+      errors.value = [];
+      results.value = [];
+      summary.value = null;
+      progressEvents.value = {};
+      expandedProgressLogs.value = {};
+      activeSkill.value = "";
+      resultQuery.value = "";
+      resultPage.value = 1;
+      progress.value = 0;
+      total.value = submittedItems.length;
+      itemProgress.value = Object.fromEntries(
+        submittedItems.map((item, index) => [
+          index,
+          {
+            item_index: index,
+            item_id: item.id || `q${index}`,
+            status: "pending",
+            percent: 0,
+            message: "等待前序任务完成",
+            stage_rank: 0,
+          },
+        ])
+      );
+      running.value = true;
       taskId.value = d.task_id;
-      connectSSE();
+      repairStatus.value = "idle";
+      activeRetry.value = null;
+      selectedRetryIndexes.value = [];
+      selectedTaskStatus.value = d.status || "queued";
+      queueNotice.value = d.queue_position > 1
+        ? `已加入队列，当前排在第 ${d.queue_position} 位。`
+        : "任务已提交，等待调度器启动。";
+      connectSSE(taskId.value);
+      loadQueue();
+      loadHistory();
     }
 
-    async function reconcileTaskAfterError(message) {
+    async function retryFailedCases(indexes = null) {
+      if (!taskId.value || retrySubmitting.value || loadingTaskId.value) return;
+      const retryTaskId = taskId.value;
+      const viewVersion = historyLoadVersion;
+      const selected = indexes == null ? null : [...new Set(indexes.map(Number))];
+      if (selected && !selected.length) return;
+      retrySubmitting.value = true;
+      runError.value = "";
+      const idempotencyKey = globalThis.crypto?.randomUUID?.()
+        || `retry-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      let response;
+      try {
+        response = await fetch(`/api/eval/${encodeURIComponent(retryTaskId)}/retries`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            indexes: selected,
+            include_unfinished: true,
+            idempotency_key: idempotencyKey,
+            options: {},
+          }),
+        });
+      } catch (error) {
+        retrySubmitting.value = false;
+        if (viewVersion !== historyLoadVersion || taskId.value !== retryTaskId) return;
+        runError.value = "无法提交失败补跑：" + (error?.message || "网络错误");
+        return;
+      }
+      const data = await response.json().catch(() => ({}));
+      retrySubmitting.value = false;
+      if (viewVersion !== historyLoadVersion || taskId.value !== retryTaskId) return;
+      if (!response.ok) {
+        const detail = typeof data.detail === "string"
+          ? data.detail
+          : (data.detail?.message || "服务端拒绝了补跑请求");
+        runError.value = "无法提交失败补跑：" + detail;
+        return;
+      }
+      selectedRetryIndexes.value = [];
+      activeRetry.value = data;
+      repairStatus.value = data.status || "queued";
+      queueNotice.value = `已提交 ${data.selected} 条失败补跑，当前排在第 ${data.queue_position} 位。`;
+      connectSSE(taskId.value);
+      await loadQueue();
+      await loadHistory();
+    }
+
+    async function reconcileTaskAfterError(message, errorTaskId, viewVersion) {
       let snapshot = null;
       try {
-        const response = await fetch(`/api/history/${taskId.value}`);
+        const response = await fetch(`/api/history/${encodeURIComponent(errorTaskId)}`);
         if (response.ok) snapshot = await response.json();
       } catch (_) {}
+      if (viewVersion !== historyLoadVersion || taskId.value !== errorTaskId) return false;
       const snapshotResults = snapshot?.results || results.value;
       const resultByIndex = new Map(snapshotResults.map((entry) => [entry.index, entry]));
       const snapshotProgress = snapshot?.item_progress || {};
-      progressEvents.value = snapshot?.progress_events || progressEvents.value;
+      if (snapshot?.progress_events) restoreProgressEvents(snapshot.progress_events);
       const reconciled = {};
       items.value.forEach((item, index) => {
         const previous = itemProgress.value[index] || {};
@@ -949,123 +980,229 @@ createApp({
         };
       });
       results.value = snapshotResults;
+      refreshEvidence(snapshotResults);
       progress.value = snapshotResults.length;
       itemProgress.value = reconciled;
       if (snapshot?.summary) summary.value = snapshot.summary;
+      return true;
     }
 
-    function connectSSE() {
-      const es = new EventSource(`/api/eval/${taskId.value}/stream`);
+    function closeActiveStream() {
+      if (activeEventSource) activeEventSource.close();
+      activeEventSource = null;
+    }
+
+    function connectSSE(streamTaskId = taskId.value) {
+      closeActiveStream();
+      const es = new EventSource(`/api/eval/${streamTaskId}/stream?compact=true`);
+      activeEventSource = es;
+      const isSelected = () => !loadingTaskId.value && taskId.value === streamTaskId && activeEventSource === es;
+      es.addEventListener("replay_state", (e) => {
+        if (!isSelected()) return;
+        const data = JSON.parse(e.data);
+        // 一次恢复结果和当前进度，旧结果不能覆盖正在补跑的状态。
+        results.value = data.results || [];
+        refreshEvidence(results.value);
+        itemProgress.value = data.item_progress || {};
+        progressEvents.value = {};
+        progress.value = data.progress;
+        repairStatus.value = data.repair_status || "idle";
+        activeRetry.value = data.retry || null;
+      });
+      es.addEventListener("progress_history", (e) => {
+        if (!isSelected()) return;
+        const data = JSON.parse(e.data);
+        progressEvents.value[data.item_index] = normalizeProgressEvents(data.events);
+      });
+      es.addEventListener("start", () => {
+        if (!isSelected()) return;
+        selectedTaskStatus.value = "running";
+        queueNotice.value = "";
+        running.value = true;
+        loadQueue();
+      });
       es.addEventListener("item_progress", (e) => {
+        if (!isSelected()) return;
         const d = JSON.parse(e.data);
         mergeItemProgress(d);
       });
       es.addEventListener("progress_event", (e) => {
+        if (!isSelected()) return;
         appendProgressEvent(JSON.parse(e.data));
       });
+      es.addEventListener("retry_start", (e) => {
+        if (!isSelected()) return;
+        activeRetry.value = JSON.parse(e.data);
+        repairStatus.value = "running";
+        queueNotice.value = "失败补跑正在执行。";
+        loadQueue();
+      });
       es.addEventListener("result", (e) => {
+        if (!isSelected()) return;
         const d = JSON.parse(e.data);
-        results.value.push(d.result);
+        const result = d.result;
+        refreshEvidence([result]);
+        const index = result && result.index;
+        if (index == null) {
+          results.value.push(result);
+        } else {
+          // 断线重连时服务端会整段回放 results：按 index 替换去重，
+          // 防止重连一次就全量翻倍（重复行 + 内存线性增长）
+          const pos = results.value.findIndex((x) => x && x.index === index);
+          if (pos >= 0) results.value.splice(pos, 1, result);
+          else results.value.push(result);
+        }
         progress.value = d.progress;
-        const index = d.result.index;
         if (index != null) {
           const previous = itemProgress.value[index] || {};
-          itemProgress.value = {
-            ...itemProgress.value,
-            [index]: {
-              ...previous,
-              status: d.result.error ? "error" : "done",
-              percent: 100,
-              message: d.result.error ? "评测失败" : "评测完成",
-              stage_rank: d.result.error ? (previous.stage_rank ?? 0) : 4,
-              finished_at: Date.now(),
-            },
+          itemProgress.value[index] = {
+            ...previous,
+            status: d.result.error ? "error" : "done",
+            percent: 100,
+            message: d.result.error ? "评测失败" : "评测完成",
+            stage_rank: d.result.error ? (previous.stage_rank ?? 0) : 4,
+            finished_at: Date.now(),
           };
         }
       });
+      es.addEventListener("retry_result", (e) => {
+        if (!isSelected()) return;
+        const data = JSON.parse(e.data);
+        const index = Number(data.index);
+        if (!Number.isInteger(index)) return;
+        const previous = itemProgress.value[index] || {};
+        const status = data.status === "succeeded" ? "done" : (data.status === "failed" ? "error" : previous.status);
+        itemProgress.value[index] = {
+          ...previous,
+          status,
+          percent: 100,
+          message: data.status === "succeeded" ? "补跑成功" : (data.status === "failed" ? "补跑仍失败" : "补跑已跳过"),
+          finished_at: Date.now(),
+        };
+      });
       es.addEventListener("done", (e) => {
-        summary.value = JSON.parse(e.data).summary;
+        if (!isSelected()) return;
+        const doneData = JSON.parse(e.data);
+        summary.value = doneData.summary;
+        if (doneData.retry) {
+          activeRetry.value = doneData.retry;
+          repairStatus.value = doneData.retry.status || "completed";
+          queueNotice.value = `失败补跑完成：成功 ${doneData.retry.succeeded || 0}，仍失败 ${doneData.retry.failed || 0}，跳过 ${doneData.retry.skipped || 0}。`;
+        }
         if (mode.value !== "compare" && skillTabs.value.length) activeSkill.value = skillTabs.value[0].key;
         resultPage.value = 1;
         running.value = false;
+        selectedTaskStatus.value = "done";
+        if (!doneData.retry) queueNotice.value = "";
         es.close();
-        renderCharts();
+        if (activeEventSource === es) activeEventSource = null;
+        loadQueue();
         loadHistory();
       });
       es.addEventListener("error", async (e) => {
         // 原生 EventSource 网络错误没有 data，让浏览器按协议自动重连并回放状态。
         if (!e.data) return;
+        if (!isSelected()) return;
         let message = "未知错误";
         try {
           const d = JSON.parse(e.data);
           message = d.message || message;
         } catch (_) {}
         running.value = false;
+        selectedTaskStatus.value = "error";
+        queueNotice.value = "";
         es.close();
-        await reconcileTaskAfterError(message);
+        if (activeEventSource === es) activeEventSource = null;
+        if (!await reconcileTaskAfterError(message, streamTaskId, historyLoadVersion)) return;
         runError.value = "评估出错：" + message;
+        loadQueue();
+        loadHistory();
+      });
+      es.addEventListener("cancelled", (e) => {
+        if (!isSelected()) return;
+        let message = "排队任务已取消";
+        try {
+          message = JSON.parse(e.data).message || message;
+        } catch (_) {}
+        running.value = false;
+        selectedTaskStatus.value = "cancelled";
+        queueNotice.value = message;
+        es.close();
+        if (activeEventSource === es) activeEventSource = null;
+        loadQueue();
+        loadHistory();
+      });
+      es.addEventListener("retry_cancelled", () => {
+        if (!isSelected()) return;
+        repairStatus.value = "cancelled";
+        queueNotice.value = "失败补跑已取消";
+        es.close();
+        if (activeEventSource === es) activeEventSource = null;
+        loadQueue();
+        loadHistory();
       });
     }
 
-    function isNA(r, dim) {
-      return r.na_dimensions && r.na_dimensions.includes(dim);
-    }
-    function cellTitle(r, c) {
-      // 维度列 hover 显示该维度的打分理由（rubric_reasons）；N/A 维度显示"不适用"
-      if (c.rubricDim && isNA(r, c.rubricDim)) {
-        return "[不适用] " + (r.rubric_reasons && r.rubric_reasons[c.rubricDim]
-          ? r.rubric_reasons[c.rubricDim] : "该维度与本题/本答案无关");
-      }
-      if (c.rubricDim && r.rubric_reasons && r.rubric_reasons[c.rubricDim]) {
-        return r.rubric_reasons[c.rubricDim];
-      }
-      return "";
-    }
     function cell(r, c) {
       const v = r[c.key];
-      if (c.rubricDim) {
-        if (isNA(r, c.rubricDim)) return "N/A";
-        return r.rubric && r.rubric[c.rubricDim] != null ? r.rubric[c.rubricDim] : "";
-      }
       if (c.key === "category") return r.category_display || (!v || v === "default" ? "通用" : v);
-      if (c.key === "agree") {
-        if (v === undefined) return "";
-        return v === true ? "✓ 一致" : v === false ? "✗ 不一致" : "?";
-      }
-      if (c.key === "used_search") return v ? "是" : "否";
-      if (c.key === "is_low_level") return v === "yes" ? "是" : "否";
       if (c.key === "latency_s") return v != null ? v + "秒" : "";
-      if (c.key === "truncated") return v ? "⚠️是(强制判定)" : "";
-      if (c.key === "arbitrated") return v ? `⚖️是(${r.arbitrator_confidence ?? "-"})` : "";
-      if (c.key === "bidirectional_consistent") return v ? "是" : "否(位置偏差)";
-      if (c.key === "winner") return v === "a" ? "A" : v === "b" ? "B" : "平";
-      if (c.key === "correctness") {
-        if (mode.value === "operation")
-          return ({ right: "✓ 完成", wrong: "✗ 未完成", partial: "◐ 完成但有瑕疵", unclear: "? 无法判断" }[v] || v) || "";
-        return ({ right: "正确", wrong: "错误", partial: "部分", unclear: "不清" }[v] || v) || "";
+      if (["input_status_summary", "response_gate_summary", "safety_gate_summary"].includes(c.key)) {
+        const field = c.key.replace("_summary", "");
+        const labels = { complete: "完整", partial: "不完整", failed: "失败", pass: "通过", fail: "失败", unclear: "不清楚" };
+        const count = Number(r.product_count || 2);
+        return Array.from({ length: count }, (_, index) => {
+          const productNo = index + 1;
+          const key = field === "input_status" ? `answer${productNo}_input_status` : `answer${productNo}_${field}`;
+          const value = r[key];
+          return `P${productNo}:${labels[value] || value || "N/A"}`;
+        }).join("；");
+      }
+      if (c.key.endsWith("_summary") && !["input_status_summary", "response_gate_summary", "safety_gate_summary"].includes(c.key)) {
+        const dimension = c.key.slice(0, -"_summary".length);
+        if (r[`${dimension}_applicable`] === false) return "N/A";
+        const count = Number(r.product_count || 2);
+        const scores = Array.from({ length: count }, (_, index) => {
+          const score = r[`answer${index + 1}_${dimension}_score`];
+          return `P${index + 1}:${score == null ? "N/A" : score}`;
+        }).join("；");
+        const groups = r[`${dimension}_rank_groups`] || [];
+        const ranking = groups.map((group) => group.map((product) => product.replace("product", "P")).join("=")).join(">");
+        const verification = r[`${dimension}_verification_status`] || "";
+        return [scores, ranking ? `排名:${ranking}` : "", verification === "unverifiable" ? "无法核验" : ""].filter(Boolean).join("；");
+      }
+      // 垂域视觉对比维度渲染
+      if (["relevance", "safety", "content_quality", "need_closure", "personalization"].includes(c.key)) {
+        if (v === "answer1") return "产品1更优";
+        if (v === "answer2") return "产品2更优";
+        if (v === "tie") return "平手";
+        if (v == null) return "N/A";
+        return v || "";
+      }
+      if (c.key === "has_conflict") {
+        if (v === "yes") return "有冲突";
+        if (v === "no") return "无冲突";
+        if (v === "unclear") return "不清楚";
+        return v || "";
       }
       if (["card_types", "card_contents", "superlink_texts"].includes(c.key)) {
         return Array.isArray(v) ? v.join("；") : (v || "");
       }
       if (c.key === "card_presence" || c.key === "superlink_presence") {
-        return ({ present: "有", absent: "无", unclear: "不确定" }[v] || v) || "";
+        return ({ present: "是", absent: "否", unclear: "不清楚" }[v] || v) || "";
       }
-      if (c.key === "card_suitability") {
-        return ({
-          suitable: "合适",
-          partially_suitable: "部分合适",
-          unsuitable: "不合适",
-          unclear: "不确定",
-          not_applicable: "N/A",
-        }[v] || v) || "";
+      if (c.key === "card_suitability" || c.key === "superlink_suitability") {
+        if (v === "ok") return "OK";
+        if (v === "nok") return "NOK";
+        return v || "";
+      }
+      if (c.key === "problem_solved") {
+        return ({ ok: "OK", nok: "NOK", need_review: "需复查" }[v] || v) || "";
       }
       if (c.key === "answer_coverage") {
         return ({ complete: "完整", partial: "部分", unclear: "不确定" }[v] || v) || "";
       }
-      if (c.key === "superlink_count_type") {
-        return ({ exact: "精确", lower_bound: "至少", unknown: "未知" }[v] || v) || "";
-      }
-      if (c.key === "needs_review") return v ? "是" : "否";
+      if (c.key === "needs_review" || c.key === "needs_human_review") return v ? "T" : "F";
       if (v == null) return "";
       return v;
     }
@@ -1103,72 +1240,6 @@ createApp({
       cellTooltip.value.visible = false;
     }
 
-    function setBarRef(el, i) {
-      if (el) barChartRefs.value[i] = el;
-    }
-
-    function renderCharts() {
-      nextTick(() => {
-        const bs = summary.value && summary.value.by_skill;
-        if (!bs || !bs.overview) return;
-        // 饼图：垂域样本量分布
-        const pieData = bs.overview.filter((s) => s.n_items > 0).map((s) => ({ name: s.display, value: s.n_items }));
-        if (pieChart.value && pieData.length) {
-          echarts.init(pieChart.value).setOption({
-            tooltip: { trigger: "item", formatter: "{b}: {c} 题 ({d}%)" },
-            legend: { bottom: 0, type: "scroll" },
-            title: { text: "垂域样本分布", left: "center", textStyle: { fontSize: 13 } },
-            series: [{ type: "pie", radius: ["30%", "60%"], center: ["50%", "48%"], data: pieData }],
-          });
-        }
-        // 各垂域维度问题分布：两列卡片中的竖向柱状图
-        (bs.sections || []).forEach((s, i) => {
-          const el = barChartRefs.value[i];
-          if (!el || !s.n_items) return;
-          const dpd = s.dim_problem_dist || {};
-          const dims = Object.keys(dpd).filter((d) => dpd[d].rate > 0);
-          if (!dims.length) return;
-          const chart = echarts.getInstanceByDom(el) || echarts.init(el);
-          chart.setOption({
-            tooltip: {
-              trigger: "axis",
-              formatter: (ctx) => {
-                const d = dims[ctx[0].dataIndex];
-                const allIds = dpd[d].item_ids || [];
-                const shownIds = allIds.slice(0, 5);
-                const count = dpd[d].count ?? allIds.length;
-                const preview = shownIds.length ? `<br/>示例题号：${shownIds.join(", ")}` : "";
-                return `${d}：${(ctx[0].value * 100).toFixed(0)}%<br/>问题题目：${count} 题${preview}<br/><span style="color:#9ca3af">点击柱子查看完整明细</span>`;
-              },
-            },
-            grid: { left: 48, right: 18, top: 42, bottom: 62 },
-            title: { text: `${s.display} 维度问题占比（N=${s.n_items}）`, left: "center", textStyle: { fontSize: 12 } },
-            xAxis: {
-              type: "category",
-              data: dims,
-              axisLabel: { interval: 0, rotate: dims.length > 3 ? 24 : 0, fontSize: 11 },
-            },
-            yAxis: { type: "value", max: 1, axisLabel: { formatter: (v) => v * 100 + "%" } },
-            series: [
-              {
-                type: "bar",
-                data: dims.map((d) => dpd[d].rate),
-                itemStyle: { color: "#e6a23c" },
-                emphasis: { itemStyle: { color: "#d97706" } },
-                cursor: "pointer",
-                label: { show: true, position: "top", formatter: (ctx) => (ctx.value * 100).toFixed(0) + "%" },
-              },
-            ],
-          });
-          chart.off("click");
-          chart.on("click", (params) => {
-            const dimension = dims[params.dataIndex];
-            if (dimension) drillDownDimension(s.skill, dimension);
-          });
-        });
-      });
-    }
-
     function formatTime(ts) {
       if (!ts) return "";
       const d = new Date(ts * 1000);
@@ -1189,6 +1260,56 @@ createApp({
       } finally {
         loadingHistory.value = false;
       }
+    }
+
+    async function loadQueue() {
+      try {
+        const response = await fetch("/api/queue");
+        if (!response.ok) return;
+        const data = await response.json();
+        queueState.value = {
+          running: data.running || null,
+          queued: data.queued || [],
+        };
+      } catch (_) {}
+    }
+
+    async function cancelQueuedTask(entry) {
+      if (!entry || entry.status !== "queued") return;
+      if (!confirm(`确认取消排队任务“${entry.dataset_name || entry.task_id}”？`)) return;
+      const jobId = entry.job_id || entry.task_id;
+      const response = await fetch(`/api/queue/${encodeURIComponent(jobId)}`, {
+        method: "DELETE",
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        alert("取消失败：" + (data.detail || "任务状态已变化"));
+        await loadQueue();
+        return;
+      }
+      if (entry.kind !== "retry" && taskId.value === entry.task_id) {
+        running.value = false;
+        selectedTaskStatus.value = "cancelled";
+        queueNotice.value = "排队任务已取消";
+        closeActiveStream();
+      }
+      await loadQueue();
+      await loadHistory();
+    }
+
+    async function reprioritizeQueuedTask(entry, action) {
+      if (!entry || entry.status !== "queued") return;
+      const jobId = entry.job_id || entry.task_id;
+      const response = await fetch(`/api/queue/${encodeURIComponent(jobId)}/position`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        alert("调整优先级失败：" + (data.detail || "任务状态已变化"));
+      }
+      await loadQueue();
     }
 
     function editHistoryNote(item) {
@@ -1222,7 +1343,11 @@ createApp({
       if (!confirm("确认删除这条历史记录？删除后不可恢复。")) return;
       const r = await fetch(`/api/history/${id}`, { method: "DELETE" });
       if (!r.ok) {
-        alert("删除失败");
+        let detail = "";
+        try {
+          detail = (await r.json()).detail || "";
+        } catch (e) {}
+        alert(detail ? `删除失败：${detail}` : "删除失败");
         return;
       }
       if (taskId.value === id) {
@@ -1233,51 +1358,156 @@ createApp({
       await loadHistory();
     }
 
+    function cancelHistoryLoad() {
+      historyLoadVersion++;
+      if (historyLoadController) historyLoadController.abort();
+      historyLoadController = null;
+      loadingTaskId.value = "";
+    }
+
     async function loadHistoryTask(id) {
-      const r = await fetch(`/api/history/${id}`);
-      if (!r.ok) {
-        alert("历史记录加载失败");
-        return;
+      cancelHistoryLoad();
+      const version = historyLoadVersion;
+      let loaded = false;
+      loadingTaskId.value = id;
+      historyLoadController = typeof AbortController !== "undefined" ? new AbortController() : null;
+      try {
+        const r = await fetch(`/api/history/${encodeURIComponent(id)}`, historyLoadController ? {signal: historyLoadController.signal} : {});
+        if (version !== historyLoadVersion) return;
+        if (!r.ok) {
+          alert("历史记录加载失败");
+          return;
+        }
+        const d = await r.json();
+        if (version !== historyLoadVersion) return;
+        if (!modes.some((m) => m.key === d.mode)) {
+          alert("该历史记录使用已下线的评测模式，无法加载。");
+          return;
+        }
+        loaded = true;
+        closeActiveStream();
+        taskId.value = d.task_id || id;
+        mode.value = d.mode;
+        if (d.mode === "compare") {
+          selectedEvaluationProfile.value = d.evaluation_profile || defaultEvaluationProfile();
+        }
+        datasetName.value = d.dataset_name || "";
+        items.value = d.items || [];
+        if (d.mode === "compare") {
+          opItems.value = items.value.map(item => ({
+            ...newOpItem(), id: item.id || "", query: item.query || item.question || "",
+            context: item.context || "", category: item.category || "",
+            queryImages: [...(item.query_images || [])], queryImageMeta: item.query_image_meta || [],
+            productCount: item.product_count || (item.video3 || item.screenshot3 ? 3 : 2),
+            evidenceMode: item.evidence_mode || (item.screenshot1 ? "long_screenshot" : "video_frames"),
+            ...Object.fromEntries([1, 2, 3].flatMap(n => [
+              [`video${n}Path`, item[`video${n}`] || ""], [`screenshot${n}Path`, item[`screenshot${n}`] || ""],
+              [`answer${n}`, item[`answer${n}`] || ""], [`context${n}`, item[`context${n}`] || ""],
+            ])), taskStartTime: item.task_start_time ?? null, taskEndTime: item.task_end_time ?? null,
+            sourceData: item.source_data || null, sourceLine: item.source_line ?? null,
+            sessionGroup: item.session_group ?? null, turnIndex: item.turn_index ?? null,
+          }));
+          opPage.value = 1;
+        }
+        modalityFilter.value = "";
+        results.value = d.results || [];
+        refreshEvidence(results.value);
+        itemProgress.value = d.item_progress || {};
+        restoreProgressEvents(d.progress_events);
+        expandedProgressLogs.value = {};
+        summary.value = d.summary || null;
+        repairStatus.value = d.repair_status || "idle";
+        const retryRuns = Object.values(d.retry_runs || {});
+        activeRetry.value = retryRuns.sort(
+          (a, b) => Number(b.created_at || 0) - Number(a.created_at || 0)
+        )[0] || null;
+        total.value = items.value.length || results.value.length;
+        progress.value = results.value.length;
+        selectedTaskStatus.value = d.status || "";
+        running.value = ["pending", "queued", "running"].includes(selectedTaskStatus.value);
+        queueNotice.value = selectedTaskStatus.value === "queued" ? "该任务正在等待前序任务完成。" : "";
+        activeSkill.value = "";
+        resultQuery.value = "";
+        resultPage.value = 1;
+        progressPage.value = 1;
+        if (mode.value !== "compare" && skillTabs.value.length) activeSkill.value = skillTabs.value[0].key;
+        if (running.value || ["queued", "running"].includes(repairStatus.value)) connectSSE(taskId.value);
+        nextTick(() => resultBrowser.value && resultBrowser.value.scrollIntoView({ behavior: "smooth", block: "start" }));
+      } catch (error) {
+        if (version === historyLoadVersion && error?.name !== "AbortError") {
+          runError.value = "历史记录加载失败：" + (error?.message || "网络错误");
+        }
+      } finally {
+        if (version === historyLoadVersion) {
+          loadingTaskId.value = "";
+          historyLoadController = null;
+          if (!loaded && (running.value || ["queued", "running"].includes(repairStatus.value))) connectSSE(taskId.value);
+        }
       }
-      const d = await r.json();
-      taskId.value = d.task_id || id;
-      mode.value = d.mode || mode.value;
-      datasetName.value = d.dataset_name || "";
-      items.value = d.items || [];
-      results.value = d.results || [];
-      itemProgress.value = d.item_progress || {};
-      progressEvents.value = d.progress_events || {};
-      summary.value = d.summary || null;
-      total.value = items.value.length || results.value.length;
-      progress.value = results.value.length;
-      running.value = false;
-      activeSkill.value = "";
-      resultQuery.value = "";
-      correctnessFilter.value = "";
-      problemDimFilter.value = "";
-      resultPage.value = 1;
-      progressPage.value = 1;
-      barChartRefs.value = [];
-      if (mode.value !== "compare" && skillTabs.value.length) activeSkill.value = skillTabs.value[0].key;
-      renderCharts();
-      nextTick(() => resultBrowser.value && resultBrowser.value.scrollIntoView({ behavior: "smooth", block: "start" }));
     }
 
     function exportCsv() {
+      if (loadingTaskId.value) return;
       window.open(`/api/eval/${taskId.value}/export?format=csv`);
     }
     function exportJson() {
+      if (loadingTaskId.value) return;
       window.open(`/api/eval/${taskId.value}/export?format=json`);
     }
-    function exportXlsx() {
-      window.open(`/api/eval/${taskId.value}/export?format=xlsx`);
+    async function exportXlsx(requestedId = "") {
+      if (exportingTaskId.value || (!requestedId && loadingTaskId.value)) return;
+      const id = requestedId || taskId.value;
+      if (!id) return;
+      exportingTaskId.value = id;
+      exportError.value = "";
+      exportDownloadUrl.value = "";
+      exportMessage.value = `正在为任务 ${id} 准备 Excel…`;
+      try {
+        const response = await fetch(`/api/eval/${encodeURIComponent(id)}/exports`, {method: "POST"});
+        let data = await response.json();
+        if (!response.ok) throw new Error(data.detail || "导出请求失败");
+        while (!disposed && ["queued", "generating"].includes(data.status)) {
+          exportMessage.value = `任务 ${id}：${data.status === 'queued' ? '等待生成' : '正在生成 Excel'}…`;
+          await new Promise(resolve => window.setTimeout(resolve, 1000));
+          if (disposed) return;
+          const status = await fetch(`/api/exports/${encodeURIComponent(data.export_id)}`);
+          data = await status.json();
+          if (!status.ok) throw new Error(data.detail || "无法读取导出状态");
+        }
+        if (disposed) return;
+        if (data.status !== "ready") throw new Error(data.error || "生成 Excel 失败");
+        exportDownloadUrl.value = `/api/exports/${encodeURIComponent(data.export_id)}/download`;
+        exportMessage.value = `任务 ${id}：Excel 已生成。若未开始下载，请点击下方链接（30 分钟内有效）。`;
+        // Use a same-origin download link: no popup and no full-file blob in memory.
+        const link = document.createElement("a");
+        link.href = exportDownloadUrl.value;
+        link.download = data.filename || "";
+        link.hidden = true;
+        document.body.appendChild(link);
+        try {
+          link.click();
+        } catch (error) {
+          // A browser may block automatic downloads; keep the manual link available.
+          console.warn("自动下载未能触发，请使用下载链接", error);
+        } finally {
+          link.remove();
+        }
+      } catch (error) {
+        exportMessage.value = "";
+        exportError.value = `任务 ${id} 导出失败：${error?.message || "网络错误"}。可再次点击导出重试。`;
+      } finally {
+        exportingTaskId.value = "";
+      }
     }
     function exportFrames() {
+      if (loadingTaskId.value) return;
       window.open(`/api/eval/${taskId.value}/export?format=frames_zip`);
     }
     function itemArtifactUrl(result, format) {
       const index = Number(result && result.index);
       if (!taskId.value || !Number.isInteger(index) || index < 0) return "";
+      const item = items.value[index] || {};
+      if (format === 'video' && (item.evidence_mode === 'long_screenshot' || item.screenshot1)) return "";
       return `/api/eval/${taskId.value}/items/${index}/export?format=${encodeURIComponent(format)}`;
     }
 
@@ -1287,34 +1517,46 @@ createApp({
       }, 1000);
       const r = await fetch("/api/config");
       const d = await r.json();
-      judges.value = d.judges;
-      models.value = d.models;
-      selectedJudges.value = defaultJudgeSelection(mode.value);
-      selectedModel.value = d.models[0] || "";
+      judges.value = d.judges || [];
+      evaluationProfiles.value = d.evaluation_profiles || [];
+      selectedEvaluationProfile.value = defaultEvaluationProfile();
+      selectedJudges.value = defaultJudgeSelection();
       loadHistory();
+      loadQueue();
+      queueRefreshTimer = window.setInterval(loadQueue, 2000);
     });
 
     onUnmounted(() => {
+      disposed = true;
+      cancelHistoryLoad();
       if (progressClockTimer != null) window.clearInterval(progressClockTimer);
+      if (queueRefreshTimer != null) window.clearInterval(queueRefreshTimer);
+      closeActiveStream();
     });
 
     return {
-      modes, mode, modeLabel, isVideoMode, text, items, errors, judges, visibleJudges, models, selectedJudges, visualJudge, selectedModel, datasetName,
-      concurrency, evalTimeout, running, progress, total, results, summary, taskId, runError,
-      itemProgress, progressEvents, progressRows, pagedProgressRows, progressStages,
+      modes, mode, modeLabel, isVideoMode, items, errors, judges, visibleJudges, selectedJudges, datasetName,
+      evaluationProfiles, compareProfiles, selectedEvaluationProfile, evaluationProfileLabel,
+      concurrency, evalTimeout, submitting, running, progress, total, results, summary, taskId, runError,
+      queueState, queueEntries, selectedTaskStatus, queueNotice, taskStatusLabel, queueKindLabel,
+      repairStatus, retryStatusLabel, retrySubmitting, selectedRetryIndexes, activeRetry,
+      failedResultIndexes, retryIndexSelected, toggleRetryIndex, retryFailedCases,
+      itemProgress, progressEvents, expandedProgressLogs, pagedProgressRows, progressStages,
       historyItems, historyNoteDrafts, historyNoteEditing, loadingHistory, pageSize,
+      loadingTaskId, exportingTaskId, exportMessage, exportError, exportDownloadUrl,
       opPage, opPageSize, opPageCount, opJumpPage,
-      previewPage, previewPageCount, previewJumpPage,
       progressPage, progressPageCount, progressJumpPage,
       resultJumpPage,
-      pieChart, barChartRefs, resultBrowser, setBarRef, renderCharts,
-      activeSkill, resultQuery, correctnessFilter, problemDimFilter, resultPage, resultPageSize,
-      skillTabs, rubricDims, filteredResults, pagedResults, pageCount, resultTableWidth, fallbackStat,
-      formatHint, placeholder, previewKeys, pagedPreviewItems, skillOverviewRows, resultCols, opItems, pagedOpItems, opPreparing, canSubmit,
-      trunc, switchMode, onFile, onOpManifestFile, doParse, submit, cell, cellTitle, isNA, columnWidth, isFrozenResultColumn, frozenResultColumnStyle, exportCsv, exportJson, exportXlsx, exportFrames, itemArtifactUrl, addOpItem, removeOpItem, onOpVideo, onOpDrop,
-      loadHistory, loadHistoryTask, delHistory, editHistoryNote, cancelHistoryNote, saveHistoryNote, formatTime,
-      selectSkill, drillDownDimension, clearDimensionDrillDown, resetResultPage, changePage,
-      changePreviewPage, changeProgressPage, changeOpPage, changeResultPageSize, paginationPages, setTablePage, jumpTablePage,
+      resultBrowser,
+      activeSkill, resultQuery, resultPage, resultPageSize,
+      modalityFilter, modalityCounts, queryImageMetas, onQueryImage, setQueryImagePath,
+      evidenceImages, evidenceImageErrors, evidenceExpanded, setEvidenceExpanded, setPageEvidenceExpanded,
+      skillTabs, filteredResults, pagedResults, pageCount, resultTableWidth,
+      formatHint, resultCols, opItems, pagedOpItems, opPreparing, canSubmit,
+      switchMode, onOpManifestFile, submit, cell, columnWidth, exportCsv, exportJson, exportXlsx, exportFrames, itemArtifactUrl, addOpItem, removeOpItem, onOpVideo, onOpDrop,
+      loadHistory, loadQueue, cancelQueuedTask, reprioritizeQueuedTask, loadHistoryTask, delHistory, editHistoryNote, cancelHistoryNote, saveHistoryNote, formatTime,
+      selectSkill, resetResultPage, changePage,
+      changeProgressPage, changeOpPage, changeResultPageSize, paginationPages, setTablePage, jumpTablePage,
       progressStageClass, progressDisplay, progressStageLabel, progressStatusClass,
       progressMeta, formatProgressEventTime, progressEventMeta, progressEventMessage, scrollProgressLog,
       formatProgressElapsed, shortRequestId, copyRequestId,

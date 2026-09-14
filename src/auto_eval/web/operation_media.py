@@ -23,7 +23,6 @@ from ..paths import PROJECT_ROOT, RUNS_DIR
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"}
 _TASK_TIME_FIELDS = ("task_start_time", "task_end_time")
-_CONTENT_TIME_FIELDS = ("content_start_time", "content_end_time")
 
 
 def _safe_name(value: str, fallback: str) -> str:
@@ -162,7 +161,7 @@ def _rich_content_timing(
 ) -> tuple[dict, str]:
     """校验富内容视频时间窗，并构造专用抽帧配置和缓存键。"""
     supplied: dict[str, float] = {}
-    for field in _CONTENT_TIME_FIELDS:
+    for field in _TASK_TIME_FIELDS:
         value = item.get(field)
         if value is None:
             continue
@@ -178,10 +177,10 @@ def _rich_content_timing(
         supplied[field] = normalized
 
     extraction = profile.extraction
-    start = supplied.get("content_start_time", extraction.default_start_time)
-    end = supplied.get("content_end_time")
+    start = supplied.get("task_start_time", extraction.default_start_time)
+    end = supplied.get("task_end_time")
     if end is not None and end <= start:
-        raise ValueError("content_end_time 必须大于 content_start_time")
+        raise ValueError("task_end_time 必须大于 task_start_time")
 
     config = KeyframeConfig(
         task_start_time=start,
@@ -197,12 +196,14 @@ def _rich_content_timing(
         auto_task_end_confidence_threshold=2.0,
         final_dedup_rms_threshold=0.004,
         final_dedup_changed_fraction_threshold=0.004,
+        # 垂域视觉（问答视频）不需要开头/结尾受保护采样。
+        protected_sample_interval=0.0,
     )
     cache_payload = {
         "algorithm_version": extraction.algorithm_version,
         "config": {
-            "content_start_time": start,
-            "content_end_time": end,
+            "task_start_time": start,
+            "task_end_time": end,
             "max_frames": extraction.max_frames,
             "sample_fps": extraction.sample_fps,
             "scene_threshold": extraction.scene_threshold,
@@ -326,7 +327,7 @@ def prepare_session_rich_content_item(
     probe_fn: Callable = probe_duration,
     extract_fn: Callable = extract_scene_keyframes,
 ) -> dict:
-    """按 Web 会话准备挂卡 / Superlink 视觉评估关键帧。"""
+    """按 Web 会话准备垂域视觉评测关键帧。"""
     raw_path = str(item.get("video_path") or "").strip()
     if not raw_path:
         media = item.get("media") or []
@@ -359,3 +360,90 @@ def prepare_session_rich_content_item(
     if not frames:
         raise ValueError(f"视频抽帧失败：{raw_path}")
     return _prepared_item(item, video_path, frames, duration)
+
+
+def prepare_session_visual_compare_item(
+    item: dict,
+    *,
+    profile,
+    session_name: str,
+    item_index: int,
+    total_items: int,
+    base_dir = PROJECT_ROOT,
+    runs_dir = RUNS_DIR,
+    probe_fn = probe_duration,
+    extract_fn = extract_scene_keyframes,
+) -> dict:
+    """按 Web 会话准备垂域视觉对比评测的双视频关键帧。
+
+    为两个视频分别抽帧，帧路径存入 frames1 / frames2。
+    """
+    # Video 1
+    raw_path1 = str(item.get("video1") or "").strip()
+    if not raw_path1:
+        raise ValueError("缺少 video1")
+    video_path1 = resolve_operation_video_path(raw_path1, base_dir=base_dir)
+    duration1 = float(probe_fn(video_path1))
+    if duration1 <= 0:
+        raise ValueError(f"无法读取视频1或视频时长为0：{raw_path1}")
+
+    # Video 2
+    raw_path2 = str(item.get("video2") or "").strip()
+    if not raw_path2:
+        raise ValueError("缺少 video2")
+    video_path2 = resolve_operation_video_path(raw_path2, base_dir=base_dir)
+    duration2 = float(probe_fn(video_path2))
+    if duration2 <= 0:
+        raise ValueError(f"无法读取视频2或视频时长为0：{raw_path2}")
+
+    # 使用与 rich_content 相同的抽帧参数
+    from ..config import VisualModeProfile
+    extract_kwargs, cache_key = _rich_content_timing(item, duration1, profile)
+
+    width = max(3, len(str(max(total_items, 1))))
+    sequence = str(item_index + 1).zfill(width)
+    item_name = _safe_name(
+        str(item.get("id") or f"q{item_index + 1}"),
+        f"q{item_index + 1}",
+    )
+    safe_session = _safe_name(session_name, "visual_compare_session")
+    base_frame_dir = (
+        runs_dir / "videos" / "imported" / safe_session / f"{sequence}_{item_name}"
+    )
+
+    # 抽 video1 帧
+    frame_dir1 = base_frame_dir / "video1"
+    frames1 = _extract_frames(
+        video_path1, frame_dir1,
+        extract_fn=extract_fn,
+        cache_key=cache_key,
+        extract_kwargs=extract_kwargs,
+    )
+    if not frames1:
+        raise ValueError(f"视频1抽帧失败：{raw_path1}")
+
+    # 抽 video2 帧
+    frame_dir2 = base_frame_dir / "video2"
+    frames2 = _extract_frames(
+        video_path2, frame_dir2,
+        extract_fn=extract_fn,
+        cache_key=cache_key,
+        extract_kwargs=extract_kwargs,
+    )
+    if not frames2:
+        raise ValueError(f"视频2抽帧失败：{raw_path2}")
+
+    prepared = dict(item)
+    prepared.update({
+        "video1_path": str(video_path1),
+        "video2_path": str(video_path2),
+        "video_name": video_path1.name,
+        "media": [str(video_path1), str(video_path2)],
+        "frames1": [str(frame) for frame in frames1],
+        "frames2": [str(frame) for frame in frames2],
+        "frame_count": len(frames1) + len(frames2),
+        "duration": round(duration1, 2),
+        "duration1": round(duration1, 2),
+        "duration2": round(duration2, 2),
+    })
+    return prepared
