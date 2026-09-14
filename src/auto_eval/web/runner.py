@@ -1117,7 +1117,8 @@ def _summarize(task: Task, *, include_subsets: bool = True) -> dict:
     summary: dict = {
         "total": len(task.items),
         "done": len(ok),
-        "failed": len(task.items) - len(ok),
+        "failed": len(res) - len(ok),
+        "unfinished": len(task.items) - len(res),
         "input_failed": len(ok) - len(valid),
         "comparable": len(valid),
         "mode": task.mode,

@@ -15,10 +15,11 @@ from typing import Literal
 from urllib.parse import quote
 
 from dotenv import load_dotenv
+from PIL import Image
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
 from ..config import load_config
@@ -53,6 +54,7 @@ from .video_prepare import (
 from .runner import run_eval, run_retry, run_update_batch, spawn_background
 from .scheduler import EvalScheduler
 from .exports import XlsxExports, xlsx_download_name
+from .dataset_media import DatasetMedia
 from .persistence import queue_task_save, wait_task_save, task_save_pending
 from .tasks import (
     TASKS,
@@ -76,6 +78,7 @@ app = FastAPI(title="auto_eval 评估台")
 _state: dict = {}
 EVAL_SCHEDULER = EvalScheduler()
 XLSX_EXPORTS = XlsxExports(RUNS_DIR / "exports")
+DATASET_MEDIA = DatasetMedia()
 
 
 @app.on_event("startup")
@@ -756,6 +759,81 @@ async def api_stream(task_id: str, compact: bool = False):
             task.unsubscribe(q)
 
     return StreamingResponse(event_gen(), media_type="text/event-stream")
+
+
+class DatasetMediaReq(BaseModel):
+    path: str
+    role: Literal["query", "screenshot", "video"]
+    expected_sha256: str = ""
+
+
+class DatasetFileReq(DatasetMediaReq):
+    index: int
+    label: str = ""
+
+
+class DatasetValidateReq(BaseModel):
+    files: list[DatasetFileReq] = Field(default_factory=list, max_length=40000)
+
+
+@app.get("/api/datasets")
+async def api_datasets(page: int = 1, search: str = ""):
+    rows = await asyncio.to_thread(list_snapshots, limit=None)
+    needle = search.strip().casefold()
+    rows = [row for row in rows if row.get("mode") == "compare" and row.get("total", 0) > 0
+            and (not needle or needle in " ".join(str(row.get(k) or "") for k in
+                                                 ("dataset_name", "note", "task_id")).casefold())]
+    total = len(rows)
+    page = min(max(1, page), max(1, (total + 9) // 10))
+    return {"items": rows[(page - 1) * 10:page * 10], "total": total, "page": page, "page_size": 10}
+
+
+@app.get("/api/datasets/{task_id}")
+async def api_dataset(task_id: str):
+    task = await peek_task_async(_validate_param_id(task_id, "task_id"))
+    if task is None:
+        raise HTTPException(404, "历史数据不存在或已删除")
+    if task.mode != "compare":
+        raise HTTPException(422, "仅支持复用垂域视觉对比数据")
+    fields = {"id", "query", "question", "context", "category", "product_count", "evidence_mode",
+              "query_images", "query_image_meta", "source_data", "source_line", "session_group", "turn_index",
+              "task_start_time", "task_end_time"}
+    fields.update(f"{name}{n}" for name in ("video", "screenshot", "answer", "context", "screenshot_meta")
+                  for n in range(1, 4))
+    return {"task_id": task.id, "dataset_name": task.dataset_name, "created_at": task.created_at,
+            "note": task.note, "items": copy.deepcopy([
+                {key: value for key, value in item.items() if key in fields} for item in task.items
+            ])}
+
+
+@app.post("/api/dataset-files/validate")
+def api_validate_dataset_files(req: DatasetValidateReq):
+    issues = []
+    for entry in req.files:
+        try:
+            DATASET_MEDIA.resolve(entry.path, entry.role, cfg().visual_modes["rich_content"].query_images, BASE_DIR)
+        except (ValueError, OSError) as exc:
+            issues.append({"index": entry.index, "label": entry.label, "message": str(exc)})
+    return {"checked": len(req.files), "issues": issues}
+
+
+@app.post("/api/dataset-media")
+def api_dataset_media(req: DatasetMediaReq):
+    try:
+        return DATASET_MEDIA.register(req.path, req.role, cfg().visual_modes["rich_content"].query_images,
+                                      BASE_DIR, req.expected_sha256)
+    except (ValueError, OSError, Image.DecompressionBombError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.get("/api/dataset-media/{token}")
+def api_dataset_media_file(token: str, download: bool = False):
+    try:
+        path, mime = DATASET_MEDIA.file(token, cfg().visual_modes["rich_content"].query_images, BASE_DIR)
+    except (ValueError, OSError) as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return FileResponse(path, media_type=mime, filename=path.name if download else None,
+                        headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
 
 
 @app.get("/api/history")
