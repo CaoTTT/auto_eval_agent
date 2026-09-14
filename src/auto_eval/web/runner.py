@@ -13,7 +13,9 @@ from datetime import datetime
 from pathlib import Path
 
 from ..paths import RUNS_DIR
-from ..config import AppConfig
+from ..preparation import run_preparation
+from ..config import AppConfig, VisualModeProfile
+from ..query_images import prepare_query_images, QueryImageError, PREPARED_FIELDS
 from ..judges import (
     JudgeClient,
     RichContentJudge,
@@ -22,6 +24,7 @@ from ..judges import (
 from ..judges.base import flush_web_trace_records
 from ..judges.compare_protocols import resolve_compare_protocol
 from ..llm_stream import is_retriable_llm_error
+from ..long_screenshot import ContextBudgetExceeded, RISKY_REVIEW_REASON
 from ..observability import (
     bind_chain_context,
     error_details,
@@ -30,9 +33,11 @@ from ..observability import (
 )
 from ..schema import EvalItem
 from .history import save_task
+from .persistence import queue_task_save
 from .video_prepare import (
     prepare_session_rich_content_item,
     prepare_session_visual_compare_item,
+    prepare_session_long_screenshot_item,
 )
 from .tasks import (
     Task,
@@ -60,37 +65,36 @@ COMPARE_AGGREGATION_DIMENSIONS = tuple(
 
 # 持久化节流：普通调用走 debounce（默认 2s，环境变量可调）或每 N 题强刷一次，
 # 避免大任务每完成一题就把 items+全部 results+progress_events 全量 json.dumps
-# （O(n²) 序列化、瞬时内存峰值约快照大小的 2-3 倍）。force=True 立即落盘，
-# 用于终态/异常/退休前。语义变化：进程崩溃最多丢 debounce 窗口内的结果；
-# 任务正常终态保证盘上完整（eval_errors.jsonl 与 judge trace 仍即时写）。
+# （O(n²) 序列化、瞬时内存峰值约快照大小的 2-3 倍）。force=True 立即排入
+# 顺序后台写队列；终态/退休前显式等待写完。异常退出可能丢失尚未落盘的
+# debounce/写队列内结果；正常关闭会排空队列，快照格式保持不变。
 _PERSIST_DEBOUNCE_S = float(os.environ.get("AUTO_EVAL_PERSIST_DEBOUNCE_S", "2.0"))
 _PERSIST_FORCE_EVERY_N = 20
 _pending_flush: dict[str, asyncio.TimerHandle] = {}
 _unpersisted: dict[str, int] = {}
 
 
-def _flush_now(task: Task) -> None:
-    """立即落盘：取消 pending 定时器、重算 summary、save_task。"""
+def _flush_now(task: Task) -> asyncio.Future | None:
+    """取消定时器，冻结最新快照并排入后台写入队列。"""
     handle = _pending_flush.pop(task.id, None)
     if handle is not None:
         handle.cancel()
     _unpersisted.pop(task.id, None)
     task.summary = _summarize(task)
     try:
-        save_task(task)
+        return queue_task_save(task, save=save_task)
     except Exception:
         logger.exception("unexpected task snapshot failure: task_id=%s", task.id)
 
 
-def _persist_task(task: Task, *, force: bool = False) -> None:
+def _persist_task(task: Task, *, force: bool = False) -> asyncio.Future | None:
     """Persist without allowing history I/O to break the evaluation/SSE.
 
     TimerHandle 闭包直接持 task 引用（不按 id 回查 TASKS）：退休前必先
     force 强刷，届时 pending 定时器已被取消，不存在退休后再刷盘的窗口。
     """
     if force:
-        _flush_now(task)
-        return
+        return _flush_now(task)
     n = _unpersisted.get(task.id, 0) + 1
     _unpersisted[task.id] = n
     if task.id in _pending_flush:
@@ -109,6 +113,12 @@ def _persist_task(task: Task, *, force: bool = False) -> None:
     )
 
 
+async def _persist_task_and_wait(task: Task) -> None:
+    pending = _persist_task(task, force=True)
+    if pending is not None:
+        await asyncio.shield(pending)
+
+
 def _record_progress(task: Task, item_index: int, payload: dict) -> dict:
     """Store one bounded Web projection of the same structured log event."""
     key = str(item_index)
@@ -116,7 +126,11 @@ def _record_progress(task: Task, item_index: int, payload: dict) -> dict:
     sequence = int(events[-1].get("sequence", 0)) + 1 if events else 1
     event_payload = {**payload, "sequence": sequence}
     previous = task.item_progress.get(key) or {}
-    if "started_at" not in event_payload and previous.get("started_at") is not None:
+    if (
+        "started_at" not in event_payload
+        and previous.get("started_at") is not None
+        and event_payload.get("request_id") == previous.get("request_id")
+    ):
         event_payload["started_at"] = previous["started_at"]
     events.append(event_payload)
     if len(events) > MAX_PROGRESS_EVENTS_PER_ITEM:
@@ -133,6 +147,8 @@ def _to_evalitem(item: dict, idx: int) -> EvalItem:
     return EvalItem(
         id=item.get("id", f"q{idx}"),
         question=item["query"],
+        query_images=item.get("query_images") or [],
+        input_modality="text_image" if item.get("query_images") else "text",
         context=item.get("context"),
         category=item.get("category", "default"),
         media=item.get("media") or [],
@@ -146,7 +162,7 @@ def _compare_product_count(item: dict) -> int:
         return declared
     return 3 if any(
         item.get(field) not in (None, "", [])
-        for field in ("video3", "frames3", "context3", "answer3")
+        for field in ("video3", "screenshot3", "frames3", "context3", "answer3")
     ) else 2
 
 
@@ -176,22 +192,22 @@ async def run_eval(task: Task, cfg: AppConfig) -> None:
     try:
         await task.publish("start", {"total": len(task.items), "mode": task.mode})
         task.status = "running"
-        _persist_task(task, force=True)
+        await _persist_task_and_wait(task)
         try:
             await _run(task, cfg)
             task.summary = _summarize(task)
             task.status = "done"
             await task.publish("done", {"summary": task.summary, "total": len(task.items)})
-            _persist_task(task, force=True)
+            await _persist_task_and_wait(task)
         except Exception as e:
             task.status = "error"
             task.error = f"{type(e).__name__}: {e}"
             await task.publish("error", {"message": task.error})
-            _persist_task(task, force=True)
+            await _persist_task_and_wait(task)
     finally:
         task.active_runs -= 1
         _mark_interrupted_if_stuck(task)
-        _persist_task(task, force=True)  # 退休前最后一次落盘，磁盘先于内存下线
+        await _persist_task_and_wait(task)  # 退休前最后一次落盘，磁盘先于内存下线
         retire_task(task)
 
 
@@ -213,13 +229,24 @@ def _make_item_evaluator(
     runtime_options = options if options is not None else task.options
     compare_protocol = (
         resolve_compare_protocol(
-            task.evaluation_profile or runtime_options.get("evaluation_profile")
+            task.evaluation_profile or runtime_options.get("evaluation_profile"),
+            task.protocol_manifest.get("bundle_revision"),
         )
         if task.mode == "compare"
         else None
     )
     selected = runtime_options.get("judges") or [cfg.judges[0].name]
     judges_cfg = [j for j in cfg.judges if j.name in selected] or cfg.judges[:1]
+    frozen_judges = task.protocol_manifest.get("judges") or []
+    if task.protocol_manifest.get("input_schema_version") == "1.1" and frozen_judges:
+        configured = {j.name: j for j in cfg.judges}
+        judges_cfg = []
+        for frozen in frozen_judges:
+            if frozen["name"] not in configured:
+                raise ValueError("冻结裁判配置不可用，请恢复配置或新建任务")
+            judges_cfg.append(configured[frozen["name"]].model_copy(update={
+                key: value for key, value in frozen.items() if key != "name"
+            }))
     # R3：构造中途失败（如某个 judge 缺 base_url）时，已建客户端的连接池会
     # 无人关闭而泄漏——先登记再逐个构造，失败时交后台任务关闭后重抛。
     clients: list[JudgeClient] = []
@@ -231,6 +258,8 @@ def _make_item_evaluator(
             spawn_background(_aclose_judge_clients(clients))
         raise
     rich_profile = cfg.visual_modes.get("rich_content")
+    if task.mode == "compare" and task.protocol_manifest.get("visual_profile"):
+        rich_profile = VisualModeProfile.model_validate(task.protocol_manifest["visual_profile"])
     rich_judges = (
         [RichContentJudge(client, rich_profile) for client in clients]
         if rich_profile is not None
@@ -328,20 +357,24 @@ def _make_item_evaluator(
                 )
                 last_error = None
                 res = None
-                needs_video_prepare = (
+                item_dict.pop("input_manifest_sha256", None)
+                is_screenshot = task.mode == "compare" and (
+                    item_dict.get("evidence_mode") == "long_screenshot" or bool(item_dict.get("screenshot1"))
+                )
+                needs_visual_prepare = is_screenshot or (
                     not _compare_frames_ready(item_dict)
                     if task.mode == "compare"
                     else not item_dict.get("frames")
                 )
-                if needs_video_prepare:
+                if needs_visual_prepare:
                     try:
                         log_event(
-                            "视频准备",
-                            "校验视频并分析场景",
+                            "视觉证据准备" if is_screenshot else "视频准备",
+                            "校验长截图并选择切片边界" if is_screenshot else "校验视频并分析场景",
                             details={
-                                "视频路径": (
+                                "视觉证据路径": (
                                     [
-                                        item_dict.get(f"video{product_no}")
+                                        item_dict.get(f"{'screenshot' if is_screenshot else 'video'}{product_no}")
                                         for product_no in range(
                                             1, _compare_product_count(item_dict) + 1
                                         )
@@ -351,24 +384,22 @@ def _make_item_evaluator(
                                 )
                             },
                             progress=3,
-                            progress_message="正在校验视频并分析场景",
+                            progress_message="正在准备长截图视觉证据" if is_screenshot else "正在校验视频并分析场景",
                         )
                         if rich_profile is None:
                             raise ValueError("缺少 rich_content 视觉模式配置")
                         prepare_call = (
-                            prepare_session_visual_compare_item
+                            prepare_session_long_screenshot_item if is_screenshot else prepare_session_visual_compare_item
                             if task.mode == "compare"
                             else prepare_session_rich_content_item
                         )
-                        prepared = await asyncio.wait_for(
-                            asyncio.to_thread(
-                                prepare_call,
-                                item_dict,
-                                session_name=task.session_name,
-                                item_index=idx,
-                                total_items=len(task.items),
-                                profile=rich_profile,
-                            ),
+                        prepared = await run_preparation(
+                            prepare_call,
+                            item_dict,
+                            session_name=task.session_name,
+                            item_index=idx,
+                            total_items=len(task.items),
+                            profile=rich_profile,
                             timeout=float(runtime_options.get("video_prepare_timeout_s") or 300),
                         )
                         item_dict.clear()
@@ -380,26 +411,45 @@ def _make_item_evaluator(
                         elif item_dict.get("frames1"):
                             _frame_dir = str(Path(item_dict["frames1"][0]).parent)
                         log_event(
-                            "视频准备",
-                            "关键帧提取完成",
+                            "视觉证据准备" if is_screenshot else "视频准备",
+                            "长截图准备完成" if is_screenshot else "关键帧提取完成",
                             details={
-                                "关键帧数": item_dict.get("frame_count"),
-                                "抽帧目录": _frame_dir,
+                                "视觉证据图片数": item_dict.get("frame_count"),
+                                "证据目录": _frame_dir,
+                                **({"长截图预处理": [item_dict.get(f"screenshot_meta{n}") for n in range(1, _compare_product_count(item_dict) + 1)]} if is_screenshot else {}),
                             },
                             progress=12,
-                            progress_message=f"关键帧提取完成（{item_dict.get('frame_count', 0)} 帧）",
+                            progress_message=f"长截图准备完成（{item_dict.get('frame_count', 0)} 张）" if is_screenshot else f"关键帧提取完成（{item_dict.get('frame_count', 0)} 帧）",
                         )
                     except Exception as e:
                         last_error = e
                         log_event(
-                            "视频准备",
+                            "视觉证据准备" if is_screenshot else "视频准备",
                             "失败",
                             level=logging.ERROR,
                             details=error_details(e),
                             progress=12,
-                            progress_message="视频校验或抽帧失败",
+                            progress_message="长截图准备失败" if is_screenshot else "视频校验或抽帧失败",
                             progress_status="error",
                         )
+                if last_error is None and task.mode == "compare":
+                    try:
+                        if item_dict.get("query_images"):
+                            if rich_profile is None:
+                                raise ValueError("缺少视觉模式配置")
+                            prepared_query = await run_preparation(
+                                prepare_query_images, item_dict, session_name=task.session_name,
+                                cfg=rich_profile.query_images,
+                                timeout=float(runtime_options.get("video_prepare_timeout_s") or 300),
+                            )
+                            item_dict.update(prepared_query)
+                            _persist_task(task)
+                        else:
+                            item_dict.update(query_images=[], input_modality="text")
+                            for field in PREPARED_FIELDS:
+                                item_dict.pop(field, None)
+                    except Exception as exc:
+                        last_error = exc
                 if last_error is None:
                     for attempt in range(2):
                         try:
@@ -458,6 +508,19 @@ def _make_item_evaluator(
                     }
                     if item_dict.get("context"):
                         res["context"] = item_dict["context"]
+                    if isinstance(last_error, (ContextBudgetExceeded, QueryImageError)):
+                        res.update(
+                            error_type=last_error.code, needs_human_review=True,
+                            needs_review=True, needs_review_label="T",
+                            review_reasons=[str(last_error)], review_reason=str(last_error),
+                        )
+                    if is_screenshot and any(
+                        (item_dict.get(f"screenshot_meta{n}") or {}).get("split_status") == "risky"
+                        for n in range(1, _compare_product_count(item_dict) + 1)
+                    ):
+                        reasons = list(dict.fromkeys([*res.get("review_reasons", []), RISKY_REVIEW_REASON]))
+                        res.update(needs_human_review=True, needs_review=True, needs_review_label="T",
+                                   review_reasons=reasons, review_reason="；".join(reasons))
                     _write_eval_error(
                         task.id,
                         idx,
@@ -466,6 +529,15 @@ def _make_item_evaluator(
                         request_id=request_id,
                     )
             res["index"] = idx
+            if task.mode == "compare":
+                res.update(input_modality="text_image" if item_dict.get("query_images") else "text",
+                           query_images=item_dict.get("query_images") or [],
+                           evidence_mode=item_dict.get("evidence_mode", "video_frames"))
+                for field in PREPARED_FIELDS:
+                    if field in item_dict and field != "input_manifest_sha256":
+                        res[field] = item_dict[field]
+                if res.get("input_manifest_sha256"):
+                    item_dict["input_manifest_sha256"] = res["input_manifest_sha256"]
             if pending_judge_traces:
                 await asyncio.to_thread(
                     flush_web_trace_records,
@@ -495,7 +567,7 @@ async def _run(task: Task, cfg: AppConfig) -> None:
     sessions: dict[str, list[int]] = {}
     standalone: list[int] = []
     for i, it in enumerate(task.items):
-        grp = it.get("session_group")
+        grp = it.get("session_group") if task.mode != "compare" else None
         if task.mode == "rich_content" and grp:
             sessions.setdefault(str(grp), []).append(i)
         else:
@@ -509,7 +581,7 @@ async def _run(task: Task, cfg: AppConfig) -> None:
         prior_summary = ""
         for turn_no, idx in enumerate(idxs, 1):
             it = task.items[idx]
-            if prior_summary:
+            if prior_summary and task.mode != "compare":
                 base_ctx = (it.get("context") or "").strip()
                 it["context"] = (
                     f"{base_ctx}\n\n历史对话总结：\n{prior_summary}"
@@ -538,6 +610,8 @@ async def _run(task: Task, cfg: AppConfig) -> None:
 
 
 _PREPARED_ITEM_FIELDS = {
+    "query_images", "input_modality", *PREPARED_FIELDS,
+    "evidence_mode", "screenshot_meta1", "screenshot_meta2", "screenshot_meta3",
     "frames", "frames1", "frames2", "frames3", "frame_count", "media",
     "video_name", "video1_path", "video2_path", "video3_path",
     "duration", "duration1", "duration2", "duration3",
@@ -603,7 +677,7 @@ async def run_retry(task: Task, cfg: AppConfig, retry_id: str) -> None:
             "retry_result",
             {"retry_id": retry_id, "index": idx, **item_state},
         )
-        _persist_task(task, force=True)
+        await _persist_task_and_wait(task)
 
     async def mark_dependency_skipped(indices: list[int], reason: str) -> None:
         for idx in indices:
@@ -625,7 +699,7 @@ async def run_retry(task: Task, cfg: AppConfig, retry_id: str) -> None:
         grouped: dict[str, list[int]] = {}
         standalone: list[int] = []
         for idx, item in enumerate(task.items):
-            group = item.get("session_group")
+            group = item.get("session_group") if task.mode != "compare" else None
             if group:
                 grouped.setdefault(str(group), []).append(idx)
             elif idx in target_set:
@@ -636,7 +710,7 @@ async def run_retry(task: Task, cfg: AppConfig, retry_id: str) -> None:
         async def run_one(idx: int, prior_summary: str = "") -> dict:
             working = copy.deepcopy(task.items[idx])
             base_ctx = _base_context(working)
-            if prior_summary:
+            if prior_summary and task.mode != "compare":
                 working["context"] = (
                     f"{base_ctx}\n\n历史对话总结：\n{prior_summary}" if base_ctx
                     else f"历史对话总结：\n{prior_summary}"
@@ -700,7 +774,7 @@ async def run_retry(task: Task, cfg: AppConfig, retry_id: str) -> None:
             await _aclose_judge_clients(clients)
         retry["finished_at"] = time.time()
         task.active_runs = max(0, task.active_runs - 1)
-        _persist_task(task, force=True)
+        await _persist_task_and_wait(task)
         task._fanout(
             "done",
             {"summary": task.summary, "total": len(task.items), "retry": retry},
@@ -763,17 +837,17 @@ async def _run_update_batch_body(
     one, clients = _make_item_evaluator(
         task, cfg, options=options, on_result=_merge_on_result
     )
-    if manage_status:
-        task.status = "running"
-        _persist_task(task, force=True)
     current: tuple[int, dict] | None = None
     try:
+        if manage_status:
+            task.status = "running"
+            await _persist_task_and_wait(task)
         # 整批一个串行会话：前轮总结在批次内本地链式注入，
         # 不从 task.results 读回，不受并行批次覆盖影响。
         prior_summary = ""
         for turn_no, (idx, item_dict) in enumerate(batch, 1):
             current = (idx, item_dict)
-            if prior_summary:
+            if prior_summary and task.mode != "compare":
                 base_ctx = (item_dict.get("context") or "").strip()
                 item_dict["context"] = (
                     f"{base_ctx}\n\n历史对话总结：\n{prior_summary}"
@@ -802,7 +876,7 @@ async def _run_update_batch_body(
             await task.publish(
                 "done", {"summary": task.summary, "total": len(task.items)}
             )
-            _persist_task(task, force=True)
+            await _persist_task_and_wait(task)
     except Exception as e:
         # one() 内部已把单题异常转成 error res；这里只兜底批级异常
         # （如持久化 I/O 崩溃），避免静默吞掉。
@@ -813,7 +887,7 @@ async def _run_update_batch_body(
             task.status = "error"
             task.error = f"{type(e).__name__}: {e}"
             await task.publish("error", {"message": task.error})
-        _persist_task(task, force=True)
+        await _persist_task_and_wait(task)
     finally:
         await _aclose_judge_clients(clients)
 
@@ -840,7 +914,7 @@ async def run_update_batch(
         task.active_runs -= 1
         idle = task.active_runs <= 0
         interrupted = _mark_interrupted_if_stuck(task) if idle else False
-        _persist_task(task, force=True)  # 退休前最后一次落盘，磁盘先于内存下线
+        await _persist_task_and_wait(task)  # 退休前最后一次落盘，磁盘先于内存下线
         if idle and not manage_status and not interrupted and task.status in {"done", "error"}:
             # R4：manage_status=False 的批不发 start/done 终态事件，SSE 订阅者
             # 会一直等；最后一个批结束时补发一次终态（先 persist 再发，summary
@@ -975,6 +1049,7 @@ async def _eval_one(
             out[f"context{product_no}"] = contexts[product_no]
 
         compare_result = await compare_judges[0].evaluate(
+            **({"query_image_meta": item_dict["query_image_meta"]} if item.query_images else {}),
             question=item.question,
             context=(item.context or "").strip(),
             context1=contexts[1],
@@ -991,6 +1066,10 @@ async def _eval_one(
                 else None
             ),
             product_count=product_count,
+            **({
+                "evidence_mode": "long_screenshot",
+                "screenshot_metas": [item_dict[f"screenshot_meta{n}"] for n in range(1, product_count + 1)],
+            } if item_dict.get("evidence_mode") == "long_screenshot" else {}),
         )
         out.update(compare_result)
         log_event(
@@ -1019,7 +1098,7 @@ async def _eval_one(
     return out
 
 
-def _summarize(task: Task) -> dict:
+def _summarize(task: Task, *, include_subsets: bool = True) -> dict:
     if task.mode == "rich_content":
         return _summarize_rich_content(task)
     # compare：协议定义七维绝对分；准确性保留逐题输出但暂不参与汇总。
@@ -1051,7 +1130,7 @@ def _summarize(task: Task) -> dict:
         "accuracy_aggregation_enabled": False,
         "needs_human_review_count": sum(
             bool(row.get("needs_human_review")) for row in valid
-        ),
+        ) + sum(bool(row.get("needs_human_review")) for row in res if row.get("error")),
     }
     max_product_count = max(
         (int(row.get("product_count") or 2) for row in valid),
@@ -1115,6 +1194,18 @@ def _summarize(task: Task) -> dict:
     summary["conflict_yes"] = sum(1 for r in valid if r.get("has_conflict") == "yes")
     summary["conflict_no"] = sum(1 for r in valid if r.get("has_conflict") == "no")
     summary["conflict_unclear"] = sum(1 for r in valid if r.get("has_conflict") == "unclear")
+    if include_subsets:
+        from copy import copy
+        summary["input_modality_counts"] = {}
+        summary["by_input_modality"] = {}
+        for modality in ("text", "text_image"):
+            indexes = [i for i, item in enumerate(task.items) if ("text_image" if item.get("query_images") else "text") == modality]
+            summary["input_modality_counts"][modality] = len(indexes)
+            subset = copy(task)
+            subset.items = [task.items[i] for i in indexes]
+            remap = {old: new for new, old in enumerate(indexes)}
+            subset.results = [{**r, "index": remap[r["index"]]} for r in res if r.get("index") in remap]
+            summary["by_input_modality"][modality] = _summarize(subset, include_subsets=False)
     return summary
 
 

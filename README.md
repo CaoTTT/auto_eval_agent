@@ -48,10 +48,10 @@ pip install -e ".[dev,web]"
 ```powershell
 cd auto_eval_agent-多轮稳定版
 $env:PYTHONPATH=".\src"
-python -m uvicorn auto_eval.web.server:app --host 0.0.0.0 --port 8503
+python -m uvicorn auto_eval.web.server:app --host 0.0.0.0 --port 8054
 ```
 
-看到 `Uvicorn running on http://0.0.0.0:8503` 后，浏览器打开 **http://localhost:8503** 。
+看到 `Uvicorn running on http://0.0.0.0:8054` 后，浏览器打开 **http://localhost:8054** 。
 
 界面操作：选择评测模式 → 导入 JSONL（多轮会话可导入 CSV，按 `session_group` 串行、`turn_index` 排序）→ 选择裁判、评测标准与并发数 → 开始评测，SSE 实时出结果，完成后可导出。
 
@@ -63,9 +63,9 @@ python -m uvicorn auto_eval.web.server:app --host 0.0.0.0 --port 8503
 
 **终止**：在该终端按 `Ctrl+C`。
 
-> 端口被占（进程没清干净）时强制清理 8503：
+> 端口被占（进程没清干净）时强制清理 8054：
 > ```powershell
-> Get-NetTCPConnection -LocalPort 8503 -State Listen | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }
+> Get-NetTCPConnection -LocalPort 8054 -State Listen | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }
 > ```
 
 ### 输入格式（JSONL，每行一题）

@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 import time
 from typing import Any, Callable
@@ -40,6 +41,7 @@ _TRACE_FIELDS = {
     "rounds",
     "llm_rounds",
     "image_refs",
+    "image_metadata",
     "messages",
     "error",
     "error_type",
@@ -72,6 +74,7 @@ def merge_trace_web_result(record: dict[str, Any], result: dict[str, Any]) -> di
 
 def _append_trace_record(trace_path: str, record: dict[str, Any]) -> bool:
     try:
+        record = _redact_data_urls(record)
         directory = os.path.dirname(trace_path)
         if directory:
             os.makedirs(directory, exist_ok=True)
@@ -117,11 +120,29 @@ class JudgeOutputParseError(ValueError):
 def _usage_dict(usage) -> dict | None:
     if usage is None:
         return None
+    def value(obj, key):
+        return obj.get(key) if isinstance(obj, dict) else getattr(obj, key, None)
+
+    image_tokens = value(usage, "image_tokens")
+    if image_tokens is None:
+        image_tokens = value(value(usage, "prompt_tokens_details"), "image_tokens")
     return {
-        "prompt_tokens": getattr(usage, "prompt_tokens", None),
-        "completion_tokens": getattr(usage, "completion_tokens", None),
-        "reasoning_tokens": getattr(getattr(usage, "completion_tokens_details", None), "reasoning_tokens", None),
+        "prompt_tokens": value(usage, "prompt_tokens"),
+        "completion_tokens": value(usage, "completion_tokens"),
+        "image_tokens": image_tokens,
+        "reasoning_tokens": value(value(usage, "completion_tokens_details"), "reasoning_tokens"),
     }
+
+
+def _redact_data_urls(value):
+    """也处理供应商异常回显或模型输出中的图片 Data URL。"""
+    if isinstance(value, str):
+        return re.sub(r"data:image/[^;,\s]+;base64,[A-Za-z0-9+/=]+", "[image data omitted]", value)
+    if isinstance(value, dict):
+        return {key: _redact_data_urls(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_data_urls(item) for item in value]
+    return value
 
 
 def _redact_image_urls(messages: list[dict], refs: list[str] | None) -> list[dict]:
@@ -243,13 +264,19 @@ class JudgeClient:
     async def complete(self, system: str, user: str,
                        stream_callback: Callable[[str], None] | None = None,
                        user_images: list[str] | None = None,
-                       user_image_refs: list[str] | None = None) -> str:
+                       user_image_refs: list[str] | None = None,
+                       content_parts: list[dict] | None = None,
+                       image_metadata: list[dict] | None = None) -> str:
         """单轮生成裁判输出（多模态：传入关键帧 data_url 时 user content 为 [text, image_url...]）。"""
         user_content: Any = user
+        if content_parts is not None and user_images:
+            raise ValueError("content_parts 与 user_images 不能同时提供")
         if user_images:
             user_content = [{"type": "text", "text": user}] + [
                 {"type": "image_url", "image_url": {"url": u}} for u in user_images
             ]
+        if content_parts is not None:
+            user_content = content_parts
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": user_content},
@@ -259,9 +286,20 @@ class JudgeClient:
             module="模型裁判", judge=judge_label, round=1
         ):
             kwargs = {"model": self.model, "messages": messages, **self._sampling_kwargs()}
+            has_images = isinstance(user_content, list) and any(
+                part.get("type") == "image_url" for part in user_content
+            )
+            if has_images and self.cfg.vl_high_resolution_images:
+                kwargs["extra_body"] = {
+                    **kwargs.get("extra_body", {}), "vl_high_resolution_images": True,
+                }
+                kwargs["extra_body"].pop("max_pixels", None)
             resp = await self._llm_create(kwargs, stream_callback=stream_callback)
         msg = resp.choices[0].message
         content = msg.content or ""
+        usage = _usage_dict(getattr(resp, "usage", None))
+        if usage and usage.get("image_tokens") is not None:
+            log_event("模型裁判", "视觉Token用量", details={"image_tokens": usage["image_tokens"]})
 
         if self.trace_path:
             self._write_trace({
@@ -281,6 +319,7 @@ class JudgeClient:
                 }],
                 # trace 不存 base64（每帧 ~30KB×N 会让 jsonl 膨胀），image_url 换成帧路径引用
                 "image_refs": user_image_refs,
+                "image_metadata": image_metadata,
                 "messages": _redact_image_urls(messages, user_image_refs),
             })
 
@@ -299,6 +338,7 @@ class JudgeClient:
                 "item_sequence": ctx.item_index + 1 if ctx.item_index >= 0 else None,
                 **detail,
             }
+            record = _redact_data_urls(record)
             if ctx.judge_trace_callback:
                 ctx.judge_trace_callback(self.trace_path, record)
             else:

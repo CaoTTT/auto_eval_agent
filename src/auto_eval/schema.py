@@ -28,10 +28,22 @@ class EvalItem(BaseModel):
 
     id: str
     question: str
+    query_images: list[str] = Field(default_factory=list, max_length=1)
+    input_modality: Literal["text", "text_image"] = "text"
     context: str | None = None  # 可选背景/多模态描述
     category: str = "default"  # 垂域（分组展示用）
     media: list[str] = Field(default_factory=list)  # 任务类评测：录屏/图片本地路径（裁判抽帧后以 image_url 多图盲评）
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def normalize_question_images(self):
+        if any(not path.strip() for path in self.query_images):
+            raise ValueError("提问图片路径不能为空")
+        modality = "text_image" if self.query_images else "text"
+        if "input_modality" in self.model_fields_set and self.input_modality != modality:
+            raise ValueError("input_modality 与提问图片声明冲突")
+        self.input_modality = modality
+        return self
 
 
 # --------------------------------------------------------------------------- #

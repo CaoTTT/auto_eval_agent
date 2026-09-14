@@ -21,6 +21,8 @@ from pathlib import Path
 
 import numpy as np
 
+from .preparation import PreparationStopped, check_preparation, media_process, run_media_command
+
 
 KEYFRAME_ALGORITHM_VERSION = "hybrid-state-v3.1.0"
 DEFAULT_TASK_START_TIME = 7.0
@@ -109,7 +111,7 @@ class _Candidate:
 def probe_duration(video: Path | str) -> float:
     """ffprobe 取时长（秒），失败回退 0.0。"""
     try:
-        out = subprocess.check_output(
+        out = run_media_command(
             [
                 "ffprobe",
                 "-v",
@@ -121,11 +123,15 @@ def probe_duration(video: Path | str) -> float:
                 str(video),
             ],
             stderr=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            check=True,
             text=True,
             encoding="utf-8",
             errors="replace",
-        )
+        ).stdout
         return float(out.strip())
+    except PreparationStopped:
+        raise
     except Exception:
         return 0.0
 
@@ -154,32 +160,27 @@ def scene_change_times(
         # 逐行流式消费 stderr：showinfo 每个场景变化一行，长录屏可达数 MB~数十 MB，
         # capture_output 整读会造成瞬态内存峰值。stdout 走 DEVNULL（-f null - 本无
         # 输出），只保留 stderr 一条管道，避免双管道写满死锁。
-        proc = subprocess.Popen(
+        with media_process(
             command,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
-        )
+        ) as proc:
+            times: list[float] = []
+            assert proc.stderr is not None
+            for line in proc.stderr:
+                check_preparation()
+                times.extend(
+                    float(value) for value in re.findall(r"pts_time:([0-9.]+)", line)
+                )
+            proc.wait()
+        return times
+    except PreparationStopped:
+        raise
     except Exception:
         return []
-    times: list[float] = []
-    try:
-        assert proc.stderr is not None
-        for line in proc.stderr:
-            times.extend(
-                float(value) for value in re.findall(r"pts_time:([0-9.]+)", line)
-            )
-    except Exception:
-        return []
-    finally:
-        try:
-            proc.stderr.close()
-        except Exception:
-            pass
-        proc.wait()
-    return times
 
 
 def _dedup(times: list[float], min_gap_s: float) -> list[float]:
@@ -266,7 +267,7 @@ def _extract_at(
 ) -> bool:
     output.parent.mkdir(parents=True, exist_ok=True)
     try:
-        subprocess.run(
+        run_media_command(
             [
                 "ffmpeg",
                 "-y",
@@ -288,12 +289,15 @@ def _extract_at(
             check=False,
             capture_output=True,
         )
+    except PreparationStopped:
+        raise
     except Exception:
         return False
     return output.is_file()
 
 
 def _signature(path: Path) -> np.ndarray:
+    check_preparation()
     from PIL import Image
 
     image = Image.open(path).convert("L").resize((96, 160))
@@ -302,6 +306,7 @@ def _signature(path: Path) -> np.ndarray:
 
 
 def _layout_signature(path: Path) -> np.ndarray:
+    check_preparation()
     from PIL import Image, ImageFilter
 
     image = Image.open(path).convert("L")
@@ -311,6 +316,7 @@ def _layout_signature(path: Path) -> np.ndarray:
 
 
 def _assistant_shell_signature(path: Path) -> np.ndarray:
+    check_preparation()
     from PIL import Image, ImageFilter
 
     image = Image.open(path).convert("L")
@@ -356,7 +362,7 @@ def _extract_candidates(
     every_second_dir.mkdir(parents=True, exist_ok=True)
     if algorithm_end > sample_start:
         try:
-            subprocess.run(
+            run_media_command(
                 [
                     "ffmpeg",
                     "-y",
@@ -381,6 +387,8 @@ def _extract_candidates(
                 check=False,
                 capture_output=True,
             )
+        except PreparationStopped:
+            raise
         except Exception:
             pass
 
@@ -407,6 +415,7 @@ def _extract_candidates(
         protected_begin_end = effective_start + config.protected_begin_window
         protected_end_start = algorithm_end - config.protected_end_window
         for c in candidates:
+            check_preparation()
             if c.source != fps_source:
                 continue
             protected = False
@@ -442,6 +451,7 @@ def _extract_candidates(
         config.scene_min_gap_s,
     )
     for index, timestamp in enumerate(scene_times, start=1):
+        check_preparation()
         if not effective_start <= timestamp <= algorithm_end:
             continue
         path = output_dir / "scenes" / f"scene_{index:04d}_{timestamp:.3f}.jpg"
@@ -505,6 +515,7 @@ def _canonicalize_timestamps(
         return []
     groups: list[list[_Candidate]] = [[candidates[0]]]
     for candidate in candidates[1:]:
+        check_preparation()
         if candidate.time - groups[-1][-1].time <= gap:
             groups[-1].append(candidate)
         else:
@@ -533,6 +544,7 @@ def _build_layout_runs(
     layouts = [_layout_signature(candidate.path) for candidate in candidates]
     runs: list[list[int]] = [[0]]
     for index in range(1, len(candidates)):
+        check_preparation()
         if _layout_distance(layouts[index - 1], layouts[index]) >= threshold:
             runs.append([index])
         else:
@@ -577,6 +589,7 @@ def _infer_task_end_candidate(
 
     eligible: list[tuple[float, float, list[int]]] = []
     for run in runs[:-1]:
+        check_preparation()
         run_duration = candidates[run[-1]].time - candidates[run[0]].time
         if run_duration < config.auto_task_end_min_stable_duration_s:
             continue
@@ -633,6 +646,7 @@ def _deduplicate_states(
 
     transient_runs: set[int] = set()
     for run_index in range(1, len(runs) - 1):
+        check_preparation()
         if run_index in stable_runs:
             continue
         run = runs[run_index]
@@ -654,6 +668,7 @@ def _deduplicate_states(
     }
     selected_indices.update(protected_indices)
     for run_index, run in enumerate(runs):
+        check_preparation()
         first, last = run[0], run[-1]
         if run_index in transient_runs:
             before = layouts[runs[run_index - 1][-1]]
@@ -754,6 +769,7 @@ def _limit_candidates(
 
     selected = set(mandatory_indices)
     while len(selected) < limit:
+        check_preparation()
         remaining = [
             index for index in range(len(candidates)) if index not in selected
         ]
@@ -782,6 +798,7 @@ def _final_deduplicate(
     }
     groups: list[list[_Candidate]] = [[candidates[0]]]
     for candidate in candidates[1:]:
+        check_preparation()
         previous = groups[-1][-1]
         rms, changed_fraction = _visual_difference(
             signatures[id(previous)],
@@ -998,6 +1015,7 @@ def extract_scene_keyframes(
         frames: list[Path] = []
         records: list[dict] = []
         for index, candidate in enumerate(selected, start=1):
+            check_preparation()
             target = out_dir / f"kf_{index:03d}.jpg"
             shutil.copy2(candidate.path, target)
             frames.append(target)

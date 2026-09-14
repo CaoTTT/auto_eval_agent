@@ -1,6 +1,7 @@
 """垂域视觉评测视频识别裁判。"""
 from __future__ import annotations
 
+import asyncio
 import time
 from pathlib import Path
 from typing import Any
@@ -130,14 +131,17 @@ class RichContentJudge:
             answer_text=answer_text,
             frame_count=len(frames),
         )
-        user_images = [
-            encode_frame(
-                Path(path),
-                max_edge=extraction.max_edge,
-                quality=extraction.jpeg_quality,
-            )
-            for path in frames
-        ]
+        def prepare_images():
+            return [
+                encode_frame(
+                    Path(path),
+                    max_edge=extraction.max_edge,
+                    quality=extraction.jpeg_quality,
+                )
+                for path in frames
+            ]
+
+        user_images = await asyncio.to_thread(prepare_images)
         started = time.perf_counter()
         raw_output = await self.client.complete(
             system,

@@ -1,8 +1,47 @@
 import json
 import zipfile
+from io import BytesIO
 from pathlib import Path
+from xml.etree import ElementTree as ET
+
+import pytest
 
 from auto_eval.web import history, server
+
+
+@pytest.mark.parametrize("mode", ["compare", "rich_content"])
+@pytest.mark.parametrize("answer", ["正常回答\n第二行\t<&> 🚗", "回答\x00\x0b\x1f结束", "回答\ud800\ufffe结束"])
+def test_video_xlsx_keeps_all_rows_with_unusual_text(mode, answer):
+    items = [
+        {"id": f"video-{index}", "query": f"问题 {index}",
+         "video1": "a.mp4", "video2": "b.mp4", "video_path": "a.mp4",
+         "answer1": answer, "answer_text": answer}
+        for index in range(25)
+    ]
+    data = {"mode": mode, "status": "done", "items": items, "results": [
+        {"index": index, "query": items[index]["query"], "answer1": answer, "answer_text": answer}
+        for index in reversed(range(25))
+    ]}
+    before = json.dumps(data)
+    with zipfile.ZipFile(BytesIO(history.build_xlsx(data))) as archive:
+        assert archive.testzip() is None
+        for name in archive.namelist():
+            if name.endswith((".xml", ".rels")):
+                ET.fromstring(archive.read(name))
+        ns = {"s": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+        for number, query_column in ((1, "query"), (2, "题目" if mode == "compare" else "Query")):
+            sheet = ET.fromstring(archive.read(f"xl/worksheets/sheet{number}.xml"))
+            rows = sheet.findall("s:sheetData/s:row", ns)
+            assert len(rows) == 26, "all 25 cases must be exported, regardless of UI pagination"
+            values = [["".join(cell.itertext()) for cell in row] for row in rows]
+            column = values[0].index(query_column)
+            assert [row[column] for row in values[1:]] == [item["query"] for item in items]
+            expected = answer
+            for character in ("\x00", "\x0b", "\x1f", "\ud800", "\ufffe"):
+                expected = expected.replace(character, f"\\u{ord(character):04x}")
+            answer_column = values[0].index("answer1" if number == 1 else "产品1回答") if mode == "compare" else values[0].index("answer_text")
+            assert all(row[answer_column] == expected for row in values[1:])
+    assert json.dumps(data) == before, "export must not change persisted evaluation data"
 
 
 def _snapshot(project: Path) -> dict:

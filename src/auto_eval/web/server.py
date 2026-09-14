@@ -1,10 +1,12 @@
 """FastAPI 后端：路由 + SSE 实时流 + 静态前端挂载。
 
-启动：python -m auto_eval.web.server  （默认 http://localhost:8503）
+启动：python -m auto_eval.web.server  （默认 http://localhost:8054）
 """
 from __future__ import annotations
 
 import asyncio
+import copy
+import hashlib
 import json
 import time
 import uuid
@@ -26,9 +28,11 @@ from ..judges.compare_protocols import (
 )
 from ..media import probe_duration
 from ..paths import RUNS_DIR
-from .parse_input import Mode, parse_csv, parse_jsonl, parse_text
+from ..query_images import normalize_query_input, PREPARED_FIELDS, prepare_query_images, QueryImageError
+from ..preparation import run_preparation
+from .parse_input import Mode, compare_evidence_mode, parse_csv, parse_jsonl, parse_text
 from .history import (
-    build_xlsx,
+    write_xlsx,
     delete_snapshot,
     export_rows,
     list_snapshots,
@@ -43,10 +47,13 @@ from .history import (
 )
 from .video_prepare import (
     VIDEO_EXTENSIONS,
+    operation_video_roots,
     resolve_operation_video_path,
 )
 from .runner import run_eval, run_retry, run_update_batch, spawn_background
 from .scheduler import EvalScheduler
+from .exports import XlsxExports, xlsx_download_name
+from .persistence import queue_task_save, wait_task_save, task_save_pending
 from .tasks import (
     TASKS,
     get_task,
@@ -68,6 +75,7 @@ load_dotenv(BASE_DIR / ".env", override=True)  # 注入 .env 的 key；以 .env 
 app = FastAPI(title="auto_eval 评估台")
 _state: dict = {}
 EVAL_SCHEDULER = EvalScheduler()
+XLSX_EXPORTS = XlsxExports(RUNS_DIR / "exports")
 
 
 @app.on_event("startup")
@@ -79,6 +87,7 @@ async def _load():
 @app.on_event("shutdown")
 async def _shutdown():
     await EVAL_SCHEDULER.stop()
+    await XLSX_EXPORTS.close()
 
 
 def cfg():
@@ -144,6 +153,8 @@ def _protocol_manifest(protocol, app_cfg, options: dict) -> dict:
     visual_profile = app_cfg.visual_modes.get("rich_content")
     if visual_profile is not None:
         manifest["media_algorithm_version"] = visual_profile.extraction.algorithm_version
+        manifest["visual_profile"] = visual_profile.model_dump()
+        manifest["input_schema_version"] = "1.1"
     selected = options.get("judges") or (
         [app_cfg.judges[0].name] if app_cfg.judges else []
     )
@@ -152,7 +163,9 @@ def _protocol_manifest(protocol, app_cfg, options: dict) -> dict:
             "name": judge.name,
             "model": judge.model,
             "temperature": judge.temperature,
+            "top_p": judge.top_p,
             "seed": judge.seed,
+            "vl_high_resolution_images": judge.vl_high_resolution_images,
         }
         for judge in app_cfg.judges
         if judge.name in selected
@@ -165,39 +178,26 @@ def _resolve_operation_video_path(raw_path: str) -> Path:
 
 
 def _validate_eval_request(req: EvalReq, app_cfg) -> None:
-    """提交前校验：compare 模式支持完整的2或3产品视频输入。"""
+    """提交前校验：compare 模式支持完整的2或3产品同类视觉证据。"""
     selected = req.options.get("judges") or (
         [app_cfg.judges[0].name] if app_cfg.judges else []
     )
     selected_judges = [judge for judge in app_cfg.judges if judge.name in selected]
     if not selected_judges:
         selected_judges = app_cfg.judges[:1]
-    if req.mode != "compare" or not selected_judges:
+    if req.mode != "compare":
         return
     _compare_protocol_or_422(req.evaluation_profile)
     invalid: list[str] = []
     for index, item in enumerate(req.items, 1):
-        declared = item.get("product_count")
-        has_product3 = any(
-            item.get(field) not in (None, "")
-            for field in ("video3", "context3", "answer3")
-        )
-        if declared is not None and (
-            isinstance(declared, bool) or declared not in (2, 3)
-        ):
-            invalid.append(f"第{index}条 product_count 不是2或3")
-            continue
-        if declared == 2 and has_product3:
-            invalid.append(f"第{index}条 product_count=2 但提供了产品3字段")
-            continue
-        product_count = 3 if declared == 3 or has_product3 else 2
-        missing = [
-            f"video{product_no}"
-            for product_no in range(1, product_count + 1)
-            if not str(item.get(f"video{product_no}") or "").strip()
-        ]
-        if missing:
-            invalid.append(f"第{index}条缺少{'/'.join(missing)}")
+        try:
+            item.update(normalize_query_input(item))
+            for field in PREPARED_FIELDS:
+                item.pop(field, None)
+            product_count, evidence_mode = compare_evidence_mode(item)
+            item.update(product_count=product_count, evidence_mode=evidence_mode)
+        except ValueError as exc:
+            invalid.append(f"第{index}条 {exc}")
     if invalid:
         preview = "；".join(invalid[:8])
         suffix = "……" if len(invalid) > 8 else ""
@@ -474,6 +474,9 @@ async def api_eval_items(req: EvalItemsReq):
     created = task is None
     if task is not None and task.repair_status in {"queued", "running"}:
         raise HTTPException(409, "任务正在失败补跑，暂不能同时更新 items")
+    if task is not None and any(it.get("query_images") for it in [*task.items, *req.items]):
+        if task.active_runs or task.status in {"pending", "queued", "running"}:
+            raise HTTPException(409, "图文任务正在运行，请完成或取消后再替换题目")
     mode = req.mode if created else task.mode
     if created:
         if req.mode is None:
@@ -485,6 +488,14 @@ async def api_eval_items(req: EvalItemsReq):
     # compare 模式校验只针对本次批次 items（命中替换的条目也全部重评），
     # 放在 new_task 之前，避免校验失败留下空任务。
     requested_profile = req.evaluation_profile
+    if not created and mode == "compare":
+        old_items = {item.get("id"): item for item in task.items}
+        for item in req.items:
+            old = old_items.get(item.get("id"), {})
+            if old.get("query_images") and "query_images" not in item:
+                raise HTTPException(422, "替换图文题必须显式提交 query_images；移除图片请传 []")
+        if any(item.get("query_images") for item in req.items) and task.protocol_manifest.get("input_schema_version") != "1.1":
+            raise HTTPException(422, "旧任务实现不支持提问图片，请新建任务")
     if not created and requested_profile and requested_profile != task.evaluation_profile:
         raise HTTPException(
             422,
@@ -497,15 +508,14 @@ async def api_eval_items(req: EvalItemsReq):
         if mode == "compare"
         else None
     )
-    _validate_eval_request(
-        EvalReq(
-            mode=mode,
-            items=req.items,
-            options=req.options,
-            evaluation_profile=protocol.id if protocol else None,
-        ),
-        app_cfg,
+    validated_request = EvalReq(
+        mode=mode,
+        items=req.items,
+        options=req.options,
+        evaluation_profile=protocol.id if protocol else None,
     )
+    _validate_eval_request(validated_request, app_cfg)
+    req.items = validated_request.items
     if created:
         task = new_task(
             mode,
@@ -519,9 +529,9 @@ async def api_eval_items(req: EvalItemsReq):
             ),
         )
     batch, replaced_ids, added_ids = merge_items_by_id(task, req.items)
-    save_task(task)  # items 定义立即落快照；结果仍在各题完成后才覆盖合并
     effective_options = {**task.options, **req.options}
     task.active_runs += 1  # R1：提交时同步 pin（同 api_eval；run_update_batch 的 finally 负责解除）
+    pending_save = queue_task_save(task, save=save_task)
 
     async def _start_later():
         # 先把合并结果响应出去，再启动可能较重的评测（与 /api/eval 同模式）。
@@ -535,6 +545,8 @@ async def api_eval_items(req: EvalItemsReq):
         )
 
     spawn_background(_start_later())
+    if pending_save is not None:
+        await asyncio.shield(pending_save)
     return {
         "task_id": task.id,
         "created": created,
@@ -594,6 +606,51 @@ _MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 模块常量便于测试 monkeypatch
 _UPLOAD_CHUNK = 1024 * 1024
 
 
+@app.post("/api/upload/query-image")
+async def api_upload_query_image(file: UploadFile = File(...)):
+    policy = cfg().visual_modes["rich_content"].query_images
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
+        raise HTTPException(422, "仅支持静态 PNG/JPEG/WebP")
+    upload_dir = RUNS_DIR / "query_uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    path = upload_dir / (uuid.uuid4().hex + suffix)
+    try:
+        size = 0
+        with path.open("wb") as dest:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > policy.max_file_bytes:
+                    raise HTTPException(413, "提问图片上传大小超限")
+                dest.write(chunk)
+        prepared = await run_preparation(
+            prepare_query_images, {"query": "上传预览", "query_images": [str(path)]},
+            session_name="uploads", cfg=policy, timeout=60,
+        )
+        meta = prepared["query_image_meta"][0]
+        return {"path": meta["original_path"], **meta}
+    except QueryImageError as exc:
+        raise HTTPException(422, {"code": exc.code, "message": str(exc)}) from exc
+    finally:
+        path.unlink(missing_ok=True)
+        await file.close()
+
+
+@app.get("/api/query-images/{image_id}")
+def api_query_image(image_id: str, original: bool = False):
+    if len(image_id) != 32 or any(c not in "0123456789abcdef" for c in image_id):
+        raise HTTPException(404, "图片不存在")
+    root = (RUNS_DIR / "query_images").resolve()
+    registry = root / "registry" / f"{image_id}.json"
+    if not registry.is_file():
+        raise HTTPException(404, "图片不存在")
+    meta = json.loads(registry.read_text(encoding="utf-8"))
+    path = Path(meta["original_path" if original else "path"]).resolve()
+    if not path.is_relative_to(root) or not path.is_file():
+        raise HTTPException(404, "图片不可用")
+    return FileResponse(path, filename=path.name if original else None)
+
+
 @app.post("/api/upload/video")
 async def api_upload_video(file: UploadFile = File(...)):
     """上传视觉评估录屏；延迟到开始评估时使用 rich_content 专用参数抽帧。
@@ -633,7 +690,7 @@ async def api_upload_video(file: UploadFile = File(...)):
 
 
 @app.get("/api/eval/{task_id}/stream")
-async def api_stream(task_id: str):
+async def api_stream(task_id: str, compact: bool = False):
     # 只读视图：终态任务回放完即返回不驻留；运行中任务 peek 命中活对象，订阅正常
     task = peek_task(task_id)
     if not task:
@@ -645,17 +702,31 @@ async def api_stream(task_id: str):
         # 幂等）。旧实现的共享单队列还有多连接互相瓜分事件的正确性问题。
         q = task.subscribe()
         try:
+            if compact:
+                # 新页面按题回放日志，避免每条历史日志触发一次页面渲染。
+                # 首次 yield 前固定全部快照；回放期间的新事件由 q 按序补齐。
+                histories = [(key, list(events)) for key, events in task.progress_events.items()]
+                yield _sse("replay_state", {
+                    "results": list(task.results),
+                    "item_progress": dict(task.item_progress),
+                    "progress": task.done_total,
+                    "total": len(task.items),
+                    "repair_status": task.repair_status,
+                    "retry": max(task.retry_runs.values(), key=lambda row: float(row.get("created_at") or 0), default=None),
+                })
+                for key, events in histories:
+                    yield _sse("progress_history", {"item_index": int(key), "events": events})
             # 回放有界事件历史，供 Web 展示与文件日志同源的逐行调用记录。
             # 内层列表同样快照（R8）：yield 挂起期间 _record_progress 会并发
             # append/del 同一列表，遍历活列表会跳帧/重帧。
-            for item_events in list(task.progress_events.values()):
+            for item_events in ([] if compact else list(task.progress_events.values())):
                 for progress_event in list(item_events):
                     yield _sse("progress_event", progress_event)
             # 回放每题最新进度，断线重连后能立即恢复当前阶段。
-            for progress_item in list(task.item_progress.values()):
+            for progress_item in ([] if compact else list(task.item_progress.values())):
                 yield _sse("item_progress", progress_item)
             # 先回放已有结果（断线重连不丢已完成的）
-            for r in list(task.results):
+            for r in ([] if compact else list(task.results)):
                 yield _sse("result", {"progress": task.done_total, "total": len(task.items), "result": r})
             # 终态判定叠加 active_runs（R4）：更新批 manage_status=False 全程
             # status=done，仅看 status 会在批运行中立即下发伪 done；批结束时
@@ -718,6 +789,8 @@ def api_history_detail(task_id: str):
 
 @app.delete("/api/history/{task_id}")
 async def api_history_delete(task_id: str):
+    if task_save_pending(task_id):
+        raise HTTPException(409, "任务正在保存，请稍后再删除")
     # R6：TASKS 增删必须发生在事件循环线程（原同步 def 在线程池执行，与
     # move_to_end/_enforce_capacity 迭代竞争触发 RuntimeError）。全程无
     # await：检查-删盘-清内存相对提交端点的同步 pin（同样无 await 前置）
@@ -744,27 +817,62 @@ async def api_history_note(task_id: str, req: HistoryNoteReq):
     if len(note) > 1000:
         raise HTTPException(422, "备注不能超过 1000 个字符")
     task.note = note
-    if not await asyncio.to_thread(save_task, task):
+    if not await wait_task_save(task, save=save_task):
         raise HTTPException(500, "备注保存失败")
     return {"ok": True, "task_id": task.id, "note": task.note}
 
 
+@app.post("/api/eval/{task_id}/exports", status_code=202)
+async def api_prepare_xlsx(task_id: str):
+    return XLSX_EXPORTS.create(task_id)
+
+
+@app.get("/api/exports/{export_id}")
+async def api_xlsx_status(export_id: str):
+    return XLSX_EXPORTS.view(export_id)
+
+
+@app.get("/api/exports/{export_id}/download")
+async def api_xlsx_download(export_id: str):
+    state = XLSX_EXPORTS.view(export_id)
+    if state["status"] != "ready":
+        raise HTTPException(409, state.get("error") or "Excel 尚未生成完成")
+    return FileResponse(
+        XLSX_EXPORTS.jobs[export_id]["path"],
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=state["filename"],
+    )
+
+
 @app.get("/api/eval/{task_id}/export")
-def api_export(task_id: str, format: str = "json"):
-    task = peek_task(task_id, touch=False)  # 导出只读视图不驻留内存；touch=False：线程池端点不变异 TASKS
-    data = task_to_snapshot(task) if task else load_snapshot(task_id)
-    if not data:
+async def api_export(task_id: str, format: str = "json"):
+    task = await peek_task_async(task_id)
+    if task is None:
         raise HTTPException(404, "task not found")
+    data = copy.deepcopy(task_to_snapshot(task))
+    return await asyncio.to_thread(_export_snapshot, task_id, format, data)
+
+
+def _export_snapshot(task_id: str, format: str, data: dict):
 
     if format == "json":
         return JSONResponse(snapshot_payload(data))
 
     if format == "xlsx":
-        content = build_xlsx(data)
-        return Response(
-            content,
+        # 保留原 GET 下载入口，改为文件响应；新页面使用有状态的后台导出。
+        export_dir = RUNS_DIR / "exports"
+        export_dir.mkdir(parents=True, exist_ok=True)
+        archive_path = export_dir / f".xlsx-{uuid.uuid4().hex}.xlsx"
+        try:
+            write_xlsx(data, archive_path)
+        except Exception:
+            archive_path.unlink(missing_ok=True)
+            raise
+        return FileResponse(
+            archive_path,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": f"attachment; filename=eval_{task_id}.xlsx"},
+            filename=xlsx_download_name(data.get("dataset_name", ""), task_id),
+            background=BackgroundTask(archive_path.unlink, missing_ok=True),
         )
 
     if format in {"frames", "frames_zip"}:
@@ -865,6 +973,51 @@ def api_export_item(task_id: str, item_index: int, format: str):
     raise HTTPException(400, "format 必须是 video、frames_zip 或 judge_calls")
 
 
+@app.get("/api/eval/{task_id}/items/{item_index}/screenshots/{product_no}")
+def api_item_screenshot(task_id: str, item_index: int, product_no: int, download: bool = False):
+    """Serve only the original screenshot bound to this task/product, never a slice."""
+    from PIL import Image
+
+    if product_no not in (1, 2, 3):
+        raise HTTPException(404, "产品不存在")
+    task = peek_task(task_id, touch=False)
+    data = task_to_snapshot(task) if task else load_snapshot(task_id)
+    if not data or not 0 <= item_index < len(data.get("items") or []):
+        raise HTTPException(404, "题目不存在")
+    item = data["items"][item_index]
+    source = item.get("source_data") or {}
+    meta = item.get(f"screenshot_meta{product_no}") or {}
+    raw = meta.get("original_path") or item.get(f"screenshot{product_no}") or source.get(f"screenshot{product_no}")
+    count = item.get("product_count") or (3 if item.get("screenshot3") or source.get("screenshot3") else 2)
+    if not raw or product_no > count or item.get("evidence_mode") == "video_frames":
+        raise HTTPException(404, "该产品没有回答长截图")
+    path = Path(raw).expanduser()
+    path = (path if path.is_absolute() else BASE_DIR / path).resolve()
+    if not any(path.is_relative_to(root) for root in operation_video_roots(BASE_DIR)) or not path.is_file():
+        raise HTTPException(404, "长截图不存在或不在授权目录")
+    try:
+        with Image.open(path) as image:
+            if image.format not in {"PNG", "JPEG", "WEBP"} or getattr(image, "n_frames", 1) != 1:
+                raise ValueError("不支持的长截图格式")
+            mime = Image.MIME[image.format]
+            image.verify()
+        if meta.get("original_sha256"):
+            with path.open("rb") as file:
+                digest = hashlib.sha256()
+                for chunk in iter(lambda: file.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            if digest.hexdigest() != meta["original_sha256"]:
+                raise HTTPException(409, "原始长截图已变化，无法展示本次评测原图")
+    except HTTPException:
+        raise
+    except (OSError, ValueError) as exc:
+        raise HTTPException(404, "长截图无法读取") from exc
+    stem = _download_stem(str(item.get("id") or item_index + 1), "item")
+    return FileResponse(path, media_type=mime,
+                        filename=f"{stem}_product{product_no}_original{path.suffix.lower()}" if download else None,
+                        headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+
+
 @app.get("/")
 def index():
     return FileResponse(STATIC_DIR / "index.html")
@@ -876,4 +1029,4 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8503)
+    uvicorn.run(app, host="0.0.0.0", port=8054)

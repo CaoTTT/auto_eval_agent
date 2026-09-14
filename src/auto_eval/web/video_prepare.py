@@ -17,6 +17,7 @@ from ..media import (
 )
 from ..config import VisualModeProfile
 from ..paths import PROJECT_ROOT, RUNS_DIR
+from ..preparation import check_preparation
 
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"}
@@ -89,6 +90,7 @@ def _extract_frames(
     cache_key: str = KEYFRAME_ALGORITHM_VERSION,
     extract_kwargs: dict | None = None,
 ) -> list[Path]:
+    check_preparation()
     frames = _cached_frames(frame_dir, cache_key)
     if frames:
         return frames
@@ -98,6 +100,7 @@ def _extract_frames(
     (frame_dir / ".complete").unlink(missing_ok=True)
     (frame_dir / "keyframes.json").unlink(missing_ok=True)
     frames = list(extract_fn(video_path, frame_dir, **(extract_kwargs or {})))
+    check_preparation()  # Never mark an interrupted extraction as a complete cache.
     if frames:
         (frame_dir / ".complete").write_text(
             json.dumps(
@@ -289,6 +292,7 @@ def prepare_session_visual_compare_item(
     first_duration = 0.0
 
     for product_no in range(1, product_count + 1):
+        check_preparation()
         raw_path = str(item.get(f"video{product_no}") or "").strip()
         if not raw_path:
             raise ValueError(f"缺少 video{product_no}")
@@ -329,4 +333,44 @@ def prepare_session_visual_compare_item(
         "frame_count": total_frame_count,
         "duration": round(first_duration, 2),
     })
+    return prepared
+
+
+def prepare_session_long_screenshot_item(
+    item: dict,
+    *,
+    profile: VisualModeProfile,
+    session_name: str,
+    item_index: int,
+    total_items: int,
+    base_dir: Path = PROJECT_ROOT,
+    runs_dir: Path = RUNS_DIR,
+) -> dict:
+    """复用现有允许目录和任务命名；不进入视频探测或抽帧。"""
+    from ..long_screenshot import prepare_long_screenshot
+    from .parse_input import compare_evidence_mode
+
+    count, mode = compare_evidence_mode(item)
+    if mode != "long_screenshot":
+        raise ValueError("长截图准备只接受 screenshotN")
+    sequence = str(item_index + 1).zfill(max(3, len(str(max(total_items, 1)))))
+    item_name = _safe_name(str(item.get("id") or f"q{item_index + 1}"), f"q{item_index + 1}")
+    root = runs_dir / "screenshots" / _safe_name(session_name, "compare") / f"{sequence}_{item_name}"
+    prepared = dict(item)
+    prepared.update(product_count=count, evidence_mode=mode, frame_count=0, media=[])
+    for product_no in range(1, count + 1):
+        check_preparation()
+        path = Path(item[f"screenshot{product_no}"]).expanduser()
+        path = (path if path.is_absolute() else base_dir / path).resolve()
+        if not any(path.is_relative_to(allowed) for allowed in operation_video_roots(base_dir)):
+            raise ValueError("截图路径不在允许目录中；外部目录需通过 OPERATION_VIDEO_ROOTS 配置")
+        meta = prepare_long_screenshot(path, root / f"product{product_no}", profile.long_screenshot)
+        # 运行时和快照均保存相对项目根目录的路径，不依赖启动时工作目录。
+        for record, key in [(meta, "original_path"), *[(part, "path") for part in meta["slices"]]]:
+            record[key] = Path(os.path.relpath(record[key], base_dir)).as_posix()
+        prepared[f"screenshot_meta{product_no}"] = meta
+        prepared[f"screenshot{product_no}"] = meta["original_path"]
+        prepared[f"frames{product_no}"] = [part["path"] for part in meta["slices"]]
+        prepared["frame_count"] += meta["split_count"]
+        prepared["media"].append(meta["original_path"])
     return prepared

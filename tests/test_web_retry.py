@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import time
+import asyncio
+import json
+import shutil
+import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -123,3 +128,72 @@ async def test_retry_endpoint_selects_only_failed_rows(monkeypatch):
     )
     assert replay["retry_id"] == response["retry_id"]
     assert replay["idempotent_replay"] is True
+
+
+def _parse_sse(chunk):
+    if isinstance(chunk, bytes):
+        chunk = chunk.decode()
+    lines = chunk.strip().splitlines()
+    return lines[0].removeprefix("event: "), json.loads(lines[1].removeprefix("data: "))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("evidence_mode,count", [("long_screenshot", 2), ("long_screenshot", 3), ("video_frames", 2), ("video_frames", 3)])
+async def test_compact_replay_batches_logs_and_preserves_retry_progress(monkeypatch, evidence_mode, count):
+    task = Task(id="replay", mode="compare", items=[{"query": str(i), "evidence_mode": evidence_mode, "product_count": count} for i in range(15)], options={}, status="done", active_runs=1)
+    task.results = [{"index": i, "error": "old failure"} for i in range(15)]
+    task.repair_status = "running"
+    for i in range(15):
+        for sequence in range(100):
+            runner_module._record_progress(task, i, {"item_index": i, "request_id": f"retry-{i}", "status": "running", "percent": 5})
+    monkeypatch.setattr(server_module, "peek_task", lambda _id: task)
+    response = await server_module.api_stream(task.id, compact=True)
+    stream = response.body_iterator
+    event, state = _parse_sse(await anext(stream))
+    assert event == "replay_state"
+    assert state["results"][0]["error"] == "old failure"
+    assert state["item_progress"]["0"]["status"] == "running"
+    assert state["repair_status"] == "running"
+    # An event arriving while the history is being sent must follow that history.
+    runner_module._record_progress(task, 0, {"item_index": 0, "request_id": "retry-0", "status": "running", "percent": 20})
+    for i in range(15):
+        event, history = _parse_sse(await anext(stream))
+        assert event == "progress_history"
+        assert history["item_index"] == i
+        assert [row["sequence"] for row in history["events"]] == list(range(1, 101))
+    event, update = _parse_sse(await asyncio.wait_for(anext(stream), 1))
+    assert event == "item_progress"
+    assert update["sequence"] == 101
+    assert update["percent"] == 20
+    await stream.aclose()
+    assert not task.subscribers
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("compact", [False, True])
+async def test_replay_historical_task_remains_compatible(monkeypatch, compact):
+    task = Task(id="old", mode="rich_content", items=[{"query": "video"}], options={}, status="done", results=[{"index": 0, "error": "old failure"}])
+    runner_module._record_progress(task, 0, {"item_index": 0, "status": "error"})
+    monkeypatch.setattr(server_module, "peek_task", lambda _id: task)
+    response = await server_module.api_stream(task.id, compact=compact)
+    events = [_parse_sse(chunk)[0] async for chunk in response.body_iterator]
+    assert events == (["replay_state", "progress_history", "done"] if compact else ["progress_event", "item_progress", "result", "done"])
+    assert not task.subscribers
+
+
+def test_retry_progress_does_not_inherit_previous_attempt_start():
+    task = Task(id="clock", mode="compare", items=[], options={})
+    runner_module._record_progress(task, 0, {"request_id": "old", "started_at": 100})
+    queued = runner_module._record_progress(task, 0, {"request_id": "retry"})
+    assert "started_at" not in queued
+    runner_module._record_progress(task, 0, {"request_id": "retry", "started_at": 200})
+    running = runner_module._record_progress(task, 0, {"request_id": "retry"})
+    assert running["started_at"] == 200
+
+
+def test_web_retry_progress_frontend():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js is required for the frontend regression harness")
+    completed = subprocess.run([node, str(Path(__file__).with_name("test_web_retry_progress.cjs"))], capture_output=True, text=True, encoding="utf-8", timeout=30)
+    assert completed.returncode == 0, completed.stdout + completed.stderr

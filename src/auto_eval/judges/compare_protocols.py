@@ -5,7 +5,7 @@ output schema, score range, gate semantics and user-facing lifecycle state.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal, TypeAlias
 
 from jinja2 import Template
@@ -107,6 +107,7 @@ class CompareProtocol:
             "status": self.status,
             "score_range": [self.score_min, self.score_max],
             "modes": ["compare"],
+            "input_modalities": ["text"] if self.bundle_revision in {"0.2.0", "0.3.0"} else ["text", "text_image"],
         }
 
 
@@ -115,7 +116,7 @@ _PROTOCOLS = {
         id=DEFAULT_COMPARE_PROTOCOL_ID,
         standard_id=STANDARD_ID,
         standard_version="0.2-simplified",
-        bundle_revision="0.2.0",
+        bundle_revision="0.2.1",
         display="V0.2 简化版（稳定）",
         status="stable",
         system_template=V02_SYSTEM,
@@ -129,7 +130,7 @@ _PROTOCOLS = {
         id=V03_COMPARE_PROTOCOL_ID,
         standard_id=STANDARD_ID,
         standard_version="0.3",
-        bundle_revision="0.3.0",
+        bundle_revision="0.3.1",
         display="V0.3（实验）",
         status="experimental",
         system_template=V03_SYSTEM,
@@ -146,10 +147,16 @@ def list_compare_protocols() -> list[CompareProtocol]:
     return list(_PROTOCOLS.values())
 
 
-def resolve_compare_protocol(protocol_id: str | None) -> CompareProtocol:
+def resolve_compare_protocol(protocol_id: str | None, bundle_revision: str | None = None) -> CompareProtocol:
     selected = protocol_id or DEFAULT_COMPARE_PROTOCOL_ID
     try:
-        return _PROTOCOLS[selected]
+        protocol = _PROTOCOLS[selected]
+        if bundle_revision and bundle_revision != protocol.bundle_revision:
+            legacy = "0.2.0" if selected == DEFAULT_COMPARE_PROTOCOL_ID else "0.3.0"
+            if bundle_revision != legacy:
+                raise ValueError("无法恢复任务冻结的实现版本，请新建任务")
+            return replace(protocol, bundle_revision=legacy)
+        return protocol
     except KeyError as exc:
         supported = ", ".join(_PROTOCOLS)
         raise ValueError(f"未知评测协议 {selected!r}；可选值：{supported}") from exc

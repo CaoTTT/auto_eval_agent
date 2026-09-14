@@ -39,9 +39,55 @@ createApp({
     const runError = ref("");
     const itemProgress = ref({});
     const progressEvents = ref({});
+    const expandedProgressLogs = ref({});
     const resultBrowser = ref(null);
     const activeSkill = ref("");
     const resultQuery = ref("");
+    const modalityFilter = ref("");
+    const modalityCounts = computed(() => ({
+      text: opItems.value.filter(it => !(it.queryImages || []).length).length,
+      text_image: opItems.value.filter(it => (it.queryImages || []).length).length,
+    }));
+    function queryImageMetas(r) {
+      return r.query_image_meta || items.value[r.index]?.query_image_meta || [];
+    }
+    const evidenceImageErrors = ref({});
+    const collapsedEvidence = ref({});
+    function evidenceExpanded(row) {
+      return !collapsedEvidence.value[`${taskId.value}:${row.index}`];
+    }
+    function setEvidenceExpanded(row, expanded) {
+      collapsedEvidence.value[`${taskId.value}:${row.index}`] = !expanded;
+    }
+    function setPageEvidenceExpanded(expanded) {
+      pagedResults.value.forEach(row => setEvidenceExpanded(row, expanded));
+    }
+    const evidenceRevisions = ref({});
+    let nextEvidenceRevision = 0;
+    function refreshEvidence(resultRows) {
+      for (const row of resultRows) {
+        if (row && row.index != null) evidenceRevisions.value[row.index] = ++nextEvidenceRevision;
+      }
+      evidenceImageErrors.value = {};
+    }
+    function evidenceImages(r) {
+      const images = queryImageMetas(r).filter(meta => meta.preview_url).map(meta => ({
+        key: meta.preview_url, label: `用户提问图片 ${meta.query_image_id || 'QI1'}`,
+        previewUrl: meta.preview_url, downloadUrl: `${meta.preview_url}?original=true`, longScreenshot: false,
+      }));
+      const index = Number(r.index);
+      const item = items.value[index] || {};
+      if (!taskId.value || !Number.isInteger(index) || index < 0) return images;
+      const source = item.source_data || {};
+      if (item.evidence_mode === 'video_frames') return images;
+      const count = item.product_count || (item.screenshot3 || source.screenshot3 ? 3 : 2);
+      for (let n = 1; n <= count; n++) {
+        if (!(item[`screenshot${n}`] || item[`screenshot_meta${n}`]?.original_path || source[`screenshot${n}`])) continue;
+        const url = `/api/eval/${encodeURIComponent(taskId.value)}/items/${index}/screenshots/${n}?revision=${evidenceRevisions.value[index] || 0}`;
+        images.push({key:url, label:`产品 ${n} 回答长截图`, previewUrl:url, downloadUrl:`${url}&download=true`, longScreenshot:true});
+      }
+      return images;
+    }
     const resultPage = ref(1);
     const resultPageSize = ref(10);
     const progressPage = ref(1);
@@ -52,6 +98,14 @@ createApp({
     const historyNoteDrafts = ref({});
     const historyNoteEditing = ref({});
     const loadingHistory = ref(false);
+    const loadingTaskId = ref("");
+    const exportingTaskId = ref("");
+    const exportMessage = ref("");
+    const exportError = ref("");
+    const exportDownloadUrl = ref("");
+    let historyLoadVersion = 0;
+    let historyLoadController = null;
+    let disposed = false;
     const queueState = ref({ running: null, queued: [] });
     const selectedTaskStatus = ref("");
     const queueNotice = ref("");
@@ -105,7 +159,7 @@ createApp({
     const formatHint = computed(
       () =>
         ({
-          compare: "逐题导入 JSONL：product_count可为2或3；双产品填写video1/2，三产品再填写video3；context1/2/3、answer1/2/3可选。",
+          compare: "支持文字题与图文题混合导入：query_images 可选填一张提问图片路径；product_count 为2或3；同题统一用 screenshot1/2/3 或 video1/2/3，不同题可以不同。整批使用同一标准。",
           rich_content: "可逐题上传，也可导入 JSONL：query、context(可选)、video_path、category/answer_text/task_start_time/task_end_time(均可选)；普通图片不算挂卡，回答区域蓝色文字按 Superlink 统计。",
         }[mode.value])
     );
@@ -120,25 +174,29 @@ createApp({
       }));
     });
 
-    const progressRows = computed(() =>
-      items.value.map((item, index) => {
+    const progressResultByIndex = computed(() => new Map(results.value.map((entry) => [entry.index, entry])));
+    const progressPageCount = computed(() => Math.max(1, Math.ceil(items.value.length / pageSize)));
+    const pagedProgressRows = computed(() => {
+      const page = Math.min(progressPage.value, progressPageCount.value);
+      const start = (page - 1) * pageSize;
+      return items.value.slice(start, start + pageSize).map((item, offset) => {
+        const index = start + offset;
         const current = itemProgress.value[index] || {};
-        const result = results.value.find((entry) => entry.index === index);
+        const result = progressResultByIndex.value.get(index);
         const events = progressEvents.value[index] || [];
         const startedAt = Number(current.started_at || 0);
-        const finishedAt = Number(current.finished_at || 0);
+        const terminal = ["done", "error"].includes(current.status);
+        const finishedAt = Number(current.finished_at || (terminal && Date.parse(current.updated_at || "")) || 0);
         const resultElapsed = Number(result?.latency_s);
-        const elapsedSeconds = Number.isFinite(resultElapsed)
-          ? resultElapsed
-          : startedAt > 0
-            ? Math.max(0, ((finishedAt || clockNow.value) - startedAt) / 1000)
-            : null;
+        const elapsedSeconds = startedAt > 0
+          ? Math.max(0, ((finishedAt || clockNow.value) - startedAt) / 1000)
+          : (!current.status || terminal) && Number.isFinite(resultElapsed) ? resultElapsed : null;
         return {
           index,
           itemId: item.id || `q${index}`,
           query: item.query || item.question || "",
           percent: current.percent ?? 0,
-          status: current.status || "pending",
+          status: current.status || (result ? (result.error ? "error" : "done") : "pending"),
           message: current.message || "排队中",
           requestId: current.request_id || "",
           module: current.module || "",
@@ -149,13 +207,7 @@ createApp({
           events,
           latestEvents: events.slice(-2),
         };
-      })
-    );
-    const progressPageCount = computed(() => Math.max(1, Math.ceil(progressRows.value.length / pageSize)));
-    const pagedProgressRows = computed(() => {
-      const page = Math.min(progressPage.value, progressPageCount.value);
-      const start = (page - 1) * pageSize;
-      return progressRows.value.slice(start, start + pageSize);
+      });
     });
 
     function progressStageRank(progressItem) {
@@ -167,44 +219,58 @@ createApp({
     }
 
     function mergeItemProgress(incoming) {
-      appendProgressEvent(incoming);
       const index = incoming.item_index;
-      const previous = itemProgress.value[index] || {};
+      if (index == null) return;
+      const existing = itemProgress.value[index] || {};
+      if (incoming.sequence != null && existing.sequence != null && incoming.sequence <= existing.sequence) return;
+      appendProgressEvent(incoming);
+      const newAttempt = incoming.request_id && incoming.request_id !== existing.request_id;
+      const previous = newAttempt ? {} : existing;
       const previousRank = previous.stage_rank ?? progressStageRank(previous);
       const incomingRank = progressStageRank(incoming);
       const terminal = incoming.status === "done" || incoming.status === "error";
       const updatedAt = Date.parse(incoming.updated_at || "");
-      itemProgress.value = {
-        ...itemProgress.value,
-        [index]: {
-          ...previous,
-          ...incoming,
-          // Agent Loop 总轮数未知，宏观阶段只前进、不倒退。
-          stage_rank: incoming.status === "done"
-            ? 4
-            : Math.max(previousRank, incomingRank),
-          finished_at: terminal
-            ? (previous.finished_at || (Number.isFinite(updatedAt) ? updatedAt : Date.now()))
-            : previous.finished_at,
-        },
+      itemProgress.value[index] = {
+        ...previous,
+        ...incoming,
+        // 同一次请求的阶段只前进；补跑使用新的 request_id 重新计时。
+        stage_rank: incoming.status === "done"
+          ? 4
+          : Math.max(previousRank, incomingRank),
+        finished_at: terminal
+          ? (previous.finished_at || (Number.isFinite(updatedAt) ? updatedAt : Date.now()))
+          : undefined,
       };
+    }
+
+    function progressEventKey(incoming) {
+      return incoming.sequence != null
+        ? `seq:${incoming.sequence}`
+        : [incoming.request_id, incoming.updated_at, incoming.module, incoming.event,
+            incoming.judge, incoming.round, incoming.message].join("|");
+    }
+
+    function normalizeProgressEvents(events) {
+      const unique = new Map((events || []).map((event) => {
+        const key = progressEventKey(event);
+        return [key, { ...event, _key: key }];
+      }));
+      return [...unique.values()].slice(-100);
+    }
+
+    function restoreProgressEvents(events) {
+      progressEvents.value = Object.fromEntries(Object.entries(events || {}).map(
+        ([index, rows]) => [index, normalizeProgressEvents(rows)]
+      ));
     }
 
     function appendProgressEvent(incoming) {
       const index = incoming.item_index;
       if (index == null) return;
       const previous = progressEvents.value[index] || [];
-      const eventKey = incoming.sequence != null
-        ? `seq:${incoming.sequence}`
-        : [
-            incoming.updated_at, incoming.module, incoming.event,
-            incoming.judge, incoming.round, incoming.message,
-          ].join("|");
-      if (previous.some((entry) => entry._key === eventKey)) return;
-      progressEvents.value = {
-        ...progressEvents.value,
-        [index]: [...previous, { ...incoming, _key: eventKey }].slice(-100),
-      };
+      const eventKey = progressEventKey(incoming);
+      if (previous.some((entry) => (entry._key || progressEventKey(entry)) === eventKey)) return;
+      progressEvents.value[index] = [...previous, { ...incoming, _key: eventKey }].slice(-100);
     }
 
     function progressStageClass(row, stageIndex) {
@@ -244,15 +310,13 @@ createApp({
       return parts.join(" · ");
     }
 
+    const progressTimeFormatter = new Intl.DateTimeFormat("zh-CN", {
+      hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit",
+    });
     function formatProgressEventTime(value) {
       const date = new Date(value || "");
       if (Number.isNaN(date.getTime())) return "--:--:--";
-      return date.toLocaleTimeString("zh-CN", {
-        hour12: false,
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-      });
+      return progressTimeFormatter.format(date);
     }
 
     function progressEventMeta(event) {
@@ -282,10 +346,12 @@ createApp({
       return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     }
 
-    function scrollProgressLog(event) {
-      if (!event.currentTarget.open) return;
+    function scrollProgressLog(event, index) {
+      const details = event.currentTarget;
+      expandedProgressLogs.value[index] = details.open;
+      if (!details.open) return;
       nextTick(() => {
-        const panel = event.currentTarget.querySelector(".progress-log-scroll");
+        const panel = details.querySelector(".progress-log-scroll");
         if (panel) panel.scrollTop = panel.scrollHeight;
       });
     }
@@ -428,6 +494,8 @@ createApp({
     const filteredResults = computed(() => {
       const q = resultQuery.value.trim().toLowerCase();
       return skillResults.value.filter((r) => {
+        const modality = r.input_modality || ((items.value[r.index]?.query_images || []).length ? "text_image" : "text");
+        if (modalityFilter.value && modality !== modalityFilter.value) return false;
         if (q && !`${r.item_id || ""} ${r.query || ""} ${r.context || ""} ${r.answer_text || ""} ${r.answer1 || ""} ${r.answer2 || ""} ${r.answer3 || ""} ${(r.card_contents || []).join(" ")} ${(r.superlink_texts || []).join(" ")} ${r.rationale || ""}`.toLowerCase().includes(q)) return false;
         return true;
       });
@@ -519,6 +587,7 @@ createApp({
     }
 
     function switchMode(k) {
+      cancelHistoryLoad();
       mode.value = k;
       selectedJudges.value = defaultJudgeSelection();
       if (k === "compare") selectedEvaluationProfile.value = defaultEvaluationProfile();
@@ -533,7 +602,29 @@ createApp({
 
     // —— 视频评测：逐题卡片（query + 可选 context + 视频上传 + 可选 answer_text）——
     function newOpItem() {
-      return { _uiKey: ++opItemSequence, id: "", query: "", context: "", category: "", productCount: 2, videoName: "", videoPath: "", video1Path: "", video2Path: "", video3Path: "", frames: [], frameCount: 0, duration: 0, answer: "", answer1: "", answer2: "", answer3: "", context1: "", context2: "", context3: "", taskStartTime: null, taskEndTime: null, sourceLine: null, sourceData: null, sessionGroup: null, turnIndex: null, uploading: false, uploadError: "" };
+      return { _uiKey: ++opItemSequence, id: "", query: "", queryImages: [], queryImageMeta: [], queryUploading: false, queryUploadError: "", evidenceMode: "video_frames", screenshot1Path: "", screenshot2Path: "", screenshot3Path: "", context: "", category: "", productCount: 2, videoName: "", videoPath: "", video1Path: "", video2Path: "", video3Path: "", frames: [], frameCount: 0, duration: 0, answer: "", answer1: "", answer2: "", answer3: "", context1: "", context2: "", context3: "", taskStartTime: null, taskEndTime: null, sourceLine: null, sourceData: null, sessionGroup: null, turnIndex: null, uploading: false, uploadError: "" };
+    }
+    async function onQueryImage(event, index) {
+      const item = opItems.value[index];
+      const file = event.target.files?.[0];
+      if (!file || !item) return;
+      item.queryUploading = true;
+      item.queryUploadError = "";
+      try {
+        const form = new FormData();
+        form.append("file", file);
+        const response = await fetch("/api/upload/query-image", { method: "POST", body: form });
+        const data = await response.json();
+        if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : data.detail?.message || "上传失败");
+        item.queryImages = [data.original_path];
+        item.queryImageMeta = [data];
+      } catch (error) { item.queryUploadError = error.message; }
+      finally { item.queryUploading = false; event.target.value = ""; }
+    }
+    function setQueryImagePath(item, path) {
+      item.queryImages = path.trim() ? [path.trim()] : [];
+      item.queryImageMeta = [];
+      item.queryUploadError = "";
     }
     function addOpItem() {
       opItems.value.push(newOpItem());
@@ -615,11 +706,17 @@ createApp({
             ...newOpItem(),
             id: item.id || "",
             query: item.query || "",
+            queryImages: [...(item.query_images || [])],
+            queryImageMeta: item.query_image_meta || [],
             context: item.context || "",
             category: item.category === "default" ? "" : (item.category || ""),
             videoName: String(item.video_path || "").split(/[\\/]/).pop(),
             videoPath: item.video_path || item.video1 || "",
-            productCount: item.product_count || (item.video3 ? 3 : 2),
+            productCount: item.product_count || (item.video3 || item.screenshot3 ? 3 : 2),
+            evidenceMode: item.evidence_mode || (item.screenshot1 ? "long_screenshot" : "video_frames"),
+            screenshot1Path: item.screenshot1 || "",
+            screenshot2Path: item.screenshot2 || "",
+            screenshot3Path: item.screenshot3 || "",
             answer: mode.value === "compare" ? (item.answer1 || "") : (item.answer_text || ""),
             answer1: item.answer1 || "",
             answer2: item.answer2 || "",
@@ -651,7 +748,10 @@ createApp({
     function opItemReady(it) {
       if (!it.query.trim()) return false;
       if (mode.value !== "compare") return Boolean((it.frames || []).length || it.videoPath);
-      const productCount = Number(it.productCount) === 3 || it.video3Path ? 3 : 2;
+      const productCount = Number(it.productCount) === 3 || it.video3Path || it.screenshot3Path ? 3 : 2;
+      if (it.evidenceMode === "long_screenshot") {
+        return Boolean(it.screenshot1Path && it.screenshot2Path && (productCount === 2 || it.screenshot3Path));
+      }
       return Boolean(
         (it.video1Path || it.videoPath)
         && it.video2Path
@@ -660,15 +760,17 @@ createApp({
     }
 
     const canSubmit = computed(() =>
-      !opPreparing.value && opItems.value.some(opItemReady)
+      !opPreparing.value && !opItems.value.some(it => it.queryUploading) && opItems.value.some(opItemReady)
     );
 
     async function submit() {
       if (submitting.value) return;
+      cancelHistoryLoad();
+      const submitViewVersion = historyLoadVersion;
       runError.value = "";
       const valid = opItems.value.filter(opItemReady);
       if (!valid.length) {
-        alert("请为每题填写 query，并提供视频路径或上传视频后再评估。");
+        alert("请为每题填写 query，并导入完整的长截图或录屏路径后再评估。");
         return;
       }
       const submittedItems = valid.map((it, idx) => {
@@ -679,16 +781,24 @@ createApp({
           context: (it.context || "").trim(),
         };
         if (mode.value === "compare") {
-          const productCount = Number(it.productCount) === 3 || it.video3Path ? 3 : 2;
+          item.query_images = [...(it.queryImages || [])];
+          const productCount = Number(it.productCount) === 3 || it.video3Path || it.screenshot3Path ? 3 : 2;
           item.product_count = productCount;
-          item.video1 = it.video1Path || it.videoPath || "";
-          item.video2 = it.video2Path || "";
+          if (it.evidenceMode === "long_screenshot") {
+            item.evidence_mode = "long_screenshot";
+            item.screenshot1 = it.screenshot1Path;
+            item.screenshot2 = it.screenshot2Path;
+            if (productCount === 3) item.screenshot3 = it.screenshot3Path;
+          } else {
+            item.video1 = it.video1Path || it.videoPath || "";
+            item.video2 = it.video2Path || "";
+            if (productCount === 3) item.video3 = it.video3Path || "";
+          }
           item.context1 = (it.context1 || "").trim();
           item.context2 = (it.context2 || "").trim();
           item.answer1 = (it.answer1 || it.answer || "").trim();
           item.answer2 = (it.answer2 || "").trim();
           if (productCount === 3) {
-            item.video3 = it.video3Path || "";
             item.context3 = (it.context3 || "").trim();
             item.answer3 = (it.answer3 || "").trim();
           }
@@ -741,12 +851,18 @@ createApp({
         runError.value = "无法启动评估：" + detail;
         return;
       }
+      if (submitViewVersion !== historyLoadVersion) {
+        loadQueue();
+        loadHistory();
+        return;
+      }
       closeActiveStream();
       items.value = submittedItems;
       errors.value = [];
       results.value = [];
       summary.value = null;
       progressEvents.value = {};
+      expandedProgressLogs.value = {};
       activeSkill.value = "";
       resultQuery.value = "";
       resultPage.value = 1;
@@ -780,7 +896,9 @@ createApp({
     }
 
     async function retryFailedCases(indexes = null) {
-      if (!taskId.value || retrySubmitting.value) return;
+      if (!taskId.value || retrySubmitting.value || loadingTaskId.value) return;
+      const retryTaskId = taskId.value;
+      const viewVersion = historyLoadVersion;
       const selected = indexes == null ? null : [...new Set(indexes.map(Number))];
       if (selected && !selected.length) return;
       retrySubmitting.value = true;
@@ -789,7 +907,7 @@ createApp({
         || `retry-${Date.now()}-${Math.random().toString(16).slice(2)}`;
       let response;
       try {
-        response = await fetch(`/api/eval/${encodeURIComponent(taskId.value)}/retries`, {
+        response = await fetch(`/api/eval/${encodeURIComponent(retryTaskId)}/retries`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -801,11 +919,13 @@ createApp({
         });
       } catch (error) {
         retrySubmitting.value = false;
+        if (viewVersion !== historyLoadVersion || taskId.value !== retryTaskId) return;
         runError.value = "无法提交失败补跑：" + (error?.message || "网络错误");
         return;
       }
       const data = await response.json().catch(() => ({}));
       retrySubmitting.value = false;
+      if (viewVersion !== historyLoadVersion || taskId.value !== retryTaskId) return;
       if (!response.ok) {
         const detail = typeof data.detail === "string"
           ? data.detail
@@ -822,16 +942,17 @@ createApp({
       await loadHistory();
     }
 
-    async function reconcileTaskAfterError(message) {
+    async function reconcileTaskAfterError(message, errorTaskId, viewVersion) {
       let snapshot = null;
       try {
-        const response = await fetch(`/api/history/${taskId.value}`);
+        const response = await fetch(`/api/history/${encodeURIComponent(errorTaskId)}`);
         if (response.ok) snapshot = await response.json();
       } catch (_) {}
+      if (viewVersion !== historyLoadVersion || taskId.value !== errorTaskId) return false;
       const snapshotResults = snapshot?.results || results.value;
       const resultByIndex = new Map(snapshotResults.map((entry) => [entry.index, entry]));
       const snapshotProgress = snapshot?.item_progress || {};
-      progressEvents.value = snapshot?.progress_events || progressEvents.value;
+      if (snapshot?.progress_events) restoreProgressEvents(snapshot.progress_events);
       const reconciled = {};
       items.value.forEach((item, index) => {
         const previous = itemProgress.value[index] || {};
@@ -859,9 +980,11 @@ createApp({
         };
       });
       results.value = snapshotResults;
+      refreshEvidence(snapshotResults);
       progress.value = snapshotResults.length;
       itemProgress.value = reconciled;
       if (snapshot?.summary) summary.value = snapshot.summary;
+      return true;
     }
 
     function closeActiveStream() {
@@ -871,9 +994,26 @@ createApp({
 
     function connectSSE(streamTaskId = taskId.value) {
       closeActiveStream();
-      const es = new EventSource(`/api/eval/${streamTaskId}/stream`);
+      const es = new EventSource(`/api/eval/${streamTaskId}/stream?compact=true`);
       activeEventSource = es;
-      const isSelected = () => taskId.value === streamTaskId;
+      const isSelected = () => !loadingTaskId.value && taskId.value === streamTaskId && activeEventSource === es;
+      es.addEventListener("replay_state", (e) => {
+        if (!isSelected()) return;
+        const data = JSON.parse(e.data);
+        // 一次恢复结果和当前进度，旧结果不能覆盖正在补跑的状态。
+        results.value = data.results || [];
+        refreshEvidence(results.value);
+        itemProgress.value = data.item_progress || {};
+        progressEvents.value = {};
+        progress.value = data.progress;
+        repairStatus.value = data.repair_status || "idle";
+        activeRetry.value = data.retry || null;
+      });
+      es.addEventListener("progress_history", (e) => {
+        if (!isSelected()) return;
+        const data = JSON.parse(e.data);
+        progressEvents.value[data.item_index] = normalizeProgressEvents(data.events);
+      });
       es.addEventListener("start", () => {
         if (!isSelected()) return;
         selectedTaskStatus.value = "running";
@@ -901,6 +1041,7 @@ createApp({
         if (!isSelected()) return;
         const d = JSON.parse(e.data);
         const result = d.result;
+        refreshEvidence([result]);
         const index = result && result.index;
         if (index == null) {
           results.value.push(result);
@@ -914,16 +1055,13 @@ createApp({
         progress.value = d.progress;
         if (index != null) {
           const previous = itemProgress.value[index] || {};
-          itemProgress.value = {
-            ...itemProgress.value,
-            [index]: {
-              ...previous,
-              status: d.result.error ? "error" : "done",
-              percent: 100,
-              message: d.result.error ? "评测失败" : "评测完成",
-              stage_rank: d.result.error ? (previous.stage_rank ?? 0) : 4,
-              finished_at: Date.now(),
-            },
+          itemProgress.value[index] = {
+            ...previous,
+            status: d.result.error ? "error" : "done",
+            percent: 100,
+            message: d.result.error ? "评测失败" : "评测完成",
+            stage_rank: d.result.error ? (previous.stage_rank ?? 0) : 4,
+            finished_at: Date.now(),
           };
         }
       });
@@ -934,15 +1072,12 @@ createApp({
         if (!Number.isInteger(index)) return;
         const previous = itemProgress.value[index] || {};
         const status = data.status === "succeeded" ? "done" : (data.status === "failed" ? "error" : previous.status);
-        itemProgress.value = {
-          ...itemProgress.value,
-          [index]: {
-            ...previous,
-            status,
-            percent: 100,
-            message: data.status === "succeeded" ? "补跑成功" : (data.status === "failed" ? "补跑仍失败" : "补跑已跳过"),
-            finished_at: Date.now(),
-          },
+        itemProgress.value[index] = {
+          ...previous,
+          status,
+          percent: 100,
+          message: data.status === "succeeded" ? "补跑成功" : (data.status === "failed" ? "补跑仍失败" : "补跑已跳过"),
+          finished_at: Date.now(),
         };
       });
       es.addEventListener("done", (e) => {
@@ -978,7 +1113,7 @@ createApp({
         queueNotice.value = "";
         es.close();
         if (activeEventSource === es) activeEventSource = null;
-        await reconcileTaskAfterError(message);
+        if (!await reconcileTaskAfterError(message, streamTaskId, historyLoadVersion)) return;
         runError.value = "评估出错：" + message;
         loadQueue();
         loadHistory();
@@ -1223,63 +1358,156 @@ createApp({
       await loadHistory();
     }
 
+    function cancelHistoryLoad() {
+      historyLoadVersion++;
+      if (historyLoadController) historyLoadController.abort();
+      historyLoadController = null;
+      loadingTaskId.value = "";
+    }
+
     async function loadHistoryTask(id) {
-      const r = await fetch(`/api/history/${id}`);
-      if (!r.ok) {
-        alert("历史记录加载失败");
-        return;
+      cancelHistoryLoad();
+      const version = historyLoadVersion;
+      let loaded = false;
+      loadingTaskId.value = id;
+      historyLoadController = typeof AbortController !== "undefined" ? new AbortController() : null;
+      try {
+        const r = await fetch(`/api/history/${encodeURIComponent(id)}`, historyLoadController ? {signal: historyLoadController.signal} : {});
+        if (version !== historyLoadVersion) return;
+        if (!r.ok) {
+          alert("历史记录加载失败");
+          return;
+        }
+        const d = await r.json();
+        if (version !== historyLoadVersion) return;
+        if (!modes.some((m) => m.key === d.mode)) {
+          alert("该历史记录使用已下线的评测模式，无法加载。");
+          return;
+        }
+        loaded = true;
+        closeActiveStream();
+        taskId.value = d.task_id || id;
+        mode.value = d.mode;
+        if (d.mode === "compare") {
+          selectedEvaluationProfile.value = d.evaluation_profile || defaultEvaluationProfile();
+        }
+        datasetName.value = d.dataset_name || "";
+        items.value = d.items || [];
+        if (d.mode === "compare") {
+          opItems.value = items.value.map(item => ({
+            ...newOpItem(), id: item.id || "", query: item.query || item.question || "",
+            context: item.context || "", category: item.category || "",
+            queryImages: [...(item.query_images || [])], queryImageMeta: item.query_image_meta || [],
+            productCount: item.product_count || (item.video3 || item.screenshot3 ? 3 : 2),
+            evidenceMode: item.evidence_mode || (item.screenshot1 ? "long_screenshot" : "video_frames"),
+            ...Object.fromEntries([1, 2, 3].flatMap(n => [
+              [`video${n}Path`, item[`video${n}`] || ""], [`screenshot${n}Path`, item[`screenshot${n}`] || ""],
+              [`answer${n}`, item[`answer${n}`] || ""], [`context${n}`, item[`context${n}`] || ""],
+            ])), taskStartTime: item.task_start_time ?? null, taskEndTime: item.task_end_time ?? null,
+            sourceData: item.source_data || null, sourceLine: item.source_line ?? null,
+            sessionGroup: item.session_group ?? null, turnIndex: item.turn_index ?? null,
+          }));
+          opPage.value = 1;
+        }
+        modalityFilter.value = "";
+        results.value = d.results || [];
+        refreshEvidence(results.value);
+        itemProgress.value = d.item_progress || {};
+        restoreProgressEvents(d.progress_events);
+        expandedProgressLogs.value = {};
+        summary.value = d.summary || null;
+        repairStatus.value = d.repair_status || "idle";
+        const retryRuns = Object.values(d.retry_runs || {});
+        activeRetry.value = retryRuns.sort(
+          (a, b) => Number(b.created_at || 0) - Number(a.created_at || 0)
+        )[0] || null;
+        total.value = items.value.length || results.value.length;
+        progress.value = results.value.length;
+        selectedTaskStatus.value = d.status || "";
+        running.value = ["pending", "queued", "running"].includes(selectedTaskStatus.value);
+        queueNotice.value = selectedTaskStatus.value === "queued" ? "该任务正在等待前序任务完成。" : "";
+        activeSkill.value = "";
+        resultQuery.value = "";
+        resultPage.value = 1;
+        progressPage.value = 1;
+        if (mode.value !== "compare" && skillTabs.value.length) activeSkill.value = skillTabs.value[0].key;
+        if (running.value || ["queued", "running"].includes(repairStatus.value)) connectSSE(taskId.value);
+        nextTick(() => resultBrowser.value && resultBrowser.value.scrollIntoView({ behavior: "smooth", block: "start" }));
+      } catch (error) {
+        if (version === historyLoadVersion && error?.name !== "AbortError") {
+          runError.value = "历史记录加载失败：" + (error?.message || "网络错误");
+        }
+      } finally {
+        if (version === historyLoadVersion) {
+          loadingTaskId.value = "";
+          historyLoadController = null;
+          if (!loaded && (running.value || ["queued", "running"].includes(repairStatus.value))) connectSSE(taskId.value);
+        }
       }
-      const d = await r.json();
-      if (!modes.some((m) => m.key === d.mode)) {
-        alert("该历史记录使用已下线的评测模式，无法加载。");
-        return;
-      }
-      closeActiveStream();
-      taskId.value = d.task_id || id;
-      mode.value = d.mode;
-      if (d.mode === "compare") {
-        selectedEvaluationProfile.value = d.evaluation_profile || defaultEvaluationProfile();
-      }
-      datasetName.value = d.dataset_name || "";
-      items.value = d.items || [];
-      results.value = d.results || [];
-      itemProgress.value = d.item_progress || {};
-      progressEvents.value = d.progress_events || {};
-      summary.value = d.summary || null;
-      repairStatus.value = d.repair_status || "idle";
-      const retryRuns = Object.values(d.retry_runs || {});
-      activeRetry.value = retryRuns.sort(
-        (a, b) => Number(b.created_at || 0) - Number(a.created_at || 0)
-      )[0] || null;
-      total.value = items.value.length || results.value.length;
-      progress.value = results.value.length;
-      selectedTaskStatus.value = d.status || "";
-      running.value = ["pending", "queued", "running"].includes(selectedTaskStatus.value);
-      queueNotice.value = selectedTaskStatus.value === "queued" ? "该任务正在等待前序任务完成。" : "";
-      activeSkill.value = "";
-      resultQuery.value = "";
-      resultPage.value = 1;
-      progressPage.value = 1;
-      if (mode.value !== "compare" && skillTabs.value.length) activeSkill.value = skillTabs.value[0].key;
-      if (running.value || ["queued", "running"].includes(repairStatus.value)) connectSSE(taskId.value);
-      nextTick(() => resultBrowser.value && resultBrowser.value.scrollIntoView({ behavior: "smooth", block: "start" }));
     }
 
     function exportCsv() {
+      if (loadingTaskId.value) return;
       window.open(`/api/eval/${taskId.value}/export?format=csv`);
     }
     function exportJson() {
+      if (loadingTaskId.value) return;
       window.open(`/api/eval/${taskId.value}/export?format=json`);
     }
-    function exportXlsx() {
-      window.open(`/api/eval/${taskId.value}/export?format=xlsx`);
+    async function exportXlsx(requestedId = "") {
+      if (exportingTaskId.value || (!requestedId && loadingTaskId.value)) return;
+      const id = requestedId || taskId.value;
+      if (!id) return;
+      exportingTaskId.value = id;
+      exportError.value = "";
+      exportDownloadUrl.value = "";
+      exportMessage.value = `正在为任务 ${id} 准备 Excel…`;
+      try {
+        const response = await fetch(`/api/eval/${encodeURIComponent(id)}/exports`, {method: "POST"});
+        let data = await response.json();
+        if (!response.ok) throw new Error(data.detail || "导出请求失败");
+        while (!disposed && ["queued", "generating"].includes(data.status)) {
+          exportMessage.value = `任务 ${id}：${data.status === 'queued' ? '等待生成' : '正在生成 Excel'}…`;
+          await new Promise(resolve => window.setTimeout(resolve, 1000));
+          if (disposed) return;
+          const status = await fetch(`/api/exports/${encodeURIComponent(data.export_id)}`);
+          data = await status.json();
+          if (!status.ok) throw new Error(data.detail || "无法读取导出状态");
+        }
+        if (disposed) return;
+        if (data.status !== "ready") throw new Error(data.error || "生成 Excel 失败");
+        exportDownloadUrl.value = `/api/exports/${encodeURIComponent(data.export_id)}/download`;
+        exportMessage.value = `任务 ${id}：Excel 已生成。若未开始下载，请点击下方链接（30 分钟内有效）。`;
+        // Use a same-origin download link: no popup and no full-file blob in memory.
+        const link = document.createElement("a");
+        link.href = exportDownloadUrl.value;
+        link.download = data.filename || "";
+        link.hidden = true;
+        document.body.appendChild(link);
+        try {
+          link.click();
+        } catch (error) {
+          // A browser may block automatic downloads; keep the manual link available.
+          console.warn("自动下载未能触发，请使用下载链接", error);
+        } finally {
+          link.remove();
+        }
+      } catch (error) {
+        exportMessage.value = "";
+        exportError.value = `任务 ${id} 导出失败：${error?.message || "网络错误"}。可再次点击导出重试。`;
+      } finally {
+        exportingTaskId.value = "";
+      }
     }
     function exportFrames() {
+      if (loadingTaskId.value) return;
       window.open(`/api/eval/${taskId.value}/export?format=frames_zip`);
     }
     function itemArtifactUrl(result, format) {
       const index = Number(result && result.index);
       if (!taskId.value || !Number.isInteger(index) || index < 0) return "";
+      const item = items.value[index] || {};
+      if (format === 'video' && (item.evidence_mode === 'long_screenshot' || item.screenshot1)) return "";
       return `/api/eval/${taskId.value}/items/${index}/export?format=${encodeURIComponent(format)}`;
     }
 
@@ -1299,6 +1527,8 @@ createApp({
     });
 
     onUnmounted(() => {
+      disposed = true;
+      cancelHistoryLoad();
       if (progressClockTimer != null) window.clearInterval(progressClockTimer);
       if (queueRefreshTimer != null) window.clearInterval(queueRefreshTimer);
       closeActiveStream();
@@ -1311,13 +1541,16 @@ createApp({
       queueState, queueEntries, selectedTaskStatus, queueNotice, taskStatusLabel, queueKindLabel,
       repairStatus, retryStatusLabel, retrySubmitting, selectedRetryIndexes, activeRetry,
       failedResultIndexes, retryIndexSelected, toggleRetryIndex, retryFailedCases,
-      itemProgress, progressEvents, progressRows, pagedProgressRows, progressStages,
+      itemProgress, progressEvents, expandedProgressLogs, pagedProgressRows, progressStages,
       historyItems, historyNoteDrafts, historyNoteEditing, loadingHistory, pageSize,
+      loadingTaskId, exportingTaskId, exportMessage, exportError, exportDownloadUrl,
       opPage, opPageSize, opPageCount, opJumpPage,
       progressPage, progressPageCount, progressJumpPage,
       resultJumpPage,
       resultBrowser,
       activeSkill, resultQuery, resultPage, resultPageSize,
+      modalityFilter, modalityCounts, queryImageMetas, onQueryImage, setQueryImagePath,
+      evidenceImages, evidenceImageErrors, evidenceExpanded, setEvidenceExpanded, setPageEvidenceExpanded,
       skillTabs, filteredResults, pagedResults, pageCount, resultTableWidth,
       formatHint, resultCols, opItems, pagedOpItems, opPreparing, canSubmit,
       switchMode, onOpManifestFile, submit, cell, columnWidth, exportCsv, exportJson, exportXlsx, exportFrames, itemArtifactUrl, addOpItem, removeOpItem, onOpVideo, onOpDrop,
