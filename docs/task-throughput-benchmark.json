@@ -1,0 +1,80 @@
+{
+  "baseline_ref": "eab257e",
+  "cases": 152,
+  "kind": "offline_virtual_clock_not_real_model",
+  "workloads": [
+    {
+      "frames": 12,
+      "assumed_prompt_tokens": 26974,
+      "assumed_output_tokens": 3000,
+      "assumed_response_headers_s": 5,
+      "assumed_response_s": 90,
+      "old": {
+        "seconds": 895.38,
+        "first_result_s": 90.0,
+        "cases_per_minute": 10.19,
+        "peak_inflight": 21,
+        "peak_requests_per_second": 1,
+        "initial_input_estimate": 84832
+      },
+      "new": {
+        "seconds": 611.34,
+        "first_result_s": 90.0,
+        "cases_per_minute": 14.92,
+        "peak_inflight": 29,
+        "peak_requests_per_second": 1,
+        "initial_input_estimate": 31586
+      },
+      "speedup": 1.465
+    },
+    {
+      "frames": 40,
+      "assumed_prompt_tokens": 52792,
+      "assumed_output_tokens": 6000,
+      "assumed_response_headers_s": 5,
+      "assumed_response_s": 120,
+      "old": {
+        "seconds": 2055.75,
+        "first_result_s": 120.0,
+        "cases_per_minute": 4.44,
+        "peak_inflight": 11,
+        "peak_requests_per_second": 1,
+        "initial_input_estimate": 117762
+      },
+      "new": {
+        "seconds": 1209.1,
+        "first_result_s": 120.0,
+        "cases_per_minute": 7.54,
+        "peak_inflight": 19,
+        "peak_requests_per_second": 1,
+        "initial_input_estimate": 64516
+      },
+      "speedup": 1.7
+    },
+    {
+      "frames": 12,
+      "assumed_prompt_tokens": 26974,
+      "assumed_output_tokens": 12000,
+      "assumed_response_headers_s": 5,
+      "assumed_response_s": 150,
+      "old": {
+        "seconds": 1818.84,
+        "first_result_s": 150.0,
+        "cases_per_minute": 5.01,
+        "peak_inflight": 16,
+        "peak_requests_per_second": 1,
+        "initial_input_estimate": 84832
+      },
+      "new": {
+        "seconds": 1049.42,
+        "first_result_s": 150.0,
+        "cases_per_minute": 8.69,
+        "peak_inflight": 39,
+        "peak_requests_per_second": 1,
+        "initial_input_estimate": 31586
+      },
+      "speedup": 1.733
+    }
+  ],
+  "benchmark_wall_seconds": 1.83
+}

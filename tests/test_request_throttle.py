@@ -173,7 +173,8 @@ def test_image_token_proxy_counts_geometry_not_base64():
     url = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
     kwargs = {"messages": [{"content": [{"type": "text", "text": "你好"},
               {"type": "image_url", "image_url": {"url": url}}]}]}
-    assert estimate_input_tokens(kwargs) == 256 + 6 + 200 + 256
+    text_only = {"messages": [{"content": [{"type": "text", "text": "你好"}]}]}
+    assert estimate_input_tokens(kwargs) - estimate_input_tokens(text_only) == 200 + 256
 
 
 @pytest.mark.asyncio

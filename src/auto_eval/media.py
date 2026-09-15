@@ -15,7 +15,11 @@ import re
 import shutil
 import subprocess
 import tempfile
+from collections import OrderedDict
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass
+from functools import wraps
 from numbers import Real
 from pathlib import Path
 
@@ -26,6 +30,68 @@ from .preparation import PreparationStopped, check_preparation, media_process, r
 
 KEYFRAME_ALGORITHM_VERSION = "hybrid-state-v3.1.0"
 DEFAULT_TASK_START_TIME = 7.0
+
+
+class _FrameFeatureCache:
+    """Bound only derived features of immutable temporary candidate images."""
+
+    def __init__(self, max_bytes: int = 8 * 1024 * 1024):
+        self.max_bytes = max_bytes
+        self.size = 0
+        self.values: OrderedDict[tuple[str, Path], np.ndarray] = OrderedDict()
+
+    def get(self, key: tuple[str, Path]) -> np.ndarray | None:
+        value = self.values.get(key)
+        if value is not None:
+            self.values.move_to_end(key)
+        return value
+
+    def put(self, key: tuple[str, Path], value: np.ndarray) -> None:
+        # Views can retain a larger backing array; cache an owned copy so the
+        # byte limit reflects the actual retained pixel storage.
+        value = value.copy()
+        if value.nbytes > self.max_bytes:
+            return
+        while self.values and (
+            self.size + value.nbytes > self.max_bytes or len(self.values) >= 1024
+        ):
+            _, removed = self.values.popitem(last=False)
+            self.size -= removed.nbytes
+        value.setflags(write=False)
+        self.values[key] = value
+        self.size += value.nbytes
+
+
+_frame_features: ContextVar[_FrameFeatureCache | None] = ContextVar(
+    "frame_features", default=None
+)
+
+
+@contextmanager
+def _cached_frame_features():
+    # A cache never survives one extraction or crosses worker threads. Source
+    # files may be replaced between runs; no stat/hash assumptions are needed.
+    token = _frame_features.set(_FrameFeatureCache())
+    try:
+        yield
+    finally:
+        _frame_features.reset(token)
+
+
+def _cache_frame_feature(fn):
+    @wraps(fn)
+    def cached(path: Path) -> np.ndarray:
+        check_preparation()
+        cache = _frame_features.get()
+        if cache is None:
+            return fn(path)
+        key = (fn.__name__, path)
+        value = cache.get(key)
+        if value is None:
+            value = fn(path)
+            cache.put(key, value)
+        return value
+    return cached
 
 
 @dataclass(frozen=True)
@@ -296,6 +362,7 @@ def _extract_at(
     return output.is_file()
 
 
+@_cache_frame_feature
 def _signature(path: Path) -> np.ndarray:
     check_preparation()
     from PIL import Image
@@ -305,6 +372,7 @@ def _signature(path: Path) -> np.ndarray:
     return array[12:154, :]
 
 
+@_cache_frame_feature
 def _layout_signature(path: Path) -> np.ndarray:
     check_preparation()
     from PIL import Image, ImageFilter
@@ -315,6 +383,7 @@ def _layout_signature(path: Path) -> np.ndarray:
     return array[2:-1, :]
 
 
+@_cache_frame_feature
 def _assistant_shell_signature(path: Path) -> np.ndarray:
     check_preparation()
     from PIL import Image, ImageFilter
@@ -970,6 +1039,7 @@ def extract_scene_keyframes(
     sample_fps: float = 1.0,
     config: KeyframeConfig | None = None,
     algorithm_version: str = KEYFRAME_ALGORITHM_VERSION,
+    duration: float | None = None,
 ) -> list[Path]:
     """抽取录屏关键帧并返回有序图片路径。
 
@@ -995,7 +1065,12 @@ def extract_scene_keyframes(
         or task_end_time is not None
     ):
         raise ValueError("传入 config 时不能再单独传任务起止时间")
-    duration = probe_duration(video)
+    # Session preparation already probes the exact input before validating its
+    # task window. Reuse that value instead of launching a second ffprobe.
+    if duration is None:
+        duration = probe_duration(video)
+    elif isinstance(duration, bool) or not isinstance(duration, Real) or not math.isfinite(duration):
+        raise ValueError("duration 必须是有限数字")
     if duration <= 0:
         return []
 
@@ -1006,12 +1081,13 @@ def extract_scene_keyframes(
     metadata_path.unlink(missing_ok=True)
 
     with tempfile.TemporaryDirectory(prefix="ae_kf_candidates_") as temp_dir:
-        selected, removed, effective_task_end, confidence = _hybrid_keyframes(
-            video,
-            Path(temp_dir),
-            config,
-            duration,
-        )
+        with _cached_frame_features():
+            selected, removed, effective_task_end, confidence = _hybrid_keyframes(
+                video,
+                Path(temp_dir),
+                config,
+                duration,
+            )
         frames: list[Path] = []
         records: list[dict] = []
         for index, candidate in enumerate(selected, start=1):

@@ -31,6 +31,7 @@ createApp({
       evaluationProfiles.value.filter((profile) => (profile.modes || []).includes("compare"))
     );
     const concurrency = ref(4);
+    const mediaConcurrency = ref(4);
     const requestPacing = computed(() => {
       const selected = judges.value.filter((j) => selectedJudges.value.includes(j.name));
       return selected.length > 0 && selected.every((j) => j.request_pacing);
@@ -207,6 +208,17 @@ createApp({
     });
 
     const progressResultByIndex = computed(() => new Map(results.value.map((entry) => [entry.index, entry])));
+    const timingReceipts = new WeakMap();
+    function receiveProgress(rows) {
+      return Object.fromEntries(Object.entries(rows || {}).map(([key, row]) => [key, {
+        ...row, ...(row.timings ? { timings: { ...row.timings, _received_at: Date.now() } } : {}),
+      }]));
+    }
+    function timingLiveExtra(timings, live) {
+      if (!timings || !live || timings.finished || !timings.active_stage) return 0;
+      if (!timingReceipts.has(timings)) timingReceipts.set(timings, timings._received_at ?? Date.now());
+      return Math.max(0, (clockNow.value - timingReceipts.get(timings)) / 1000);
+    }
     const progressPageCount = computed(() => Math.max(1, Math.ceil(items.value.length / pageSize)));
     const pagedProgressRows = computed(() => {
       const page = Math.min(progressPage.value, progressPageCount.value);
@@ -219,8 +231,11 @@ createApp({
         const startedAt = Number(current.started_at || 0);
         const terminal = ["done", "error"].includes(current.status);
         const finishedAt = Number(current.finished_at || (terminal && Date.parse(current.updated_at || "")) || 0);
-        const resultElapsed = Number(result?.latency_s);
-        const elapsedSeconds = startedAt > 0
+        const resultElapsed = Number(result?.total_s ?? result?.latency_s);
+        const timings = terminal && result?.timings ? result.timings : current.timings || result?.timings;
+        const elapsedSeconds = timings && (timings.active_stage || timings.finished)
+          ? timings.total_s + timingLiveExtra(timings, !terminal)
+          : startedAt > 0
           ? Math.max(0, ((finishedAt || clockNow.value) - startedAt) / 1000)
           : (!current.status || terminal) && Number.isFinite(resultElapsed) ? resultElapsed : null;
         return {
@@ -236,6 +251,7 @@ createApp({
           round: Number(current.round || 0),
           stageRank: current.stage_rank ?? progressStageRank(current),
           elapsedSeconds,
+          timings,
           events,
           latestEvents: events.slice(-2),
         };
@@ -255,7 +271,7 @@ createApp({
       if (index == null) return;
       const existing = itemProgress.value[index] || {};
       if (incoming.sequence != null && existing.sequence != null && incoming.sequence <= existing.sequence) return;
-      appendProgressEvent(incoming);
+      if (!incoming.timing_update) appendProgressEvent(incoming);
       const newAttempt = incoming.request_id && incoming.request_id !== existing.request_id;
       const previous = newAttempt ? {} : existing;
       const previousRank = previous.stage_rank ?? progressStageRank(previous);
@@ -265,6 +281,7 @@ createApp({
       itemProgress.value[index] = {
         ...previous,
         ...incoming,
+        ...(incoming.timings ? { timings: { ...incoming.timings, _received_at: Date.now() } } : {}),
         // 同一次请求的阶段只前进；补跑使用新的 request_id 重新计时。
         stage_rank: incoming.status === "done"
           ? 4
@@ -398,6 +415,20 @@ createApp({
       return `${Math.floor(whole / 60)}m ${String(whole % 60).padStart(2, "0")}s`;
     }
 
+    function timingStageLabel(stage) {
+      return ({ media: "图片 / 视频处理", media_queue: "等待媒体处理", request_wait: "等待调用额度",
+        model: "模型与网络传输", retry_wait: "重试等待", other: "其他处理" })[stage] || "";
+    }
+
+    function timingEntries(timings, live = false) {
+      if (!timings) return [];
+      const extra = timingLiveExtra(timings, live);
+      return ["media_queue", "media", "request_wait", "model", "retry_wait", "other"].map(stage => ({
+        key: stage, label: timingStageLabel(stage),
+        seconds: Number(timings[`${stage}_s`] || 0) + (stage === timings.active_stage ? extra : 0),
+      }));
+    }
+
     function shortRequestId(requestId) {
       if (!requestId) return "等待生成";
       return requestId.length > 12 ? `…${requestId.slice(-11)}` : requestId;
@@ -462,7 +493,7 @@ createApp({
           { key: "has_conflict", label: "内容冲突" },
           { key: "needs_human_review", label: "需人工复核" },
           { key: "rationale", label: "理由" },
-          { key: "latency_s", label: "耗时" },
+          { key: "latency_s", label: "总耗时" },
         ];
       // rich_content（默认）
       return [
@@ -489,11 +520,12 @@ createApp({
         { key: "problem_solved_reason", label: "评价原因" },
         { key: "answer_issues", label: "回答内容问题" },
         { key: "rationale", label: "识别结论" },
-        { key: "latency_s", label: "耗时" },
+        { key: "latency_s", label: "总耗时" },
       ];
     });
 
     function columnWidth(c) {
+      if (c.key === "latency_s") return 120;
       const compact = [
         "latency_s", "card_presence", "card_count", "superlink_presence",
         "superlink_count", "answer_coverage", "needs_review", "problem_solved",
@@ -1073,7 +1105,7 @@ createApp({
       results.value = snapshotResults;
       refreshEvidence(snapshotResults);
       progress.value = snapshotResults.length;
-      itemProgress.value = reconciled;
+      itemProgress.value = receiveProgress(reconciled);
       if (snapshot?.summary) summary.value = snapshot.summary;
       return true;
     }
@@ -1094,7 +1126,7 @@ createApp({
         // 一次恢复结果和当前进度，旧结果不能覆盖正在补跑的状态。
         results.value = data.results || [];
         refreshEvidence(results.value);
-        itemProgress.value = data.item_progress || {};
+        itemProgress.value = receiveProgress(data.item_progress);
         progressEvents.value = {};
         progress.value = data.progress;
         repairStatus.value = data.repair_status || "idle";
@@ -1237,7 +1269,7 @@ createApp({
     function cell(r, c) {
       const v = r[c.key];
       if (c.key === "category") return r.category_display || (!v || v === "default" ? "通用" : v);
-      if (c.key === "latency_s") return v != null ? v + "秒" : "";
+      if (c.key === "latency_s") return r.total_s != null ? r.total_s + "秒" : v != null ? v + "秒（旧记录）" : "";
       if (["input_status_summary", "response_gate_summary", "safety_gate_summary"].includes(c.key)) {
         const field = c.key.replace("_summary", "");
         const labels = { complete: "完整", partial: "不完整", failed: "失败", pass: "通过", fail: "失败", unclear: "不清楚" };
@@ -1538,7 +1570,7 @@ createApp({
         modalityFilter.value = "";
         results.value = d.results || [];
         refreshEvidence(results.value);
-        itemProgress.value = d.item_progress || {};
+        itemProgress.value = receiveProgress(d.item_progress);
         restoreProgressEvents(d.progress_events);
         expandedProgressLogs.value = {};
         summary.value = d.summary || null;
@@ -1644,6 +1676,7 @@ createApp({
       const r = await fetch("/api/config");
       const d = await r.json();
       judges.value = d.judges || [];
+      mediaConcurrency.value = d.media_concurrency || 4;
       evaluationProfiles.value = d.evaluation_profiles || [];
       selectedEvaluationProfile.value = defaultEvaluationProfile();
       selectedJudges.value = defaultJudgeSelection();
@@ -1667,7 +1700,7 @@ createApp({
       modes, mode, modeLabel, isVideoMode, items, errors, judges, visibleJudges, selectedJudges, datasetName,
       datasetSourceTaskId, datasetRevision, useComparisonDataset,
       evaluationProfiles, compareProfiles, selectedEvaluationProfile, evaluationProfileLabel,
-      concurrency, requestPacing, evalTimeout, submitting, running, progress, total, results, summary, taskId, runError,
+      concurrency, mediaConcurrency, requestPacing, evalTimeout, submitting, running, progress, total, results, summary, taskId, runError,
       pacingStatus, pacingError, pacingNumber, pacingWaitLabel, pacingLimitLabel,
       queueState, queueEntries, selectedTaskStatus, queueNotice, taskStatusLabel, queueKindLabel,
       repairStatus, retryStatusLabel, retrySubmitting, selectedRetryIndexes, activeRetry,
@@ -1690,7 +1723,7 @@ createApp({
       changeProgressPage, changeOpPage, changeResultPageSize, paginationPages, setTablePage, jumpTablePage,
       progressStageClass, progressDisplay, progressStageLabel, progressStatusClass,
       progressMeta, formatProgressEventTime, progressEventMeta, progressEventMessage, scrollProgressLog,
-      formatProgressElapsed, shortRequestId, copyRequestId,
+      formatProgressElapsed, timingEntries, timingStageLabel, shortRequestId, copyRequestId,
       cellTooltip, showCellTooltip, scheduleHideCellTooltip, keepCellTooltip, hideCellTooltip,
     };
   },

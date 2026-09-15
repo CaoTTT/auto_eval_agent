@@ -19,6 +19,7 @@ dependencies = [
     "python-dotenv>=1.0",
     "numpy>=1.24",
     "pillow>=10.0",
+    "tokenizers>=0.22,<0.23",
 ]
 
 [project.optional-dependencies]
@@ -27,6 +28,9 @@ web = ["fastapi>=0.110", "uvicorn>=0.27", "python-multipart>=0.0.9"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+auto_eval = ["tokenizer_data/*.gz", "tokenizer_data/*.txt", "tokenizer_data/*.md"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

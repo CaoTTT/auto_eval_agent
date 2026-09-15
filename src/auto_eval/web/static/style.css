@@ -110,7 +110,7 @@ button.btn-danger:hover:not(:disabled) { background: #fef2f2; }
 .progress-col-index { width: 58px; }
 .progress-col-query { width: 300px; }
 .progress-col-status { width: 520px; }
-.progress-col-elapsed { width: 76px; }
+.progress-col-elapsed { width: 126px; }
 .progress-col-request { width: 168px; }
 .progress-index { color: #374151; text-align: center !important; }
 .progress-index strong, .progress-index small { display: block; }
@@ -370,3 +370,11 @@ tr.result-error td, tr.result-error-detail td { background: #fef2f2 !important; 
 .request-pacing-metrics dd { margin: 4px 0 0; color: #1e3a5f; font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .request-pacing-panel .hint { margin-bottom: 0; }
 .request-pacing-hint { max-width: 1050px; line-height: 1.7; }
+.timing-active { display: block; color: #64748b; font: 11px/1.6 "Microsoft YaHei", sans-serif; white-space: normal; }
+.timing-details { position: relative; margin-top: 5px; font: 12px/1.6 "Microsoft YaHei", sans-serif; color: #334155; text-align: left; white-space: normal; }
+.timing-details summary { cursor: pointer; color: #2563eb; white-space: nowrap; }
+.timing-details dl { margin: 6px 0 0; padding: 7px; border: 1px solid #cbd5e1; border-radius: 6px; background: #f8fafc; }
+.timing-details dt { color: #64748b; font-size: 10px; white-space: normal; }
+.timing-details dd { margin: 0 0 5px; color: #0f172a; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.timing-details dd:last-child { margin-bottom: 0; }
+.timing-help { margin: 8px 0; }

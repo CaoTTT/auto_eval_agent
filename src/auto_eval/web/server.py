@@ -51,7 +51,7 @@ from .video_prepare import (
     operation_video_roots,
     resolve_operation_video_path,
 )
-from .runner import run_eval, run_retry, run_update_batch, spawn_background
+from .runner import run_eval, run_retry, run_update_batch, spawn_background, snapshot_item_progress
 from .scheduler import EvalScheduler
 from .exports import XlsxExports, xlsx_download_name
 from .dataset_media import DatasetMedia
@@ -246,9 +246,11 @@ def _validate_batch_item_ids(items: list[dict]) -> None:
 @app.get("/api/config")
 def api_config():
     from ..request_throttle import recommended_concurrency, supports_bailian_pacing
+    from ..preparation import preparation_concurrency
 
     c = cfg()
     return {
+        "media_concurrency": preparation_concurrency(),
         "judges": [
             {"name": j.name, "display": j.display or j.name,
              "recommended_concurrency": recommended_concurrency([j]),
@@ -741,7 +743,7 @@ async def api_stream(task_id: str, compact: bool = False):
                 histories = [(key, list(events)) for key, events in task.progress_events.items()]
                 yield _sse("replay_state", {
                     "results": list(task.results),
-                    "item_progress": dict(task.item_progress),
+                    "item_progress": snapshot_item_progress(task),
                     "progress": task.done_total,
                     "total": len(task.items),
                     "repair_status": task.repair_status,
@@ -756,7 +758,7 @@ async def api_stream(task_id: str, compact: bool = False):
                 for progress_event in list(item_events):
                     yield _sse("progress_event", progress_event)
             # 回放每题最新进度，断线重连后能立即恢复当前阶段。
-            for progress_item in ([] if compact else list(task.item_progress.values())):
+            for progress_item in ([] if compact else list(snapshot_item_progress(task).values())):
                 yield _sse("item_progress", progress_item)
             # 先回放已有结果（断线重连不丢已完成的）
             for r in ([] if compact else list(task.results)):
@@ -892,7 +894,9 @@ def api_history_detail(task_id: str):
     task = peek_task(task_id, touch=False)
     if not task:
         raise HTTPException(404, "task not found")
-    return snapshot_payload(task_to_snapshot(task))
+    snapshot = task_to_snapshot(task)
+    snapshot["item_progress"] = snapshot_item_progress(task)
+    return snapshot_payload(snapshot)
 
 
 @app.delete("/api/history/{task_id}")

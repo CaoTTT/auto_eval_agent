@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <title>auto_eval 评估台</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260915_request_pacing">
+  <link rel="stylesheet" href="/static/style.css?v=20260915_stage_timings">
   <style>
     .op-cards { display:flex; flex-direction:column; gap:12px; }
     .op-card { border:1px solid #e2e8f0; border-radius:8px; padding:12px; background:#fafbfc; }
@@ -71,7 +71,7 @@
         <div><dt>当前等待</dt><dd>{{ pacingWaitLabel(pacingStatus.wait_reason) }}<template v-if="pacingStatus.cooldown_remaining > 0"> · {{ pacingNumber(pacingStatus.cooldown_remaining, 1) }} 秒</template></dd></div>
       </dl>
       <p class="hint">最近限流类型：{{ pacingLimitLabel(pacingStatus.last_limit_kind) }}。{{ pacingStatus.high_utilization_enabled ? '管理员已允许健康升速，最高 9 次/秒、90 万 Token/分钟。' : '默认目标最高 8 次/秒、80 万 Token/分钟。' }}等待时间、请求大小与冷却会降低实际发送速度。</p>
-      <p class="hint">统计范围为当前进程及事件循环的纳管请求；其他服务进程或程序的账号用量不包含在内。Token 为估算与 usage 结算合计。</p>
+      <p class="hint">统计范围为当前进程及事件循环的纳管请求；其他服务进程或程序的账号用量不包含在内。Token 为输入估算、输出预留与 usage 结算合计；已确认送达的输入计入 60 秒窗口，输出保留至返回后结算。</p>
     </div>
     <p v-if="pacingError" class="hint" role="status">{{ pacingError }}</p>
   </section>
@@ -213,11 +213,12 @@
     <div class="row">
       <label class="lbl" for="case-concurrency">Case 容量：</label>
       <input id="case-concurrency" type="number" min="1" max="128" v-model.number="concurrency" aria-describedby="case-capacity-help" style="width:70px">
-      <span id="case-capacity-help" class="hint">1–128 条同时处理，包含等待模型响应的 Case<template v-if="requestPacing">；媒体同时处理最多 4 条</template>。</span>
+      <span id="case-capacity-help" class="hint">1–128 条同时处理，包含等待模型响应的 Case<template v-if="requestPacing">；媒体同时处理最多 {{ mediaConcurrency }} 条</template>。</span>
     </div>
     <details class="hint request-pacing-hint" id="case-capacity-details">
       <summary>并发容量与限速说明</summary>
       <p>128 是平台预留的工程容量上限，用于重叠长响应的等待时间并控制资源占用；它不是官方并发配额，也不是压测得出的最优值。可按本机资源调低，提高容量不会提高发送额度。</p>
+      <p v-if="requestPacing">媒体处理指视频抽帧、长截图切片、图片压缩与编码，会占用 CPU、内存和磁盘；当前同时处理上限为 {{ mediaConcurrency }}，由管理员按服务器资源调整。处理完成即可发送模型请求，不占用媒体槽位等待响应。</p>
       <p v-if="requestPacing">百炼平滑发送：任意连续 1 秒最多启动 9 次请求；默认初始目标 8 次/秒、480 次/分钟、预估 80 万 Token/分钟。提高 Case 容量不会提高发送上限；9 次/秒、90 万 Token/分钟的健康升速仅由管理员启用。</p>
       <p v-else>当前选择不全部适用百炼自动限流，请根据模型服务额度设置 Case 容量。</p>
       <p><strong>容量估算：</strong>同时等待响应的请求数 ≈ 实际每秒发送数 × 平均响应秒数。例如每秒 1.5 次、30 秒返回，约 45 条请求同时等待。Case 还包含媒体准备、多轮和重试，128 为这些等待预留空间，实际容量可调低。</p>
@@ -254,7 +255,7 @@
           <col class="progress-col-request">
         </colgroup>
         <thead>
-          <tr><th>#</th><th>Query</th><th>当前状态</th><th>耗时</th><th>请求 ID</th></tr>
+          <tr><th>#</th><th>Query</th><th>当前状态</th><th>总耗时</th><th>请求 ID</th></tr>
         </thead>
         <tbody>
           <tr v-for="row in pagedProgressRows" :key="'progress-'+row.index" :class="{'progress-error':row.status==='error'}">
@@ -301,7 +302,14 @@
               </div>
               <div v-else class="progress-message" :title="row.message">{{ row.message }}</div>
             </td>
-            <td class="progress-elapsed">{{ formatProgressElapsed(row.elapsedSeconds, row.status) }}</td>
+            <td class="progress-elapsed">
+              {{ formatProgressElapsed(row.elapsedSeconds, row.status) }}
+              <small v-if="row.timings && !row.timings.finished" class="timing-active">{{ timingStageLabel(row.timings.active_stage) }}</small>
+              <details v-if="row.timings" class="timing-details">
+                <summary>耗时分解</summary>
+                <dl><template v-for="entry in timingEntries(row.timings, !['done', 'error'].includes(row.status))" :key="entry.key"><dt>{{ entry.label }}</dt><dd>{{ entry.seconds.toFixed(1) }} 秒</dd></template><dt>已发送调用</dt><dd>{{ row.timings.attempts }} 次</dd></dl>
+              </details>
+            </td>
             <td class="progress-request-id" :title="row.requestId || '等待生成'">
               <span>{{ shortRequestId(row.requestId) }}</span>
               <button v-if="row.requestId" class="copy-id" title="复制完整请求 ID" @click="copyRequestId(row.requestId)">复制</button>
@@ -310,6 +318,7 @@
         </tbody>
       </table>
     </div>
+    <p class="hint timing-help">总耗时从开始处理本题计起，包含媒体处理、额度排队及全部调用；不含等待 Case 容量。模型与网络传输时间包含连接、上传及接收响应。旧记录仅保留原计时。</p>
     <div class="pagination" v-if="progressPageCount>1">
       <button @click="changeProgressPage(-1)" :disabled="progressPage<=1">上一页</button>
       <template v-for="page in paginationPages(progressPage, progressPageCount)" :key="'progress-page-'+page">
@@ -408,13 +417,17 @@
                 <td
                   v-for="c in resultCols"
                   :key="c.key"
-                  @mouseenter="showCellTooltip($event, cell(r, c))"
+                  @mouseenter="c.key !== 'latency_s' && showCellTooltip($event, cell(r, c))"
                   @mouseleave="scheduleHideCellTooltip"
                 >
                   <div
                     class="cell-clamp"
                     :class="{'cell-center': ['card_presence','superlink_presence','card_count','superlink_count','answer_coverage','needs_review','problem_solved','card_suitability','superlink_suitability','has_conflict','relevance','safety','content_quality','need_closure','personalization','latency_s'].includes(c.key)}"
                   >{{ cell(r, c) }}</div>
+                  <details v-if="c.key === 'latency_s' && r.timings" class="timing-details">
+                    <summary>耗时分解</summary>
+                    <dl><template v-for="entry in timingEntries(r.timings)" :key="entry.key"><dt>{{ entry.label }}</dt><dd>{{ entry.seconds.toFixed(1) }} 秒</dd></template><dt>已发送调用</dt><dd>{{ r.timings.attempts }} 次</dd></dl>
+                  </details>
                 </td>
                 <td v-if="isVideoMode" class="row-export-cell">
                   <a v-if="itemArtifactUrl(r, 'video')" :href="itemArtifactUrl(r, 'video')" class="row-export-link">下载</a>
@@ -484,6 +497,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20260915_request_pacing"></script>
+  <script type="module" src="/static/app.js?v=20260915_stage_timings"></script>
 </body>
 </html>

@@ -9,13 +9,15 @@ import os
 import time
 import traceback
 from collections.abc import Awaitable, Callable
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
 from ..paths import RUNS_DIR
-from ..preparation import PreparationLimiter, run_preparation, preparation_limit
+from ..preparation import PreparationLimiter, run_preparation, preparation_limit, preparation_concurrency
+from ..timing import StageTimings, collect_timings, timing_span
 from ..request_throttle import (
-    PREPARATION_CONCURRENCY, recommended_concurrency, supports_bailian_pacing,
+    recommended_concurrency, supports_bailian_pacing,
     wait_for_active, SECOND_REQUEST_LIMIT,
 )
 from ..config import AppConfig, VisualModeProfile
@@ -76,6 +78,28 @@ _PERSIST_DEBOUNCE_S = float(os.environ.get("AUTO_EVAL_PERSIST_DEBOUNCE_S", "2.0"
 _PERSIST_FORCE_EVERY_N = 20
 _pending_flush: dict[str, asyncio.TimerHandle] = {}
 _unpersisted: dict[str, int] = {}
+_live_timings: dict[tuple[str, int], tuple[str, StageTimings]] = {}
+
+
+@contextmanager
+def _track_live_timings(task_id: str, item_index: int, request_id: str, timings: StageTimings):
+    key, entry = (task_id, item_index), (request_id, timings)
+    _live_timings[key] = entry
+    try:
+        yield
+    finally:
+        if _live_timings.get(key) is entry:
+            del _live_timings[key]
+
+
+def snapshot_item_progress(task: Task) -> dict[str, dict]:
+    """Refresh live durations on reconnect/read, without timers or history writes."""
+    progress = dict(task.item_progress)
+    for key, row in progress.items():
+        active = _live_timings.get((task.id, int(key)))
+        if active is not None and active[0] == row.get("request_id"):
+            progress[key] = {**row, "timings": active[1].snapshot()}
+    return progress
 
 
 def _flush_now(task: Task) -> asyncio.Future | None:
@@ -127,16 +151,17 @@ def _record_progress(task: Task, item_index: int, payload: dict) -> dict:
     """Store one bounded Web projection of the same structured log event."""
     key = str(item_index)
     events = task.progress_events.setdefault(key, [])
-    sequence = int(events[-1].get("sequence", 0)) + 1 if events else 1
-    event_payload = {**payload, "sequence": sequence}
     previous = task.item_progress.get(key) or {}
+    sequence = max(int(previous.get("sequence", 0)), int(events[-1].get("sequence", 0)) if events else 0) + 1
+    event_payload = {**payload, "sequence": sequence}
     if (
         "started_at" not in event_payload
         and previous.get("started_at") is not None
         and event_payload.get("request_id") == previous.get("request_id")
     ):
         event_payload["started_at"] = previous["started_at"]
-    events.append(event_payload)
+    if not event_payload.get("timing_update"):
+        events.append(event_payload)
     if len(events) > MAX_PROGRESS_EVENTS_PER_ITEM:
         del events[:-MAX_PROGRESS_EVENTS_PER_ITEM]
     task.item_progress[key] = event_payload
@@ -279,10 +304,11 @@ def _make_item_evaluator(
     category_display = rich_profile.category_display if rich_profile else {}
     capacity = max(1, min(128, int(runtime_options.get("concurrency", recommended_concurrency(judges_cfg)))))
     sem = asyncio.Semaphore(capacity)
-    media_sem = PreparationLimiter(PREPARATION_CONCURRENCY) if any(supports_bailian_pacing(j) for j in judges_cfg) else None
+    media_capacity = preparation_concurrency()
+    media_sem = PreparationLimiter(media_capacity) if any(supports_bailian_pacing(j) for j in judges_cfg) else None
     if media_sem is not None:
         log_event("请求调度", "启用百炼平滑调度", details={
-            "Case容量": capacity, "媒体并发": PREPARATION_CONCURRENCY,
+            "Case容量": capacity, "媒体并发": media_capacity,
             "连续1秒请求上限": SECOND_REQUEST_LIMIT,
             "RPM目标": 480, "TPM目标": 800_000,
         })
@@ -322,6 +348,7 @@ def _make_item_evaluator(
         pending_judge_traces: list[tuple[str, dict]] = []
 
         def publish_progress(payload: dict) -> None:
+            payload = {**payload, "timings": timings.snapshot()}
             def apply() -> None:
                 _record_progress(task, idx, payload)
             try:
@@ -337,6 +364,23 @@ def _make_item_evaluator(
         def collect_judge_trace(trace_path: str, record: dict) -> None:
             pending_judge_traces.append((trace_path, record))
 
+        def publish_timings(snapshot: dict) -> None:
+            def apply() -> None:
+                previous = task.item_progress.get(str(idx)) or {}
+                if previous.get("request_id") != request_id:
+                    return
+                _record_progress(task, idx, {
+                    **previous, "timings": snapshot, "timing_update": True,
+                })
+            try:
+                if asyncio.get_running_loop() is loop:
+                    apply()
+                else:
+                    loop.call_soon_threadsafe(apply)
+            except RuntimeError:
+                loop.call_soon_threadsafe(apply)
+
+        timings = StageTimings(started=False, on_change=publish_timings)
         with bind_chain_context(
             task_id=task.id,
             session_name=task.session_name,
@@ -345,7 +389,7 @@ def _make_item_evaluator(
             item_index=idx,
             progress_callback=publish_progress,
             judge_trace_callback=collect_judge_trace,
-        ):
+        ), collect_timings(timings), _track_live_timings(task.id, idx, request_id, timings):
             log_event(
                 "任务",
                 "开始",
@@ -360,6 +404,7 @@ def _make_item_evaluator(
             async with sem:
                 # 排队时间不计入单题耗时；取得并发槽后才启动计时。
                 started = time.perf_counter()
+                timings.start()
                 log_event(
                     "任务",
                     "开始评测",
@@ -508,7 +553,8 @@ def _make_item_evaluator(
                                 },
                             )
                             if will_retry:
-                                await asyncio.sleep(1.0)
+                                with timing_span("retry_wait"):
+                                    await asyncio.sleep(1.0)
                                 continue
                             break
                 if res is None:
@@ -556,6 +602,8 @@ def _make_item_evaluator(
                     pending_judge_traces,
                     res,
                 )
+            res["timings"] = timings.finish()
+            res["total_s"] = res["timings"]["total_s"]
             await finish(idx, res, started)
             return res
 
@@ -1110,7 +1158,7 @@ async def _eval_one(
     out["category_display"] = (category_display or {}).get(item.category) or (
         item.category if item.category != "default" else "通用"
     )
-    out["latency_s"] = round(time.perf_counter() - t0, 1)  # 该题评测总耗时（秒）
+    out["latency_s"] = round(time.perf_counter() - t0, 1)  # 保留旧口径；含前置媒体准备的总耗时见 total_s。
     return out
 
 

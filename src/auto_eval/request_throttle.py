@@ -6,22 +6,21 @@ Every HTTP attempt, including repair and compatibility retries, uses this gate.
 from __future__ import annotations
 
 import asyncio
-import base64
-import io
 import math
 import os
 import random
 import time
 from collections import deque
+from collections.abc import Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlparse
 
-from PIL import Image
-
 from .observability import log_event
+from .token_estimation import estimate_input_tokens
+from .timing import timing_span
 
 
 MODEL = "qwen3.5-397b-a17b"
@@ -113,35 +112,6 @@ async def wait_for_active(awaitable, timeout: float):
         await asyncio.gather(task, *([signal] if signal else []), return_exceptions=True)
 
 
-def estimate_input_tokens(kwargs: dict) -> int:
-    """Local conservative proxy; never count base64 characters as text tokens.
-
-    Image geometry follows the existing 32-pixel patch guardrail. Unknown remote
-    images reserve 16K tokens; no URL is fetched here and evidence is not changed.
-    """
-    count = 256
-    for message in kwargs.get("messages", []):
-        content = message.get("content") or ""
-        if isinstance(content, str):
-            count += len(content.encode("utf-8"))
-            continue
-        for part in content:
-            if part.get("type") == "text":
-                count += len(part.get("text", "").encode("utf-8"))
-            elif part.get("type") == "image_url":
-                url = (part.get("image_url") or {}).get("url", "")
-                try:
-                    if not url.startswith("data:image/"):
-                        raise ValueError("remote image")
-                    # Only inspect the header; do not decode pixels or rescale.
-                    with Image.open(io.BytesIO(base64.b64decode(url.split(",", 1)[1]))) as picture:
-                        width, height = picture.size
-                    count += math.ceil(width / 32) * math.ceil(height / 32) + 256
-                except (ValueError, OSError):
-                    count += 16_384
-    return count
-
-
 @dataclass
 class Reservation:
     sent: float
@@ -152,6 +122,10 @@ class Reservation:
     owner: object | None = None
     interval: float = 0.0
     headers_fenced: bool = False
+    initial_tokens: int = 0
+    input_tokens: int = 0
+    input_confirmed_at: float | None = None
+    input_charge: _TokenCharge | None = None
 
 
 @dataclass
@@ -163,8 +137,9 @@ class _TokenCharge:
 class RequestThrottle:
     """A process/event-loop budget, called at the actual HTTP dispatch boundary.
 
-    Request timestamps and token charges have independent lifetimes. Unfinished
-    requests keep their reservation even after a minute. This is not a distributed
+    Request timestamps and token charges have independent lifetimes. Confirmed
+    input keeps a 60-second window; output stays reserved until completion. Input
+    without a server acknowledgement stays reserved too. This is not a distributed
     account limiter: all managed sends must use this controller and event loop.
     """
 
@@ -224,6 +199,7 @@ class RequestThrottle:
         self._healthy_successes = 0
         self._latencies: deque[float] = deque(maxlen=60)
         self._output_estimates = {"text": 8192.0, "vision": 8192.0}
+        self._output_samples = {kind: deque(maxlen=20) for kind in ("text", "vision")}
         self._input_scale = {"text": 1.0, "vision": 1.0}
 
     @property
@@ -232,9 +208,12 @@ class RequestThrottle:
         return self._target_rpm / self.rpm
 
     def estimate(self, input_tokens: int, kind: str = "text") -> int:
+        return self.estimate_input(input_tokens, kind) + math.ceil(self._output_estimates[kind])
+
+    def estimate_input(self, input_tokens: int, kind: str = "text") -> int:
         if kind not in self._input_scale:
             raise ValueError("kind must be text or vision")
-        return math.ceil(input_tokens * self._input_scale[kind] + self._output_estimates[kind])
+        return math.ceil(input_tokens * self._input_scale[kind])
 
     def _prune(self, now: float):
         # Strict boundary: an attempt exactly one second old still counts.
@@ -345,32 +324,34 @@ class RequestThrottle:
         self._begin_waiting()
         self._wait_reasons["pacing"] = self._wait_reasons.get("pacing", 0) + 1
         try:
-            with admission_wait():
+            with admission_wait(), timing_span("request_wait"):
                 await self.dispatch_lock.acquire()
         finally:
             self._end_waiting()
             self._wait_reasons["pacing"] -= 1
 
-    async def wait_until_ready(self, tokens: int) -> None:
+    async def wait_until_ready(self, tokens: int | Callable[[], int]) -> None:
         """Wait before connecting, without reserving or counting an HTTP send.
 
         The transport holds dispatch_lock through this wait and the real header
         admission. Responses remain concurrent and can settle their reservations.
         The final acquire still rechecks every budget after pool/connect waits.
         """
-        if isinstance(tokens, bool) or not isinstance(tokens, int) or tokens <= 0:
-            raise ValueError("tokens must be a positive integer")
-        if tokens > self._ceiling_tpm:
-            raise ValueError(f"单次预估 {tokens} Token 超过本地每分钟预算 {self._ceiling_tpm}，请检查输入大小")
+        # A queued payload's estimate can shrink when earlier usage arrives.
+        # Re-evaluate after every wakeup instead of freezing an inflated estimate
+        # while holding the next connection turn.
+        estimate = tokens if callable(tokens) else lambda: tokens
         self._begin_waiting()
-        with admission_wait():
+        with admission_wait(), timing_span("request_wait"):
             try:
                 while True:
                     async with self._lock:
                         now = self._clock()
+                        current_tokens = estimate()
+                        self._validate_tokens(current_tokens)
                         self._prune(now)
                         self._maybe_recover(now)
-                        delay, reason = self._admission_delay(tokens, now)
+                        delay, reason = self._admission_delay(current_tokens, now)
                         if delay is not None and delay <= 0:
                             return
                         changed = self._changed
@@ -378,16 +359,23 @@ class RequestThrottle:
             finally:
                 self._end_waiting()
 
-    async def acquire(self, tokens: int, *, input_proxy: int = 0, kind: str = "text") -> Reservation:
+    def _validate_tokens(self, tokens: int) -> None:
         if isinstance(tokens, bool) or not isinstance(tokens, int) or tokens <= 0:
             raise ValueError("tokens must be a positive integer")
-        if kind not in self._input_scale:
-            raise ValueError("kind must be text or vision")
         if tokens > self._ceiling_tpm:
             raise ValueError(f"单次预估 {tokens} Token 超过本地每分钟预算 {self._ceiling_tpm}，请检查输入大小")
+
+    async def acquire(self, tokens: int, *, input_proxy: int = 0, kind: str = "text",
+                      input_tokens: int | None = None, reestimate: bool = False) -> Reservation:
+        self._validate_tokens(tokens)
+        if kind not in self._input_scale:
+            raise ValueError("kind must be text or vision")
+        if input_tokens is not None and (isinstance(input_tokens, bool)
+                or not isinstance(input_tokens, int) or not 0 <= input_tokens <= tokens):
+            raise ValueError("input_tokens must be an integer in 0..tokens")
         self._begin_waiting()
         slot = False
-        with admission_wait():
+        with admission_wait(), timing_span("request_wait"):
             try:
                 self._wait_reasons["inflight"] = self._wait_reasons.get("inflight", 0) + 1
                 try:
@@ -398,6 +386,11 @@ class RequestThrottle:
                 while True:
                     async with self._lock:
                         now = self._clock()
+                        if reestimate:
+                            tokens = self.estimate(input_proxy, kind)
+                            self._validate_tokens(tokens)
+                            if input_tokens is not None:
+                                input_tokens = min(tokens, self.estimate_input(input_proxy, kind))
                         self._prune(now)
                         self._maybe_recover(now)
                         delay, reason = self._admission_delay(tokens, now)
@@ -414,6 +407,8 @@ class RequestThrottle:
                             self._next_send = now + interval + DISPATCH_GUARD_S
                             self._last_send = now
                             record = Reservation(now, tokens, input_proxy, kind, owner=self)
+                            record.initial_tokens = tokens
+                            record.input_tokens = input_tokens or 0
                             record.interval = interval + DISPATCH_GUARD_S
                             self._records.append(record)
                             self._outstanding[id(record)] = record
@@ -457,6 +452,26 @@ class RequestThrottle:
         self._last_send = now
         self._prune(now)
         self._peak_second = max(self._peak_second, len(self._requests_second))
+        self._notify()
+
+    def confirm_input(self, record: Reservation) -> None:
+        """Start input's minute window only once the server acknowledges it.
+
+        Bailian pre-debits input on receipt and settles output at completion.
+        Using successful response headers is later than receipt and therefore
+        conservative. Slow output must not retain old input for its full lifetime.
+        No-acknowledgement requests retain the complete reservation.
+        """
+        if record.owner is not self:
+            raise ValueError("reservation belongs to a different controller")
+        if record.finished or record.input_confirmed_at is not None or not record.input_tokens:
+            return
+        now = self._clock()
+        record.input_confirmed_at = now
+        record.input_charge = _TokenCharge(now, record.input_tokens)
+        record.tokens -= record.input_tokens
+        self._records.append(record.input_charge)
+        self._prune(now)
         self._notify()
 
     @staticmethod
@@ -555,11 +570,13 @@ class RequestThrottle:
             total = value("total_tokens")
             if total is None and prompt is not None and completion is not None:
                 total = prompt + completion
-            self._records = deque(item for item in self._records if item is not record)
+            self._records = deque(item for item in self._records
+                                  if item is not record and item is not record.input_charge)
             if total is not None:
                 if prompt is not None and completion is not None:
                     # Input is sent once; output can be generated much later.
-                    self._records.append(_TokenCharge(record.sent, math.ceil(prompt)))
+                    input_at = record.input_confirmed_at if record.input_confirmed_at is not None else record.sent
+                    self._records.append(_TokenCharge(input_at, math.ceil(prompt)))
                     self._records.append(_TokenCharge(now, math.ceil(max(completion, total - prompt))))
                 else:
                     self._records.append(_TokenCharge(now, math.ceil(total)))
@@ -568,10 +585,16 @@ class RequestThrottle:
             else:
                 # No usage is not evidence of no server work. Keep the estimate
                 # for another minute after a disconnect, cancellation or error.
-                self._records.append(_TokenCharge(now, record.tokens))
+                self._records.append(_TokenCharge(now, record.initial_tokens or record.tokens))
             if completion is not None:
-                previous = self._output_estimates[record.kind]
-                self._output_estimates[record.kind] = max(1024, completion * 1.2, previous * .9 + completion * 1.2 * .1)
+                samples = self._output_samples[record.kind]
+                samples.append(completion)
+                # Wait for three observations before reducing the cold estimate;
+                # then retain the largest of the last 20 with 25% headroom. A
+                # large response increases it immediately. A 0.1 EWMA previously
+                # needed dozens of completed responses to free phantom output.
+                floor = 8192 if len(samples) < 3 else 1024
+                self._output_estimates[record.kind] = max(floor, max(samples) * 1.25)
             if prompt is not None and record.input_proxy:
                 observed = prompt / record.input_proxy * 1.2
                 previous = self._input_scale[record.kind]
@@ -591,6 +614,10 @@ class RequestThrottle:
         self._prune(now)
         reserved = sum(record.tokens for record in self._outstanding.values())
         used = sum(record.tokens for record in self._records if isinstance(record, _TokenCharge))
+        input_pending = sum(record.input_tokens for record in self._outstanding.values()
+                            if record.input_confirmed_at is None)
+        input_window = sum(record.input_charge.tokens for record in self._outstanding.values()
+                           if record.input_charge is not None and record.input_charge.sent >= now - 60)
         reasons = ("cooldown", "token_budget", "second_window", "minute_window", "inflight", "pacing")
         reason = next((name for name in reasons if self._wait_reasons.get(name, 0)), None)
         if self._pending and now < self._cooldown_until:
@@ -603,6 +630,8 @@ class RequestThrottle:
             "inflight": len(self._outstanding), "max_inflight": self._max_inflight,
             "inflight_limit": self._inflight_limit, "pending": self._pending,
             "reserved_tokens": reserved, "token_usage": used,
+            "input_pending_tokens": input_pending, "input_tokens_window": input_window,
+            "output_reserved_tokens": reserved - input_pending,
             "token_estimated_total": reserved + used, "token_budget": math.floor(self._target_tpm),
             "target_rps": self._target_rpm / 60, "request_budget": math.floor(self._target_rpm),
             "cooldown_remaining": max(0.0, self._cooldown_until - now),

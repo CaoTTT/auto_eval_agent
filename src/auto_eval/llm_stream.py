@@ -14,6 +14,7 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimi
 from .observability import current_context, error_details, log_event
 from .request_throttle import RequestThrottle, estimate_input_tokens, wait_for_active
 from .request_transport import HeaderAdmission, header_admission, paced_http_client
+from .timing import record_model_attempt, timing_span
 
 
 class StreamProtocolError(RuntimeError):
@@ -395,21 +396,25 @@ async def stream_chat_completion(
                     throttle.estimate(input_tokens, request_kind),
                     input_proxy=input_tokens, kind=request_kind,
                 )
+                record_model_attempt()
             request = {**kwargs, "extra_headers": {
                 "X-DashScope-Wait-Timeout": "30", **(kwargs.get("extra_headers") or {}),
             }}
         try:
             if admission is not None:
-                with header_admission(admission):
+                with header_admission(admission), timing_span("model"):
                     response, chunks, stats = await wait_for_active(
                         _collect_stream(client, request, include_usage=include_usage),
                         timeout=total_timeout_s,
                     )
             else:
-                response, chunks, stats = await asyncio.wait_for(
-                    _collect_stream(client, request, include_usage=include_usage),
-                    timeout=total_timeout_s,
-                )
+                if reservation is None:
+                    record_model_attempt()
+                with timing_span("model"):
+                    response, chunks, stats = await asyncio.wait_for(
+                        _collect_stream(client, request, include_usage=include_usage),
+                        timeout=total_timeout_s,
+                    )
             return response, chunks, stats
         except BaseException as exc:
             failure = exc
@@ -540,7 +545,8 @@ async def stream_chat_completion(
                 progress=40,
                 progress_message=f"{module}：调用失败，准备第{attempt + 2}次重试",
             )
-            await asyncio.sleep(wait)
+            with timing_span("retry_wait"):
+                await asyncio.sleep(wait)
 
     assert last_exc is not None
     raise last_exc

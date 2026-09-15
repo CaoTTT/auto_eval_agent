@@ -346,3 +346,123 @@ async def test_nested_active_deadlines_both_exclude_dispatch_wait():
     assert await wait_for_active(per_http(), .04) == "ok"
     with pytest.raises(asyncio.TimeoutError):
         await wait_for_active(wait_for_active(asyncio.sleep(.08), .02), .1)
+
+
+@pytest.mark.asyncio
+async def test_confirmed_input_expires_while_long_output_remains_reserved():
+    throttle, clock = limiter(tpm=100)
+    first = await throttle.acquire(100, input_tokens=80)
+    clock.now = 10
+    throttle.confirm_input(first)
+    throttle.confirm_input(first)
+    snapshot = throttle.snapshot()
+    assert snapshot["token_estimated_total"] == 100
+    assert snapshot["reserved_tokens"] == snapshot["output_reserved_tokens"] == 20
+    assert snapshot["input_tokens_window"] == 80
+    clock.now = 70
+    assert throttle.snapshot()["token_estimated_total"] == 100
+    clock.now = 70.001
+    assert throttle.snapshot()["token_estimated_total"] == 20
+    # This request can use the released minute budget before the first output
+    # completes; the old all-in-flight ledger would block indefinitely.
+    second = await throttle.acquire(80, input_tokens=60)
+    assert second.sent == 70.001
+    assert throttle.snapshot()["token_estimated_total"] == 100
+    throttle.finish(first, {"prompt_tokens": 80, "completion_tokens": 20})
+    throttle.finish(second, {"prompt_tokens": 60, "completion_tokens": 20})
+
+
+@pytest.mark.asyncio
+async def test_split_input_without_server_acknowledgement_does_not_expire():
+    throttle, clock = limiter()
+    first = await throttle.acquire(100, input_tokens=80)
+    clock.now = 1000
+    snapshot = throttle.snapshot()
+    assert snapshot["input_pending_tokens"] == 80
+    assert snapshot["reserved_tokens"] == 100
+    assert snapshot["input_tokens_window"] == 0
+    throttle.finish(first)
+
+
+@pytest.mark.asyncio
+async def test_confirmed_input_settlement_uses_ack_window_without_double_charge():
+    throttle, clock = limiter()
+    first = await throttle.acquire(100, input_tokens=80)
+    clock.now = 50
+    throttle.confirm_input(first)
+    clock.now = 70
+    throttle.finish(first, {"prompt_tokens": 70, "completion_tokens": 10})
+    assert throttle.snapshot()["token_estimated_total"] == 80
+    clock.now = 110.001
+    assert throttle.snapshot()["token_estimated_total"] == 10
+    clock.now = 130.001
+    assert throttle.snapshot()["token_estimated_total"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [RuntimeError("disconnect"), asyncio.CancelledError()])
+async def test_unknown_usage_restores_full_conservative_charge_after_input_expiry(error):
+    throttle, clock = limiter()
+    first = await throttle.acquire(100, input_tokens=80)
+    throttle.confirm_input(first)
+    clock.now = 90
+    assert throttle.snapshot()["token_estimated_total"] == 20
+    throttle.finish(first, error=error)
+    assert throttle.snapshot()["token_estimated_total"] == 100
+    assert throttle.snapshot()["inflight"] == 0
+    clock.now = 150.001
+    assert throttle.snapshot()["token_estimated_total"] == 0
+
+
+@pytest.mark.asyncio
+async def test_output_calibration_waits_for_evidence_then_keeps_recent_upper_envelope():
+    throttle, clock = limiter()
+    for index in range(3):
+        record = await throttle.acquire(1, kind="vision")
+        throttle.finish(record, {"prompt_tokens": 0, "completion_tokens": 1000})
+        assert throttle._output_estimates["vision"] == (8192 if index < 2 else 1250)
+    record = await throttle.acquire(1, kind="vision")
+    throttle.finish(record, {"prompt_tokens": 0, "completion_tokens": 10_000})
+    assert throttle._output_estimates["vision"] == 12_500
+    assert throttle._output_estimates["text"] == 8192
+    for _ in range(19):
+        record = await throttle.acquire(1, kind="vision")
+        throttle.finish(record, {"prompt_tokens": 0, "completion_tokens": 100})
+    assert throttle._output_estimates["vision"] == 12_500
+
+
+@pytest.mark.asyncio
+async def test_queued_preconnect_estimate_refreshes_after_usage_calibration():
+    throttle, clock = limiter(tpm=10_000)
+    held = await throttle.acquire(4000)
+    samples = [await throttle.acquire(1) for _ in range(3)]
+    clock.now = 10
+    waiting = asyncio.create_task(throttle.wait_until_ready(lambda: throttle.estimate(1000)))
+    await asyncio.sleep(0)
+    assert not waiting.done()  # 4000 + initial 9192 cannot fit.
+    for sample in samples:
+        throttle.finish(sample, {"prompt_tokens": 0, "completion_tokens": 100})
+    await asyncio.wait_for(waiting, .5)
+    assert throttle.estimate(1000) == 2024
+    assert throttle.snapshot()["total_requests"] == 4  # Readiness never counts sends.
+    throttle.finish(held)
+
+
+@pytest.mark.asyncio
+async def test_header_admission_refreshes_estimate_after_usage_calibration():
+    throttle, clock = limiter(tpm=10_000)
+    held = await throttle.acquire(4000)
+    samples = [await throttle.acquire(1) for _ in range(3)]
+    clock.now = 10
+    waiting = asyncio.create_task(throttle.acquire(
+        throttle.estimate(1000), input_proxy=1000, input_tokens=1000, reestimate=True,
+    ))
+    await asyncio.sleep(0)
+    assert not waiting.done()
+    for sample in samples:
+        throttle.finish(sample, {"prompt_tokens": 0, "completion_tokens": 100})
+    record = await asyncio.wait_for(waiting, .5)
+    assert record.tokens == record.initial_tokens == 2024
+    assert record.input_tokens == 1000
+    throttle.finish(record)
+    throttle.finish(held)

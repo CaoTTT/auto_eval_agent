@@ -89,6 +89,7 @@ def _extract_frames(
     extract_fn: Callable = extract_scene_keyframes,
     cache_key: str = KEYFRAME_ALGORITHM_VERSION,
     extract_kwargs: dict | None = None,
+    duration: float | None = None,
 ) -> list[Path]:
     check_preparation()
     frames = _cached_frames(frame_dir, cache_key)
@@ -99,7 +100,11 @@ def _extract_frames(
         stale.unlink(missing_ok=True)
     (frame_dir / ".complete").unlink(missing_ok=True)
     (frame_dir / "keyframes.json").unlink(missing_ok=True)
-    frames = list(extract_fn(video_path, frame_dir, **(extract_kwargs or {})))
+    kwargs = dict(extract_kwargs or {})
+    if extract_fn is extract_scene_keyframes and duration is not None:
+        # Preserve the established extension point for custom extractors.
+        kwargs["duration"] = duration
+    frames = list(extract_fn(video_path, frame_dir, **kwargs))
     check_preparation()  # Never mark an interrupted extraction as a complete cache.
     if frames:
         (frame_dir / ".complete").write_text(
@@ -248,6 +253,7 @@ def prepare_session_rich_content_item(
         extract_fn=extract_fn,
         cache_key=cache_key,
         extract_kwargs=extract_kwargs,
+        duration=duration,
     )
     if not frames:
         raise ValueError(f"视频抽帧失败：{raw_path}")
@@ -315,6 +321,7 @@ def prepare_session_visual_compare_item(
             extract_fn=extract_fn,
             cache_key=cache_key,
             extract_kwargs=extract_kwargs,
+            duration=duration,
         )
         if not frames:
             raise ValueError(f"视频{product_no}抽帧失败：{raw_path}")

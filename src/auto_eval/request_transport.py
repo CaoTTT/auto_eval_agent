@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 import httpx
 
 from .request_throttle import DEFAULT_CONCURRENCY, RequestThrottle
+from .timing import record_model_attempt
 
 
 @dataclass
@@ -36,7 +37,7 @@ class HeaderAdmission:
         self._dispatch_held = True
         try:
             await self.throttle.wait_until_ready(
-                self.throttle.estimate(self.input_tokens, self.kind),
+                lambda: self.throttle.estimate(self.input_tokens, self.kind),
             )
         except BaseException:
             self._release_dispatch()
@@ -46,6 +47,14 @@ class HeaderAdmission:
         request = info.get("request")
         if getattr(request, "method", None) == b"CONNECT":
             return  # HTTPS proxy setup is not a model call.
+        if name == "http11.receive_response_headers.complete":
+            response = info.get("return_value")
+            # httpcore's return tuple is (HTTP version, status, reason, headers).
+            # Redirects/errors are not evidence that the model accepted input.
+            if (self.reservations and isinstance(response, tuple) and len(response) > 1
+                    and 200 <= response[1] < 300):
+                self.throttle.confirm_input(self.reservations[-1])
+            return
         if name in {"http11.send_request_headers.complete", "http11.send_request_headers.failed"}:
             # CONNECT completion does not carry the request object. It must not
             # release the pre-connect turn before the actual model request.
@@ -59,12 +68,16 @@ class HeaderAdmission:
         if not self._dispatch_held:
             await self.prepare()
         try:
+            estimate = self.throttle.estimate(self.input_tokens, self.kind)
             reservation = await self.throttle.acquire(
-                self.throttle.estimate(self.input_tokens, self.kind),
+                estimate,
                 input_proxy=self.input_tokens, kind=self.kind,
+                input_tokens=min(estimate, self.throttle.estimate_input(self.input_tokens, self.kind)),
+                reestimate=True,
             )
             self.reservations.append(reservation)
             self._dispatch_record = reservation
+            record_model_attempt()
         except BaseException:
             self._release_dispatch()
             raise

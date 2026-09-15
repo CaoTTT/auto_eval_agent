@@ -499,3 +499,62 @@ async def test_connect_trace_is_ignored_without_sending_to_an_external_proxy():
     assert throttle.dispatch_lock.locked(), "Proxy CONNECT must retain the turn for model headers"
     admission.finish()
     assert not throttle.dispatch_lock.locked()
+
+
+@pytest.mark.asyncio
+async def test_real_success_headers_start_input_window_before_stream_completion():
+    finish_stream = asyncio.Event()
+
+    async def respond(request, writer):
+        await send_sse(writer, finish_stream)
+
+    class SplitObservedThrottle(ObservedThrottle):
+        estimate = RequestThrottle.estimate
+
+    async with LoopbackProvider(respond) as provider:
+        client = sdk_client(provider)
+        throttle = SplitObservedThrottle()
+        job = asyncio.create_task(complete(client, throttle))
+        try:
+            await provider.wait_requests(1)
+            # Reading headers happens after the peer records the HTTP request.
+            for _ in range(100):
+                if throttle.admissions and throttle.admissions[0].input_confirmed_at is not None:
+                    break
+                await asyncio.sleep(.005)
+            record = throttle.admissions[0]
+            assert record.input_confirmed_at is not None
+            assert not job.done()
+            snapshot = throttle.snapshot()
+            assert snapshot["input_pending_tokens"] == 0
+            assert snapshot["input_tokens_window"] == record.input_tokens > 0
+            assert snapshot["output_reserved_tokens"] == 8192
+            assert snapshot["token_estimated_total"] == record.initial_tokens
+            finish_stream.set()
+            await asyncio.wait_for(job, 5)
+            assert throttle.snapshot()["token_estimated_total"] == 10
+            assert throttle.snapshot()["inflight"] == 0
+        finally:
+            finish_stream.set()
+            job.cancel()
+            await asyncio.gather(job, return_exceptions=True)
+            await client.close()
+
+
+@pytest.mark.asyncio
+async def test_error_response_headers_do_not_acknowledge_input():
+    throttle = ObservedThrottle()
+    admission = HeaderAdmission(throttle, 10, "text")
+    request = httpx.Request("POST", "https://example.invalid/v1/chat/completions")
+    with header_admission(admission):
+        await install_header_trace(request)
+    trace = request.extensions["trace"]
+    await trace("http11.send_request_headers.started", {"request": SimpleNamespace(method=b"POST")})
+    await trace("http11.send_request_headers.complete", {"return_value": None})
+    await trace("http11.receive_response_headers.complete", {
+        "return_value": (b"HTTP/1.1", 429, b"Limited", []),
+    })
+    record = admission.reservations[0]
+    assert record.input_confirmed_at is None
+    assert record.tokens == record.initial_tokens
+    admission.finish(error=RuntimeError("rate limit"))

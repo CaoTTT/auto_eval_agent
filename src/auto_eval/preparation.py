@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import heapq
 import itertools
+import os
 import subprocess
 import threading
 import time
@@ -12,8 +13,28 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import TypeVar
 
+from .timing import timing_span
+
 
 T = TypeVar("T")
+DEFAULT_MEDIA_CONCURRENCY = 4
+MAX_MEDIA_CONCURRENCY = 16
+
+
+def preparation_concurrency() -> int:
+    """Read the media worker limit independently of model request capacity.
+
+    Keep the existing conservative default: FFmpeg also uses internal threads,
+    so a CPU count alone cannot safely size these memory-heavy workers.
+    """
+    raw = os.getenv("AUTO_EVAL_MEDIA_CONCURRENCY", str(DEFAULT_MEDIA_CONCURRENCY))
+    try:
+        capacity = int(raw)
+    except ValueError:
+        raise ValueError("AUTO_EVAL_MEDIA_CONCURRENCY 必须是 1–16 的整数") from None
+    if not 1 <= capacity <= MAX_MEDIA_CONCURRENCY:
+        raise ValueError("AUTO_EVAL_MEDIA_CONCURRENCY 必须是 1–16 的整数")
+    return capacity
 
 
 class PreparationStopped(TimeoutError):
@@ -94,16 +115,18 @@ def check_preparation() -> None:
 async def run_preparation(fn: Callable[..., T], *args, timeout: float, **kwargs) -> T:
     limit = _limit.get()
     if limit is None:
-        return await _run_preparation(fn, *args, timeout=timeout, **kwargs)
+        with timing_span("media"):
+            return await _run_preparation(fn, *args, timeout=timeout, **kwargs)
     from .request_throttle import admission_wait
 
-    with admission_wait():
+    with timing_span("media_queue"), admission_wait():
         if isinstance(limit, PreparationLimiter):
             await limit.acquire(priority=_priority.get())
         else:
             await limit.acquire()
     try:
-        return await _run_preparation(fn, *args, timeout=timeout, **kwargs)
+        with timing_span("media"):
+            return await _run_preparation(fn, *args, timeout=timeout, **kwargs)
     finally:
         limit.release()
 
