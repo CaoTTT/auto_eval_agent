@@ -43,15 +43,25 @@ class Client:
     model = "fake-model"
     cfg = JudgeConfig(name="test")
 
-    def __init__(self, count=2):
+    def __init__(self, count=2, score_max=None):
         self.calls = []
         self.count = count
+        self.score_max = score_max
 
     async def complete(self, system, user, **kwargs):
         self.calls.append((system, user, kwargs))
         data = {"product_count": self.count, **{f"{d}_applicable": False for d in DIMENSIONS}}
         for n in range(1, self.count + 1):
             data.update({f"answer{n}_input_status": "complete", f"answer{n}_response_gate": "pass", f"answer{n}_safety_gate": "pass"})
+        if self.score_max is not None:
+            for dimension in ("intuitive_efficiency", "evidence_quality"):
+                data.update({
+                    f"{dimension}_applicable": True,
+                    f"{dimension}_verification_status": "verified",
+                    f"{dimension}_reason": "按各产品可见证据独立评分",
+                    f"{dimension}_evidence": [f"{dimension} | 产品1 | 可见回答"],
+                    **{f"answer{n}_{dimension}_score": self.score_max - n + 1 for n in range(1, self.count + 1)},
+                })
         return json.dumps(data)
 
     async def aclose(self):
@@ -82,22 +92,52 @@ def test_mixed_normalization_and_untrusted_metadata():
             qi.normalize_query_input({"query": "q", **override})
 
 
-@pytest.mark.parametrize("standard", ["0.2-simplified", "0.3"])
+@pytest.mark.parametrize("standard,revision,score_max", [
+    ("0.2-simplified", "0.2.1", 5),
+    ("0.3", "0.3.1", 3),
+    ("0.2-simplified-calibrated", "0.2.2", 5),
+])
 @pytest.mark.parametrize("count", [2, 3])
 @pytest.mark.parametrize("evidence", ["video_frames", "long_screenshot"])
 @pytest.mark.parametrize("with_image", [False, True])
-async def test_all_16_combinations(setup_images, standard, count, evidence, with_image):
+async def test_compare_protocol_input_combinations(setup_images, standard, revision, score_max, count, evidence, with_image):
     root, profile, paths = setup_images
     prepared = qi.prepare_query_images({"query": "q", "query_images": [paths[0]] if with_image else []}, session_name="task", cfg=profile.query_images)
     args = {f"frames{n}": [paths[n]] for n in range(1, count + 1)}
     if evidence == "long_screenshot":
         args["screenshot_metas"] = [prepare_long_screenshot(Path(paths[n]), root / f"parts{n}", profile.long_screenshot) for n in range(1, count + 1)]
-    client = Client(count)
+    client = Client(count, score_max=score_max)
     result = await VisualCompareJudge(client, profile, f"qa_competitor_compare@{standard}").evaluate(
         question="q", evidence_mode=evidence, product_count=count, query_image_meta=prepared["query_image_meta"], **args)
     system, user, sent = client.calls[0]
+    assert len(client.calls) == 1
     assert result["standard_version"] == standard
+    assert result["evaluation_profile"] == f"qa_competitor_compare@{standard}"
+    assert result["bundle_revision"] == revision
+    assert result["product_count"] == count
+    assert result["prompt_sha256"] == hashlib.sha256(f"{system}\0{user}".encode("utf-8")).hexdigest()
+    for dimension in ("intuitive_efficiency", "evidence_quality"):
+        assert result[f"{dimension}_verification_status"] == "verified"
+        assert result[f"{dimension}_reason"] == "按各产品可见证据独立评分"
+        assert result[f"{dimension}_evidence"] == [f"{dimension} | 产品1 | 可见回答"]
+        assert result[f"{dimension}_rank_groups"] == [[f"product{n}"] for n in range(1, count + 1)]
+        assert result[f"{dimension}_winner"] == "answer1"
+        for n in range(1, count + 1):
+            assert result[f"answer{n}_{dimension}_score"] == score_max - n + 1
+        if count == 2:
+            assert result[f"answer3_{dimension}_score"] is None
     assert result["overall_winner"] is None
+    assert not result["needs_human_review"]
+    if evidence == "long_screenshot":
+        labels = "\n".join(p["text"] for p in sent["content_parts"] if p["type"] == "text")
+        product_metas = sent["image_metadata"][1:] if with_image else sent["image_metadata"]
+        assert [m["product_no"] for m in product_metas] == list(range(1, count + 1))
+        assert all(m["part_no"] == 1 and m["part_count"] == 1 for m in product_metas)
+        for n in range(1, count + 1):
+            assert f"产品{n} 第1/1块" in labels
+    elif not with_image:
+        assert len(sent["user_images"]) == count
+        assert sent["user_image_refs"] == [paths[n] for n in range(1, count + 1)]
     if with_image:
         images = [p for p in sent["content_parts"] if p["type"] == "image_url"]
         assert len(images) == count + 1 == len(sent["image_metadata"]) == len(sent["user_image_refs"])

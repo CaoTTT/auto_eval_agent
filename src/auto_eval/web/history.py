@@ -21,6 +21,11 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 
+from ..judges.compare_protocols import (
+    DEFAULT_COMPARE_PROTOCOL_ID,
+    V02_CALIBRATED_COMPARE_PROTOCOL_ID,
+    V03_COMPARE_PROTOCOL_ID,
+)
 from ..paths import PROJECT_ROOT, RUNS_DIR
 from .compare_statistics import SHEET_NAME as COMPARE_STATISTICS_SHEET, build_compare_statistics
 from .compare_statistics_xlsx import statistics_cell_styles, statistics_sheet_xml
@@ -205,22 +210,37 @@ def _apply_interrupted_status(status, error):
 
 
 def _snapshot_evaluation_profile(data: dict) -> str:
+    """恢复任务冻结的协议；无版本旧记录沿用原有 V0.2/V0.3 回退。"""
     explicit = data.get("evaluation_profile") or (data.get("options") or {}).get(
         "evaluation_profile"
     )
     if explicit or data.get("mode") != "compare":
         return explicit or ""
+    manifest = data.get("protocol_manifest") or {}
+    if manifest.get("id"):
+        return manifest["id"]
+    results = data.get("results") or []
+    result_profiles = {
+        result["evaluation_profile"]
+        for result in results
+        if result.get("evaluation_profile")
+    }
+    if len(result_profiles) == 1:
+        return next(iter(result_profiles))
     versions = [
+        str(manifest.get("standard_version") or ""),
         str((data.get("summary") or {}).get("standard_version") or ""),
         *[
             str(result.get("standard_version") or "")
-            for result in (data.get("results") or [])
+            for result in results
         ],
     ]
+    if "0.2-simplified-calibrated" in versions:
+        return V02_CALIBRATED_COMPARE_PROTOCOL_ID
     return (
-        "qa_competitor_compare@0.3"
+        V03_COMPARE_PROTOCOL_ID
         if "0.3" in versions
-        else "qa_competitor_compare@0.2-simplified"
+        else DEFAULT_COMPARE_PROTOCOL_ID
     )
 
 

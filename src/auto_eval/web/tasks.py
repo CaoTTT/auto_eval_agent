@@ -8,7 +8,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any
 
-from .history import load_snapshot, make_session_name, save_task
+from .history import _snapshot_evaluation_profile, load_snapshot, make_session_name, save_task
 from .persistence import queue_task_save, task_save_pending
 
 # 每个 SSE 连接的事件队列上限：慢消费者丢最旧保最新，杜绝无消费者时无限堆积
@@ -193,20 +193,7 @@ def _task_from_snapshot(snapshot: dict, task_id: str) -> Task:
                 retry["status"] = "error"
                 retry["error"] = retry.get("error") or "服务中断，失败补跑未完成"
     options = snapshot.get("options") or {}
-    evaluation_profile = snapshot.get("evaluation_profile") or options.get("evaluation_profile") or ""
-    if not evaluation_profile and (snapshot.get("mode") or "") == "compare":
-        versions = [
-            str((snapshot.get("summary") or {}).get("standard_version") or ""),
-            *[
-                str(result.get("standard_version") or "")
-                for result in (snapshot.get("results") or [])
-            ],
-        ]
-        evaluation_profile = (
-            "qa_competitor_compare@0.3"
-            if "0.3" in versions
-            else "qa_competitor_compare@0.2-simplified"
-        )
+    evaluation_profile = _snapshot_evaluation_profile(snapshot)
     return Task(
         id=snapshot.get("task_id") or task_id,
         mode=snapshot.get("mode") or "rich_content",

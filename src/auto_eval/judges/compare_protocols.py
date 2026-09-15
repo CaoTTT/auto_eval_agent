@@ -20,11 +20,16 @@ from .visual_compare_prompt_v03 import (
     VISUAL_COMPARE_SYSTEM as V03_SYSTEM,
     VISUAL_COMPARE_USER as V03_USER,
 )
+from .visual_compare_prompt_v02_calibrated import (
+    VISUAL_COMPARE_SYSTEM as V02_CALIBRATED_SYSTEM,
+    VISUAL_COMPARE_USER as V02_CALIBRATED_USER,
+)
 
 
 STANDARD_ID = "qa_competitor_compare"
 DEFAULT_COMPARE_PROTOCOL_ID = f"{STANDARD_ID}@0.2-simplified"
 V03_COMPARE_PROTOCOL_ID = f"{STANDARD_ID}@0.3"
+V02_CALIBRATED_COMPARE_PROTOCOL_ID = f"{STANDARD_ID}@0.2-simplified-calibrated"
 DIMENSIONS = (
     "understanding",
     "accuracy",
@@ -140,6 +145,20 @@ _PROTOCOLS = {
         score_min=0,
         score_max=3,
     ),
+    V02_CALIBRATED_COMPARE_PROTOCOL_ID: CompareProtocol(
+        id=V02_CALIBRATED_COMPARE_PROTOCOL_ID,
+        standard_id=STANDARD_ID,
+        standard_version="0.2-simplified-calibrated",
+        bundle_revision="0.2.2",
+        display="V0.2 简化版·评分校准（实验）",
+        status="experimental",
+        system_template=V02_CALIBRATED_SYSTEM,
+        user_template=V02_CALIBRATED_USER,
+        observation_model=VisualCompareObservationV02,
+        require_response_pass=True,
+        score_min=1,
+        score_max=5,
+    ),
 }
 
 
@@ -152,7 +171,10 @@ def resolve_compare_protocol(protocol_id: str | None, bundle_revision: str | Non
     try:
         protocol = _PROTOCOLS[selected]
         if bundle_revision and bundle_revision != protocol.bundle_revision:
-            legacy = "0.2.0" if selected == DEFAULT_COMPARE_PROTOCOL_ID else "0.3.0"
+            legacy = {
+                DEFAULT_COMPARE_PROTOCOL_ID: "0.2.0",
+                V03_COMPARE_PROTOCOL_ID: "0.3.0",
+            }.get(selected)
             if bundle_revision != legacy:
                 raise ValueError("无法恢复任务冻结的实现版本，请新建任务")
             return replace(protocol, bundle_revision=legacy)
@@ -160,4 +182,3 @@ def resolve_compare_protocol(protocol_id: str | None, bundle_revision: str | Non
     except KeyError as exc:
         supported = ", ".join(_PROTOCOLS)
         raise ValueError(f"未知评测协议 {selected!r}；可选值：{supported}") from exc
-
