@@ -268,7 +268,7 @@ async def test_judge_product_order_prompt_and_forced_review(tmp_path, monkeypatc
     result = await judge.evaluate(question="q", product_count=count, evidence_mode="long_screenshot", screenshot_metas=metas,
         **{f"frames{n}": [p["path"] for p in meta["slices"]] for n, meta in enumerate(metas, 1)})
     system, user, sent = client.calls[0]
-    for rule in ["不是流式过程", "主要测评证据", "找到 26 篇资料", "来源列表未展开不能扣分", "引用支撑不足", "静态长截图无法验证点击", "response_gate=unclear"]:
+    for rule in ["不是流式过程", "主要测评证据", "找到N篇资料", "来源列表未展开不能扣分", "引用支撑不足", "静态长截图无法验证点击", "response_gate=unclear"]:
         assert rule in system
     assert "早期流式帧" not in system and "关键帧按时间" not in user
     assert f"产品{count}：2张" in user

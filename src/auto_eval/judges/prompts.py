@@ -11,6 +11,8 @@ from datetime import datetime
 
 from jinja2 import Template
 
+from .internal_process_rules import INTERNAL_PROCESS_DISCLOSURE_RULES
+
 # 评测员画像：模拟不同背景的真人评测员
 PERSONAS: dict[str, str] = {
     "end_user": "你是一位普通终端用户，看重答案是否清晰易懂、切实有用、真正满足提问者的需求。",
@@ -50,7 +52,7 @@ RICH_CONTENT_SYSTEM = Template(
 - 可信 context：{{ context }}
   + context 中可能包含了用户明确指定的条件（如时间、地点、风格、版本、集数、数量等），如果用户query中没有新的明确指明的条件，则以 context 中的明确地址为主。地址、时间等条件的优先级是：用户query中明确说明的 > context中用户明确说明的 > context中过去讨论的 > context中自动记录的用户位置时间。
 - 被评测产品的回答文本 answer_text：{{ answer_text }}
-  + answer_text中只包含了文字内容，不包含图片、挂卡、Superlink等视觉组件，无法直接用于评测结果。但是可以根据仅answer_text来判断是否思考暴露。
+  + answer_text只包含文字，不代表图片、挂卡、Superlink等视觉呈现；可辅助理解语义。思考暴露应结合最终回复文字及画面按下述统一定义判断，不限于answer_text。
 
 【对象定义】
 - 挂卡：带结构化信息容器、领域元数据或操作能力的富内容组件。注意：1.灰色表头的表格和卡片很像但不算挂卡；2.普通内嵌图片、视频、正文截图这些图片通常是横向的长方形且只有图片，不算挂卡；3.导航卡片可能占据了页面的大部分，它看上去就像一张地图，这个算一张挂卡。
@@ -116,7 +118,10 @@ RICH_CONTENT_SYSTEM = Template(
 - 只把判定为“有此问题”的标签写入 answer_issues，每条一行，格式为“标签：具体描述（点出证据）”。例如：“文卡不一致：回答正文说‘点击下方卡片查看’但实际未出卡”。
 - 若逐项核查后确认没有任何问题，answer_issues 填空字符串 “”。
 - 核查结论同步落到对应字段：判定“卡片不相关”时 card_suitability 取 nok；判定“Superlink不相关”时 superlink_suitability 取 nok。
-- 特殊情况（“思考暴露”的判定方式）：多数问题需同时看抽帧图片和回答文本，但“思考暴露”只通过 answer_text 判断（如出现“我不确定”“我猜测”“我认为”，或输出了执行过程、使用了 skill/工具名等），不要通过抽帧图片判断；一旦命中，必须在 answer_issues 中记录“思考暴露”。
+- 特殊情况（“思考暴露”的判定方式）：按下述统一定义检查最终回复中的内部过程信息泄露。一旦确认，必须在 answer_issues 中记录“思考暴露：具体片段、位置与类别”；归属无法确认时在理由中说明证据不足，必要时转need_review。本模式没有response_gate字段，不新增Gate输出，problem_solved仍独立判断是否完成用户需求。
+
+""" + INTERNAL_PROCESS_DISCLOSURE_RULES + """
+
 - 特殊情况（“结果重复”的判定方式）：只要有多段相同文字的重复出现，或者相同卡片的重复出现，都算结果重复。
 - 特殊情况（多轮未闭环）：首先判断用户query和目前回答的已有信息之间的关系（注意回答信息包括图片、卡片信息）。
     + 若用户query明确，用户要求内容并非“删除”、“关机”等危险操作，这种按照正常query处理，根据回答的内容是否解决了用户问题来判定 problem_solved。（例如用户说导航到某地（明确的地名），回答问去第几个地点，但是列表中第一个地点名字和用户所说完全一样，却没开始导航，则判定为服务未闭环，记入“answer_issues”；如果给出的列表出现多个相似的结构要确认，则属于用户意图不明确，参考下面的情况）。
@@ -223,8 +228,10 @@ VISUAL_COMPARE_SYSTEM = Template(
 每个产品分别输出 pass / fail / unclear，不参与平均分。
 
 1. 响应体验 response_gate
-- pass：成功返回，回答与关键视觉内容有足够证据确认正常加载，无明显异常重复、乱码、严重截断或内部思考过程泄漏。
-- fail：空回答、系统错误、核心内容明确未加载、严重截断，或明显暴露内部工具调用/推理。
+
+""" + INTERNAL_PROCESS_DISCLOSURE_RULES + """
+- pass：成功返回，回答与关键视觉内容有足够证据确认正常加载，无明显异常重复、乱码、严重截断或思考暴露（内部过程信息泄露）。
+- fail：空回答、系统错误、核心内容明确未加载、严重截断，或确认最终回复暴露内部推理、检索过程、skill、内部工具名称或调用过程；不要求完整推理链，即使用户需求已完成仍判fail。
 - unclear：关键帧或录屏证据不足，无法确认完整展示状态。
 - 关键约束：若某产品 response_gate != pass，则该产品的 understanding/readability/accuracy/decision_support/closure 绝对分全部输出 null；不得基于“提供的 answer 文本”绕过黑盒展示证据继续给该产品满分。
 
