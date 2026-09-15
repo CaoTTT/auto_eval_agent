@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import heapq
+import itertools
 import subprocess
 import threading
 import time
@@ -18,6 +20,46 @@ class PreparationStopped(TimeoutError):
     """Stop preparation without falling back to another extraction strategy."""
 
 
+class PreparationLimiter:
+    """Bound all media stages while letting earlier cases reach the model first.
+
+    A FIFO semaphore puts an early case's encoding behind every later case's
+    extraction. Stable case priorities let its next stage advance instead, with
+    the same aggregate worker limit and no permit held during model calls.
+    """
+
+    def __init__(self, capacity: int):
+        if capacity < 1:
+            raise ValueError("preparation capacity must be positive")
+        self._available = capacity
+        self._sequence = itertools.count()
+        self._waiters: list[tuple[int, int, asyncio.Future]] = []
+
+    async def acquire(self, *, priority: int = 0) -> None:
+        if self._available:
+            self._available -= 1
+            return
+        waiter = asyncio.get_running_loop().create_future()
+        heapq.heappush(self._waiters, (priority, next(self._sequence), waiter))
+        try:
+            await waiter
+        except BaseException:
+            # A permit may already have been handed over when cancellation wins.
+            if waiter.done() and not waiter.cancelled():
+                self.release()
+            else:
+                waiter.cancel()
+            raise
+
+    def release(self) -> None:
+        while self._waiters:
+            _, _, waiter = heapq.heappop(self._waiters)
+            if not waiter.done():
+                waiter.set_result(None)
+                return
+        self._available += 1
+
+
 class _Scope:
     def __init__(self, timeout: float):
         self.deadline = time.monotonic() + timeout
@@ -28,15 +70,18 @@ class _Scope:
 
 
 _scope: ContextVar[_Scope | None] = ContextVar("preparation_scope", default=None)
-_limit: ContextVar[asyncio.Semaphore | None] = ContextVar("preparation_limit", default=None)
+_limit: ContextVar[PreparationLimiter | asyncio.Semaphore | None] = ContextVar("preparation_limit", default=None)
+_priority: ContextVar[int] = ContextVar("preparation_priority", default=0)
 
 
 @contextmanager
-def preparation_limit(limit: asyncio.Semaphore | None):
+def preparation_limit(limit: PreparationLimiter | asyncio.Semaphore | None, *, priority: int = 0):
     token = _limit.set(limit)
+    priority_token = _priority.set(priority)
     try:
         yield
     finally:
+        _priority.reset(priority_token)
         _limit.reset(token)
 
 
@@ -53,7 +98,10 @@ async def run_preparation(fn: Callable[..., T], *args, timeout: float, **kwargs)
     from .request_throttle import admission_wait
 
     with admission_wait():
-        await limit.acquire()
+        if isinstance(limit, PreparationLimiter):
+            await limit.acquire(priority=_priority.get())
+        else:
+            await limit.acquire()
     try:
         return await _run_preparation(fn, *args, timeout=timeout, **kwargs)
     finally:

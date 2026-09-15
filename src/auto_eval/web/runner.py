@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 from ..paths import RUNS_DIR
-from ..preparation import run_preparation, preparation_limit
+from ..preparation import PreparationLimiter, run_preparation, preparation_limit
 from ..request_throttle import (
     PREPARATION_CONCURRENCY, recommended_concurrency, supports_bailian_pacing,
     wait_for_active, SECOND_REQUEST_LIMIT,
@@ -279,7 +279,7 @@ def _make_item_evaluator(
     category_display = rich_profile.category_display if rich_profile else {}
     capacity = max(1, min(128, int(runtime_options.get("concurrency", recommended_concurrency(judges_cfg)))))
     sem = asyncio.Semaphore(capacity)
-    media_sem = asyncio.Semaphore(PREPARATION_CONCURRENCY) if any(supports_bailian_pacing(j) for j in judges_cfg) else None
+    media_sem = PreparationLimiter(PREPARATION_CONCURRENCY) if any(supports_bailian_pacing(j) for j in judges_cfg) else None
     if media_sem is not None:
         log_event("请求调度", "启用百炼平滑调度", details={
             "Case容量": capacity, "媒体并发": PREPARATION_CONCURRENCY,
@@ -560,7 +560,7 @@ def _make_item_evaluator(
             return res
 
     async def limited_one(idx: int, item_dict: dict) -> dict:
-        with preparation_limit(media_sem):
+        with preparation_limit(media_sem, priority=idx):
             return await one(idx, item_dict)
 
     return limited_one, clients

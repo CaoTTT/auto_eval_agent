@@ -66,6 +66,52 @@ async def test_strict_boundary_and_pause_do_not_accumulate_permits():
 
 
 @pytest.mark.asyncio
+async def test_large_request_pacing_does_not_restart_warmup_while_waiting():
+    clock = Clock()
+    throttle = RequestThrottle(clock=clock, sleep=clock.sleep, warmup_s=15)
+    first = await throttle.acquire(500_000)
+    throttle.finish(first, {"total_tokens": 10})
+    second = await throttle.acquire(500_000)
+    throttle.finish(second, {"total_tokens": 10})
+    third = await throttle.acquire(500_000)
+    assert second.sent - first.sent == pytest.approx(150 + DISPATCH_GUARD_S)
+    assert third.sent - second.sent == pytest.approx(37.5 + DISPATCH_GUARD_S)
+    throttle.finish(third)
+
+
+@pytest.mark.asyncio
+async def test_warmup_restarts_only_after_finished_work_is_truly_idle():
+    clock = Clock()
+    throttle = RequestThrottle(clock=clock, sleep=clock.sleep, warmup_s=15)
+    first = await throttle.acquire(100)
+    clock.now = 90  # Long-running responses are active, not idle.
+    throttle.finish(first, {"total_tokens": 10})
+    second = await throttle.acquire(100)
+    assert second.interval == pytest.approx(.125 + DISPATCH_GUARD_S)
+    throttle.finish(second, {"total_tokens": 10})
+    clock.now += 31  # No queued, preparing-to-send or in-flight work.
+    third = await throttle.acquire(100)
+    assert third.interval == pytest.approx(.5 + DISPATCH_GUARD_S)
+    throttle.finish(third)
+
+
+@pytest.mark.asyncio
+async def test_slow_connection_does_not_consume_startup_or_idle_warmup():
+    clock = Clock()
+    throttle = RequestThrottle(clock=clock, sleep=clock.sleep, warmup_s=15)
+    for connection_delay in (20, 40):
+        await throttle.wait_for_dispatch()
+        await throttle.wait_until_ready(100)
+        clock.now += connection_delay  # Pool/TCP/TLS setup before any HTTP send.
+        record = await throttle.acquire(100)
+        assert record.interval == pytest.approx(.5 + DISPATCH_GUARD_S)
+        throttle.headers_sent(record)
+        throttle.release_dispatch()
+        throttle.finish(record, {"total_tokens": 10})
+        clock.now += 31
+
+
+@pytest.mark.asyncio
 async def test_header_completion_fences_socket_yield_without_freeing_response_slot():
     throttle, clock = limiter()
     async with throttle.dispatch_lock:

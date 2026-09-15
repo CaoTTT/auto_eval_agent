@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 import httpx
 
-from .request_throttle import DEFAULT_CONCURRENCY, RequestThrottle, admission_wait
+from .request_throttle import DEFAULT_CONCURRENCY, RequestThrottle
 
 
 @dataclass
@@ -24,23 +24,41 @@ class HeaderAdmission:
     _dispatch_held: bool = False
     _dispatch_record: object | None = None
 
+    async def prepare(self) -> None:
+        # Request hooks run before connection-pool acquisition and TCP/TLS setup.
+        # Otherwise a large backlog opens sockets that gateways can close while
+        # they sit idle waiting for the first HTTP headers.
+        if self._dispatch_held:
+            return
+        if self.reservations:
+            self.throttle.finish(self.reservations[-1])
+        await self.throttle.wait_for_dispatch()
+        self._dispatch_held = True
+        try:
+            await self.throttle.wait_until_ready(
+                self.throttle.estimate(self.input_tokens, self.kind),
+            )
+        except BaseException:
+            self._release_dispatch()
+            raise
+
     async def trace(self, name: str, info: dict) -> None:
         request = info.get("request")
         if getattr(request, "method", None) == b"CONNECT":
             return  # HTTPS proxy setup is not a model call.
         if name in {"http11.send_request_headers.complete", "http11.send_request_headers.failed"}:
-            self._release_dispatch()
+            # CONNECT completion does not carry the request object. It must not
+            # release the pre-connect turn before the actual model request.
+            if self._dispatch_record is not None:
+                self._release_dispatch()
             return
         if name != "http11.send_request_headers.started":
             return
-        # A redirect or transport reattempt is another HTTP attempt. Release
-        # the previous response's slot before acquiring (even with capacity=1).
-        with admission_wait():
-            await self.throttle.dispatch_lock.acquire()
-        self._dispatch_held = True
+        # The hook queues before connecting; only the actual header boundary
+        # reserves tokens and counts a request. Recheck after network setup.
+        if not self._dispatch_held:
+            await self.prepare()
         try:
-            if self.reservations:
-                self.throttle.finish(self.reservations[-1])
             reservation = await self.throttle.acquire(
                 self.throttle.estimate(self.input_tokens, self.kind),
                 input_proxy=self.input_tokens, kind=self.kind,
@@ -61,7 +79,7 @@ class HeaderAdmission:
                     self.throttle.headers_sent(self._dispatch_record)
             finally:
                 self._dispatch_record = None
-                self.throttle.dispatch_lock.release()
+                self.throttle.release_dispatch()
 
     def finish(self, usage=None, error=None) -> None:
         self._release_dispatch()
@@ -85,6 +103,7 @@ async def install_header_trace(request: httpx.Request) -> None:
     admission = _admission.get()
     if admission is None:
         return
+    await admission.prepare()
     previous = request.extensions.get("trace")
     if getattr(previous, "_auto_eval_admission", None) is admission:
         return  # HTTPX redirects copy extensions and run request hooks again.

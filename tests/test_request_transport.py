@@ -27,8 +27,11 @@ class ReceivedRequest:
 class LoopbackProvider:
     """Small HTTP/1.1 peer with controllable responses and socket cleanup."""
 
-    def __init__(self, respond):
+    def __init__(self, respond, header_idle_timeout=None):
         self.respond = respond
+        self.header_idle_timeout = header_idle_timeout
+        self.connections = 0
+        self.idle_connections_closed = 0
         self.requests: list[ReceivedRequest] = []
         self.changed = asyncio.Event()
         self.tasks = set()
@@ -55,12 +58,19 @@ class LoopbackProvider:
         assert not self.failures, self.failures
 
     async def _handle(self, reader, writer):
+        self.connections += 1
         task = asyncio.current_task()
         self.tasks.add(task)
         self.writers.add(writer)
         counted = False
         try:
-            raw = await reader.readuntil(b"\r\n\r\n")
+            try:
+                raw = await asyncio.wait_for(
+                    reader.readuntil(b"\r\n\r\n"), self.header_idle_timeout,
+                )
+            except asyncio.TimeoutError:
+                self.idle_connections_closed += 1
+                return
             arrived = time.monotonic()
             lines = raw.decode("latin1").split("\r\n")
             headers = dict(line.split(": ", 1) for line in lines[1:] if line)
@@ -266,6 +276,32 @@ async def test_two_sdk_keys_share_gate_while_slow_streams_overlap():
 
 
 @pytest.mark.asyncio
+async def test_backlog_waits_before_connect_so_gateway_idle_timeout_does_not_trigger_retries():
+    async def respond(request, writer):
+        await send_sse(writer)
+
+    async with LoopbackProvider(respond, header_idle_timeout=.1) as provider:
+        client = sdk_client(provider)
+        throttle = RequestThrottle(warmup_s=0)
+        # An earlier task's shared cooldown must not open idle sockets for the
+        # new backlog. Use real estimates (initially >8K tokens per request).
+        throttle._cooldown_until = time.monotonic() + .25
+        jobs = [asyncio.create_task(complete(client, throttle)) for _ in range(6)]
+        try:
+            responses = await asyncio.wait_for(asyncio.gather(*jobs), 10)
+            assert all(response.choices[0].message.content == "ok" for response in responses)
+            assert provider.connections == len(provider.requests) == 6
+            assert provider.idle_connections_closed == 0
+            assert throttle.snapshot()["total_requests"] == 6
+            assert_second_window([request.arrived for request in provider.requests])
+        finally:
+            for job in jobs:
+                job.cancel()
+            await asyncio.gather(*jobs, return_exceptions=True)
+            await client.close()
+
+
+@pytest.mark.asyncio
 async def test_usage_fallback_and_429_retry_each_reenter_real_header_gate():
     async def respond(request, writer):
         if request.index == 0:
@@ -326,16 +362,13 @@ async def test_redirect_reenters_gate_once_without_wrapping_trace_recursively():
 @pytest.mark.asyncio
 async def test_cancelled_waiter_does_not_leak_dispatch_lock_or_inflight_slot():
     hold_first = asyncio.Event()
-    trace_reached = asyncio.Event()
+    request_queued = asyncio.Event()
 
     async def respond(request, writer):
         await send_sse(writer, hold_first if request.index == 0 else None)
 
     async def observe_request(request):
-        async def trace(name, info):
-            if name == "http11.send_request_headers.started":
-                trace_reached.set()
-        request.extensions["trace"] = trace
+        request_queued.set()
 
     async with LoopbackProvider(respond) as provider:
         client = sdk_client(provider)
@@ -345,9 +378,9 @@ async def test_cancelled_waiter_does_not_leak_dispatch_lock_or_inflight_slot():
         waiting = None
         try:
             await provider.wait_requests(1)
-            trace_reached.clear()
+            request_queued.clear()
             waiting = asyncio.create_task(complete(client, throttle))
-            await asyncio.wait_for(trace_reached.wait(), 5)
+            await asyncio.wait_for(request_queued.wait(), 5)
             await asyncio.sleep(.05)
             assert not waiting.done()
             assert len(throttle.admissions) == 1
@@ -372,16 +405,12 @@ async def test_cancelled_waiter_does_not_leak_dispatch_lock_or_inflight_slot():
 @pytest.mark.asyncio
 async def test_prior_trace_pause_does_not_grant_permits_before_dispatch():
     resume = asyncio.Event()
-    all_waiting = asyncio.Event()
-    waiting_count = 0
+    first_waiting = asyncio.Event()
 
     async def pause_before_headers(request):
         async def prior_trace(name, info):
-            nonlocal waiting_count
             if name == "http11.send_request_headers.started":
-                waiting_count += 1
-                if waiting_count == 12:
-                    all_waiting.set()
+                first_waiting.set()
                 await resume.wait()
         request.extensions["trace"] = prior_trace
 
@@ -394,7 +423,7 @@ async def test_prior_trace_pause_does_not_grant_permits_before_dispatch():
         throttle = ObservedThrottle()
         jobs = [asyncio.create_task(complete(client, throttle)) for _ in range(12)]
         try:
-            await asyncio.wait_for(all_waiting.wait(), 5)
+            await asyncio.wait_for(first_waiting.wait(), 5)
             assert not provider.requests
             assert not throttle.admissions
             resume.set()
@@ -467,5 +496,6 @@ async def test_connect_trace_is_ignored_without_sending_to_an_external_proxy():
     await trace("http11.send_request_headers.complete", {"return_value": None})
     assert not throttle.admissions
     assert not admission.reservations
-    assert not throttle.dispatch_lock.locked()
+    assert throttle.dispatch_lock.locked(), "Proxy CONNECT must retain the turn for model headers"
     admission.finish()
+    assert not throttle.dispatch_lock.locked()

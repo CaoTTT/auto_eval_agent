@@ -214,6 +214,8 @@ class RequestThrottle:
         self._next_send = 0.0
         self._last_send = None
         self._warm_started = clock()
+        self._warm_start_on_send = True
+        self._idle_since = self._warm_started
         self._warmup_s = warmup_s
         self._cooldown_until = 0.0
         self._last_limit_kind = None
@@ -317,6 +319,65 @@ class RequestThrottle:
         delay, reason = max(delays, key=lambda entry: entry[0])
         return delay, reason if delay > 0 else None
 
+    def _begin_waiting(self) -> None:
+        now = self._clock()
+        if self._idle_since is not None:
+            if self._last_send is None or now - self._idle_since > 30:
+                self._warm_start_on_send = True
+            self._idle_since = None
+        self._pending += 1
+
+    def _mark_idle(self) -> None:
+        if (not self._pending and not self._outstanding and not self.dispatch_lock.locked()
+                and self._idle_since is None):
+            self._idle_since = self._clock()
+
+    def _end_waiting(self) -> None:
+        self._pending -= 1
+        self._mark_idle()
+
+    def release_dispatch(self) -> None:
+        self.dispatch_lock.release()
+        self._mark_idle()
+
+    async def wait_for_dispatch(self) -> None:
+        """Queue one connection candidate without opening an idle socket."""
+        self._begin_waiting()
+        self._wait_reasons["pacing"] = self._wait_reasons.get("pacing", 0) + 1
+        try:
+            with admission_wait():
+                await self.dispatch_lock.acquire()
+        finally:
+            self._end_waiting()
+            self._wait_reasons["pacing"] -= 1
+
+    async def wait_until_ready(self, tokens: int) -> None:
+        """Wait before connecting, without reserving or counting an HTTP send.
+
+        The transport holds dispatch_lock through this wait and the real header
+        admission. Responses remain concurrent and can settle their reservations.
+        The final acquire still rechecks every budget after pool/connect waits.
+        """
+        if isinstance(tokens, bool) or not isinstance(tokens, int) or tokens <= 0:
+            raise ValueError("tokens must be a positive integer")
+        if tokens > self._ceiling_tpm:
+            raise ValueError(f"单次预估 {tokens} Token 超过本地每分钟预算 {self._ceiling_tpm}，请检查输入大小")
+        self._begin_waiting()
+        with admission_wait():
+            try:
+                while True:
+                    async with self._lock:
+                        now = self._clock()
+                        self._prune(now)
+                        self._maybe_recover(now)
+                        delay, reason = self._admission_delay(tokens, now)
+                        if delay is not None and delay <= 0:
+                            return
+                        changed = self._changed
+                    await self._wait(changed, delay, reason)
+            finally:
+                self._end_waiting()
+
     async def acquire(self, tokens: int, *, input_proxy: int = 0, kind: str = "text") -> Reservation:
         if isinstance(tokens, bool) or not isinstance(tokens, int) or tokens <= 0:
             raise ValueError("tokens must be a positive integer")
@@ -324,7 +385,7 @@ class RequestThrottle:
             raise ValueError("kind must be text or vision")
         if tokens > self._ceiling_tpm:
             raise ValueError(f"单次预估 {tokens} Token 超过本地每分钟预算 {self._ceiling_tpm}，请检查输入大小")
-        self._pending += 1
+        self._begin_waiting()
         slot = False
         with admission_wait():
             try:
@@ -341,8 +402,11 @@ class RequestThrottle:
                         self._maybe_recover(now)
                         delay, reason = self._admission_delay(tokens, now)
                         if delay is not None and delay <= 0:
-                            if self._last_send is None or now - self._last_send > 30:
+                            if self._warm_start_on_send:
+                                # Connection setup and local queue waits must
+                                # not use up the first actual sends' warmup.
                                 self._warm_started = now
+                                self._warm_start_on_send = False
                             warm = (min(1.0, .25 + .75 * (now - self._warm_started) / self._warmup_s)
                                     if self._warmup_s else 1.0)
                             interval = max(60 / self._target_rpm, tokens * 60 / self._target_tpm) / warm
@@ -366,7 +430,7 @@ class RequestThrottle:
                     self._notify()
                 raise
             finally:
-                self._pending -= 1
+                self._end_waiting()
 
     def headers_sent(self, record: Reservation):
         """Fence a serialized header write at its completion (or failure).
@@ -519,6 +583,7 @@ class RequestThrottle:
         finally:
             self._slots.release()
             self._notify()
+            self._mark_idle()
 
     def snapshot(self) -> dict:
         """Public diagnostics; no keys, URLs, prompts or response bodies."""
