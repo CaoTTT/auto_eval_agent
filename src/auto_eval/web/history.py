@@ -24,6 +24,7 @@ from typing import Any
 from ..judges.compare_protocols import (
     DEFAULT_COMPARE_PROTOCOL_ID,
     V02_CALIBRATED_COMPARE_PROTOCOL_ID,
+    V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID,
     V03_COMPARE_PROTOCOL_ID,
 )
 from ..paths import PROJECT_ROOT, RUNS_DIR
@@ -235,6 +236,8 @@ def _snapshot_evaluation_profile(data: dict) -> str:
             for result in results
         ],
     ]
+    if "0.2-simplified-thinking-exposure" in versions:
+        return V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID
     if "0.2-simplified-calibrated" in versions:
         return V02_CALIBRATED_COMPARE_PROTOCOL_ID
     return (

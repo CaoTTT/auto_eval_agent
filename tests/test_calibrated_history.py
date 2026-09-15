@@ -5,51 +5,62 @@ import pytest
 from auto_eval.judges.compare_protocols import (
     DEFAULT_COMPARE_PROTOCOL_ID,
     V02_CALIBRATED_COMPARE_PROTOCOL_ID,
+    V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID,
     V03_COMPARE_PROTOCOL_ID,
 )
 from auto_eval.web.history import snapshot_payload, task_to_snapshot
 from auto_eval.web.tasks import _task_from_snapshot
 
 
-@pytest.mark.parametrize(
-    "version_fields",
-    [
-        {"protocol_manifest": {"id": V02_CALIBRATED_COMPARE_PROTOCOL_ID}},
-        {"protocol_manifest": {"standard_version": "0.2-simplified-calibrated"}},
-        {"summary": {"standard_version": "0.2-simplified-calibrated"}},
-        {"results": [{"index": 0, "standard_version": "0.2-simplified-calibrated"}]},
-        {"results": [{"index": 0, "evaluation_profile": V02_CALIBRATED_COMPARE_PROTOCOL_ID}]},
-    ],
+EXPERIMENTAL_PROTOCOLS = (
+    (V02_CALIBRATED_COMPARE_PROTOCOL_ID, "0.2-simplified-calibrated", "0.2.2"),
+    (V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID, "0.2-simplified-thinking-exposure", "0.2.3"),
 )
-def test_calibrated_profile_restores_identically_for_history_and_task_loading(version_fields):
-    snapshot = {"task_id": "calibrated", "mode": "compare", "status": "done", **version_fields}
+
+
+@pytest.mark.parametrize("protocol_id,standard,revision", EXPERIMENTAL_PROTOCOLS)
+@pytest.mark.parametrize("version_source", ["manifest_id", "manifest_version", "summary", "result_version", "result_profile"])
+def test_experimental_profile_restores_identically_for_history_and_task_loading(
+    protocol_id, standard, revision, version_source,
+):
+    version_fields = {
+        "manifest_id": {"protocol_manifest": {"id": protocol_id}},
+        "manifest_version": {"protocol_manifest": {"standard_version": standard}},
+        "summary": {"summary": {"standard_version": standard}},
+        "result_version": {"results": [{"index": 0, "standard_version": standard}]},
+        "result_profile": {"results": [{"index": 0, "evaluation_profile": protocol_id}]},
+    }[version_source]
+    snapshot = {"task_id": "experimental", "mode": "compare", "status": "done", **version_fields}
     original = copy.deepcopy(snapshot)
 
     payload = snapshot_payload(snapshot)
-    task = _task_from_snapshot(snapshot, "calibrated")
+    task = _task_from_snapshot(snapshot, "experimental")
 
-    assert payload["evaluation_profile"] == V02_CALIBRATED_COMPARE_PROTOCOL_ID
-    assert task.evaluation_profile == V02_CALIBRATED_COMPARE_PROTOCOL_ID
-    assert snapshot_payload(task_to_snapshot(task))["evaluation_profile"] == V02_CALIBRATED_COMPARE_PROTOCOL_ID
+    assert payload["evaluation_profile"] == protocol_id
+    assert task.evaluation_profile == protocol_id
+    assert snapshot_payload(task_to_snapshot(task))["evaluation_profile"] == protocol_id
     assert snapshot == original
 
 
 @pytest.mark.parametrize("explicit_source", ["task", "options", "manifest"])
-def test_explicit_legacy_profile_takes_priority_over_calibrated_result(explicit_source):
+@pytest.mark.parametrize("protocol_id,standard,revision", EXPERIMENTAL_PROTOCOLS)
+def test_explicit_legacy_profile_takes_priority_over_experimental_result(
+    explicit_source, protocol_id, standard, revision,
+):
     snapshot = {
         "task_id": "explicit",
         "mode": "compare",
         "status": "done",
-        "results": [{"index": 0, "standard_version": "0.2-simplified-calibrated",
-                     "evaluation_profile": V02_CALIBRATED_COMPARE_PROTOCOL_ID}],
+        "results": [{"index": 0, "standard_version": standard,
+                     "evaluation_profile": protocol_id}],
     }
     if explicit_source == "task":
         snapshot["evaluation_profile"] = DEFAULT_COMPARE_PROTOCOL_ID
         snapshot["options"] = {"evaluation_profile": V03_COMPARE_PROTOCOL_ID}
-        snapshot["protocol_manifest"] = {"id": V02_CALIBRATED_COMPARE_PROTOCOL_ID}
+        snapshot["protocol_manifest"] = {"id": protocol_id}
     elif explicit_source == "options":
         snapshot["options"] = {"evaluation_profile": DEFAULT_COMPARE_PROTOCOL_ID}
-        snapshot["protocol_manifest"] = {"id": V02_CALIBRATED_COMPARE_PROTOCOL_ID}
+        snapshot["protocol_manifest"] = {"id": protocol_id}
     else:
         snapshot["protocol_manifest"] = {"id": DEFAULT_COMPARE_PROTOCOL_ID}
 
@@ -72,9 +83,9 @@ def test_legacy_and_non_compare_profile_fallbacks_are_preserved(fields, expected
     assert _task_from_snapshot(snapshot, "legacy").evaluation_profile == expected
 
 
-def test_calibrated_frozen_revision_survives_restore_and_export():
-    manifest = {"id": V02_CALIBRATED_COMPARE_PROTOCOL_ID,
-                "standard_version": "0.2-simplified-calibrated", "bundle_revision": "0.2.2"}
+@pytest.mark.parametrize("protocol_id,standard,revision", EXPERIMENTAL_PROTOCOLS)
+def test_experimental_frozen_revision_survives_restore_and_export(protocol_id, standard, revision):
+    manifest = {"id": protocol_id, "standard_version": standard, "bundle_revision": revision}
     snapshot = {"task_id": "frozen", "mode": "compare", "status": "done",
                 "protocol_manifest": manifest,
                 "results": [{"index": 0, "error": "timeout"}]}
@@ -82,4 +93,4 @@ def test_calibrated_frozen_revision_survives_restore_and_export():
     restored = snapshot_payload(task_to_snapshot(task))
     assert task.protocol_manifest == manifest
     assert restored["protocol_manifest"] == manifest
-    assert restored["evaluation_profile"] == V02_CALIBRATED_COMPARE_PROTOCOL_ID
+    assert restored["evaluation_profile"] == protocol_id

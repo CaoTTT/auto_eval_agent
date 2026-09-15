@@ -10,6 +10,7 @@ from auto_eval.config import AppConfig, JudgeConfig, VisualModeProfile
 from auto_eval.judges.compare_protocols import (
     DEFAULT_COMPARE_PROTOCOL_ID,
     V02_CALIBRATED_COMPARE_PROTOCOL_ID,
+    V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID,
     V03_COMPARE_PROTOCOL_ID,
     resolve_compare_protocol,
 )
@@ -22,6 +23,7 @@ from auto_eval.web.tasks import Task, _task_from_snapshot, latest_results_by_ind
 @pytest.mark.parametrize("protocol_id", [
     DEFAULT_COMPARE_PROTOCOL_ID, V03_COMPARE_PROTOCOL_ID,
     V02_CALIBRATED_COMPARE_PROTOCOL_ID,
+    V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID,
 ])
 async def test_real_retry_uses_frozen_protocol_after_restore(tmp_path, monkeypatch, protocol_id):
     protocol = resolve_compare_protocol(protocol_id)
@@ -89,6 +91,9 @@ async def test_real_retry_uses_frozen_protocol_after_restore(tmp_path, monkeypat
     assert retry["succeeded"] == 1
     assert len(calls) == len(closed) == 1
     assert f"qa_competitor_compare/{protocol.standard_version} 标准" in calls[0][0]
+    assert ("【思考暴露（内部过程信息泄露）】" in calls[0][0]) == (
+        protocol_id == V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID
+    )
     result = latest_results_by_index(restored)[0]
     assert "error" not in result
     assert result["standard_version"] == protocol.standard_version
@@ -104,8 +109,10 @@ async def test_real_retry_uses_frozen_protocol_after_restore(tmp_path, monkeypat
 @pytest.mark.parametrize("frozen_id,requested_id", [
     (DEFAULT_COMPARE_PROTOCOL_ID, V02_CALIBRATED_COMPARE_PROTOCOL_ID),
     (V02_CALIBRATED_COMPARE_PROTOCOL_ID, DEFAULT_COMPARE_PROTOCOL_ID),
+    (DEFAULT_COMPARE_PROTOCOL_ID, V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID),
+    (V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID, DEFAULT_COMPARE_PROTOCOL_ID),
 ])
-async def test_existing_task_rejects_switching_to_or_from_calibrated(monkeypatch, frozen_id, requested_id):
+async def test_existing_task_rejects_switching_comparison_profile(monkeypatch, frozen_id, requested_id):
     task = Task(id="frozen", mode="compare", items=[], options={}, status="done",
                 evaluation_profile=frozen_id)
 

@@ -24,12 +24,17 @@ from .visual_compare_prompt_v02_calibrated import (
     VISUAL_COMPARE_SYSTEM as V02_CALIBRATED_SYSTEM,
     VISUAL_COMPARE_USER as V02_CALIBRATED_USER,
 )
+from .visual_compare_prompt_v02_thinking_exposure import (
+    VISUAL_COMPARE_SYSTEM as V02_THINKING_EXPOSURE_SYSTEM,
+    VISUAL_COMPARE_USER as V02_THINKING_EXPOSURE_USER,
+)
 
 
 STANDARD_ID = "qa_competitor_compare"
 DEFAULT_COMPARE_PROTOCOL_ID = f"{STANDARD_ID}@0.2-simplified"
 V03_COMPARE_PROTOCOL_ID = f"{STANDARD_ID}@0.3"
 V02_CALIBRATED_COMPARE_PROTOCOL_ID = f"{STANDARD_ID}@0.2-simplified-calibrated"
+V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID = f"{STANDARD_ID}@0.2-simplified-thinking-exposure"
 DIMENSIONS = (
     "understanding",
     "accuracy",
@@ -154,6 +159,20 @@ _PROTOCOLS = {
         status="experimental",
         system_template=V02_CALIBRATED_SYSTEM,
         user_template=V02_CALIBRATED_USER,
+        observation_model=VisualCompareObservationV02,
+        require_response_pass=True,
+        score_min=1,
+        score_max=5,
+    ),
+    V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID: CompareProtocol(
+        id=V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID,
+        standard_id=STANDARD_ID,
+        standard_version="0.2-simplified-thinking-exposure",
+        bundle_revision="0.2.3",
+        display="V0.2 简化版·思考暴露优化（实验）",
+        status="experimental",
+        system_template=V02_THINKING_EXPOSURE_SYSTEM,
+        user_template=V02_THINKING_EXPOSURE_USER,
         observation_model=VisualCompareObservationV02,
         require_response_pass=True,
         score_min=1,

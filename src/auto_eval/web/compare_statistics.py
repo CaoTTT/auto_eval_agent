@@ -30,6 +30,7 @@ SCORE_DIMENSIONS = tuple(d for d in DIMENSIONS if d != "accuracy")
 THRESHOLDS = {
     "0.2-simplified": (4, 2),
     "0.2-simplified-calibrated": (4, 2),
+    "0.2-simplified-thinking-exposure": (4, 2),
     "0.3": (2, 1),
 }
 BOOTSTRAP_SAMPLES = 2000
