@@ -274,6 +274,21 @@ def api_parse(req: ParseReq):
     return {"items": items, "errors": errs, "count": len(items)}
 
 
+@app.get("/api/request-pacing")
+async def api_request_pacing() -> dict:
+    """Read local request pacing without creating a controller or exposing keys."""
+    from ..request_throttle import MODEL, supports_bailian_pacing
+
+    controllers = getattr(asyncio.get_running_loop(), "_auto_eval_request_throttles", {})
+    controller = controllers.get(MODEL)
+    return {
+        "enabled": any(supports_bailian_pacing(judge) for judge in cfg().judges),
+        "active": controller is not None,
+        "scope": "process_event_loop",
+        "controller": controller.snapshot() if controller is not None else None,
+    }
+
+
 @app.post("/api/eval")
 async def api_eval(req: EvalReq):
     if not req.items:

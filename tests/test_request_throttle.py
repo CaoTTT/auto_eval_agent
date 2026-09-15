@@ -55,7 +55,9 @@ async def test_keeps_sending_before_previous_responses_return():
     throttle, clock = limiter()
     records = [await throttle.acquire(100) for _ in range(16)]
     # No finish/release occurred: rate admission does not wait for a batch.
-    assert [r.sent for r in records] == pytest.approx([i / 8 for i in range(16)])
+    gaps = [b.sent - a.sent for a, b in zip(records, records[1:])]
+    assert all(.125 <= gap < .13 for gap in gaps)
+    assert records[-1].sent < 2  # All 16 start while earlier responses are pending.
     for record in records:
         throttle.finish(record)
 
@@ -66,10 +68,10 @@ async def test_tpm_sliding_window_and_usage_settlement():
     first = await throttle.acquire(400)
     throttle.finish(first, {"prompt_tokens": 600, "completion_tokens": 100})
     second = await throttle.acquire(400)
-    assert second.sent == 60  # Actual usage, not just RPM, blocks admission.
+    assert 60 < second.sent < 60.01  # Conservative inclusive-window boundary.
     throttle.finish(second, {"total_tokens": 100})
     third = await throttle.acquire(400)
-    assert third.sent == 84
+    assert 84 < third.sent < 84.01
     throttle.finish(third)
 
 
@@ -92,18 +94,18 @@ async def test_warmup_restarts_after_idle():
     clock = Clock()
     throttle = RequestThrottle(clock=clock, sleep=clock.sleep)
     a, b = await throttle.acquire(1), await throttle.acquire(1)
-    assert b.sent - a.sent == .5  # 2 RPS startup, gradually growing to 8.
+    assert .5 <= b.sent - a.sent < .51  # 2 RPS startup plus dispatch margin.
     throttle.finish(a)
     throttle.finish(b)
     clock.now += 40
     c, d = await throttle.acquire(1), await throttle.acquire(1)
-    assert d.sent - c.sent == .5
+    assert .5 <= d.sent - c.sent < .51
     throttle.finish(c)
     throttle.finish(d)
 
 
 @pytest.mark.asyncio
-async def test_shared_429_cooldown_honors_retry_after_and_recovers():
+async def test_shared_429_cooldown_honors_retry_after_without_premature_recovery():
     throttle, clock = limiter()
     a, b = await throttle.acquire(1), await throttle.acquire(1)
     exc = RateLimitError("limited", response=httpx.Response(
@@ -115,7 +117,9 @@ async def test_shared_429_cooldown_honors_retry_after_and_recovers():
     assert c.sent >= 20
     clock.now += 11
     throttle.finish(c, {"total_tokens": 1})
-    assert throttle._scale == .6
+    # One successful request after 11 seconds is not sufficient evidence to
+    # recover. Sustained-health recovery is exercised in the core tests.
+    assert throttle._scale == .5
 
 
 @pytest.mark.asyncio
@@ -296,7 +300,7 @@ async def test_every_actual_stream_attempt_passes_admission(monkeypatch, first_e
     result = await llm_stream.stream_chat_completion(None, {"messages": [], "model": "fake"},
                                                     throttle=throttle, retry_base_s=0)
     assert result is response
-    assert len(attempts) == len(throttle._records) == 2
+    assert len(attempts) == throttle.snapshot()["total_requests"] == 2
     assert attempts[1]["extra_headers"]["X-DashScope-Wait-Timeout"] == "30"
     assert throttle._slots._value == 128
 
@@ -311,7 +315,7 @@ async def test_stream_timeout_starts_after_admission_and_releases_slot(monkeypat
     with pytest.raises(asyncio.TimeoutError):
         await wait_for_active(llm_stream.stream_chat_completion(None, {"messages": []},
             throttle=throttle, total_timeout_s=.02, max_attempts=1), timeout=.05)
-    assert len(throttle._records) == 1  # It actually reached the network boundary.
+    assert throttle.snapshot()["total_requests"] == 1
     assert throttle._slots._value == 128
 
 

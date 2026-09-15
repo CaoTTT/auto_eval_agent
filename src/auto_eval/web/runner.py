@@ -16,7 +16,7 @@ from ..paths import RUNS_DIR
 from ..preparation import run_preparation, preparation_limit
 from ..request_throttle import (
     PREPARATION_CONCURRENCY, recommended_concurrency, supports_bailian_pacing,
-    wait_for_active,
+    wait_for_active, SECOND_REQUEST_LIMIT,
 )
 from ..config import AppConfig, VisualModeProfile
 from ..query_images import prepare_query_images, QueryImageError, PREPARED_FIELDS
@@ -283,6 +283,7 @@ def _make_item_evaluator(
     if media_sem is not None:
         log_event("请求调度", "启用百炼平滑调度", details={
             "Case容量": capacity, "媒体并发": PREPARATION_CONCURRENCY,
+            "连续1秒请求上限": SECOND_REQUEST_LIMIT,
             "RPM目标": 480, "TPM目标": 800_000,
         })
     eval_timeout = float(runtime_options.get("eval_timeout_s") or runtime_options.get("eval_timeout") or 300.0)

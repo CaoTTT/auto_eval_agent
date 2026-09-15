@@ -35,6 +35,31 @@ createApp({
       const selected = judges.value.filter((j) => selectedJudges.value.includes(j.name));
       return selected.length > 0 && selected.every((j) => j.request_pacing);
     });
+    const pacingStatus = ref(null);
+    const pacingError = ref("");
+    let pacingLoading = false;
+
+    function pacingNumber(value, digits = 0) {
+      return typeof value === "number" && Number.isFinite(value)
+        ? value.toLocaleString("zh-CN", { maximumFractionDigits: digits }) : "—";
+    }
+
+    function pacingWaitLabel(reason) {
+      return ({
+        cooldown: "限流冷却", second_window: "连续 1 秒请求额度",
+        request_window: "连续 60 秒请求额度", minute_window: "连续 60 秒请求额度",
+        token_budget: "Token 预算", pacing: "平滑发送间隔", warmup: "逐步升速",
+        inflight: "等待响应槽位", inflight_limit: "等待响应槽位",
+      })[reason] || (reason ? "等待发送额度" : "额度可用");
+    }
+
+    function pacingLimitLabel(kind) {
+      return ({
+        requests: "请求频率", request: "请求频率", tokens: "Token 额度",
+        token: "Token 额度", burst: "增速", overload: "服务拥塞",
+        congestion: "服务拥塞", unknown: "未分类限流",
+      })[kind] || (kind ? "未分类限流" : "无");
+    }
     const evalTimeout = ref(300);
     const submitting = ref(false);
     const running = ref(false);
@@ -1337,7 +1362,35 @@ createApp({
           running: data.running || null,
           queued: data.queued || [],
         };
+        await loadRequestPacing();
       } catch (_) {}
+    }
+
+    async function loadRequestPacing() {
+      if (disposed) return;
+      if (!judges.value.some((judge) => judge.request_pacing)
+          || !(queueState.value.running || running.value || repairStatus.value === "running")) {
+        pacingStatus.value = null;
+        pacingError.value = "";
+        return;
+      }
+      if (pacingLoading || (typeof document !== "undefined" && document.hidden)) return;
+      pacingLoading = true;
+      try {
+        const response = await fetch("/api/request-pacing", { cache: "no-store" });
+        if (!response.ok) throw new Error("调度状态暂不可用");
+        const data = await response.json();
+        if (disposed || !(queueState.value.running || running.value || repairStatus.value === "running")) return;
+        pacingStatus.value = data.enabled && data.active ? data.controller : null;
+        pacingError.value = "";
+      } catch (_) {
+        if (!disposed && (queueState.value.running || running.value || repairStatus.value === "running")) {
+          pacingStatus.value = null;
+          pacingError.value = "调度状态暂不可用；任务继续执行。";
+        }
+      } finally {
+        pacingLoading = false;
+      }
     }
 
     async function cancelQueuedTask(entry) {
@@ -1615,6 +1668,7 @@ createApp({
       datasetSourceTaskId, datasetRevision, useComparisonDataset,
       evaluationProfiles, compareProfiles, selectedEvaluationProfile, evaluationProfileLabel,
       concurrency, requestPacing, evalTimeout, submitting, running, progress, total, results, summary, taskId, runError,
+      pacingStatus, pacingError, pacingNumber, pacingWaitLabel, pacingLimitLabel,
       queueState, queueEntries, selectedTaskStatus, queueNotice, taskStatusLabel, queueKindLabel,
       repairStatus, retryStatusLabel, retrySubmitting, selectedRetryIndexes, activeRetry,
       failedResultIndexes, retryIndexSelected, toggleRetryIndex, retryFailedCases,

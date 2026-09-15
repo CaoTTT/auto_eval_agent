@@ -1,0 +1,302 @@
+"""Deterministic dispatch-window/accounting checks; no model or network calls."""
+import asyncio
+from types import SimpleNamespace
+
+import pytest
+
+from auto_eval.request_throttle import (
+    DEFAULT_TPM, DISPATCH_GUARD_S, MAX_RPM, RequestThrottle,
+    _configured_throttle, admission_wait, wait_for_active,
+)
+
+
+class Clock:
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+    async def sleep(self, delay):
+        assert delay > 0
+        self.now += delay
+
+
+def limiter(**kwargs):
+    clock = Clock()
+    return RequestThrottle(clock=clock, sleep=clock.sleep, warmup_s=0, jitter=lambda: 0, **kwargs), clock
+
+
+class LimitError(Exception):
+    def __init__(self, message, status=429, retry_after=None):
+        super().__init__(message)
+        self.status_code = status
+        self.response = SimpleNamespace(headers={} if retry_after is None else {"Retry-After": retry_after})
+
+
+@pytest.mark.asyncio
+async def test_second_hard_window_survives_disabled_pacing_and_huge_rpm_override():
+    throttle, clock = limiter(rpm=60_000, tpm=10**9)
+    sent = []
+    for _ in range(1200):
+        # Deliberately break soft pacing: independent windows still protect us.
+        throttle._next_send = 0
+        record = await throttle.acquire(1)
+        sent.append(record.sent)
+        throttle.finish(record, {"total_tokens": 0})
+    for index, timestamp in enumerate(sent):
+        if index >= 9:
+            assert timestamp - sent[index - 9] > 1
+        if index >= MAX_RPM:
+            assert timestamp - sent[index - MAX_RPM] > 60
+    assert throttle.snapshot()["peak_requests_last_second"] == 9
+
+
+@pytest.mark.asyncio
+async def test_strict_boundary_and_pause_do_not_accumulate_permits():
+    throttle, clock = limiter()
+    first = await throttle.acquire(1)
+    throttle.finish(first, {"total_tokens": 0})
+    clock.now = 100
+    next_record = await throttle.acquire(1)
+    last = await throttle.acquire(1)
+    assert last.sent - next_record.sent >= .125 + DISPATCH_GUARD_S - 1e-9
+    throttle.finish(next_record)
+    throttle.finish(last)
+
+
+@pytest.mark.asyncio
+async def test_header_completion_fences_socket_yield_without_freeing_response_slot():
+    throttle, clock = limiter()
+    async with throttle.dispatch_lock:
+        first = await throttle.acquire(1)
+        clock.now = 40
+        throttle.headers_sent(first)
+        throttle.headers_sent(first)
+    snapshot = throttle.snapshot()
+    assert snapshot["inflight"] == snapshot["requests_last_second"] == 1
+    assert snapshot["total_requests"] == 1
+    second = await throttle.acquire(1)
+    assert second.sent >= 40.126
+    throttle.finish(first)
+    throttle.finish(second)
+
+
+@pytest.mark.asyncio
+async def test_unfinished_token_reservation_never_expires_and_settlement_wakes_waiter():
+    throttle, clock = limiter(tpm=100)
+    first = await throttle.acquire(100)
+    clock.now = 90
+    waiting = asyncio.create_task(throttle.acquire(20))
+    await asyncio.sleep(0)
+    assert not waiting.done()
+    assert not throttle._lock.locked()
+    snapshot = throttle.snapshot()
+    assert snapshot["reserved_tokens"] == 100
+    assert snapshot["requests_last_minute"] == 0
+    assert snapshot["wait_reason"] == "token_budget"
+    throttle.finish(first, {"prompt_tokens": 80, "completion_tokens": 10})
+    second = await asyncio.wait_for(waiting, .5)
+    assert second.sent == 90
+    assert throttle.snapshot()["total_requests"] == 2
+    assert throttle.snapshot()["token_usage"] == 10
+    throttle.finish(second)
+
+
+@pytest.mark.asyncio
+async def test_output_settlement_does_not_create_phantom_http_requests():
+    throttle, clock = limiter(rpm=1)
+    first = await throttle.acquire(100)
+    clock.now = 90
+    throttle.finish(first, {"prompt_tokens": 80, "completion_tokens": 30})
+    assert throttle.snapshot()["requests_last_minute"] == 0
+    assert throttle.snapshot()["token_usage"] == 30
+    second = await throttle.acquire(100)
+    assert second.sent == 90
+    assert throttle.snapshot()["requests_last_minute"] == 1
+    throttle.finish(second)
+
+
+@pytest.mark.asyncio
+async def test_streamed_output_keeps_own_sixty_second_window_without_double_charge():
+    throttle, clock = limiter()
+    first = await throttle.acquire(100)
+    clock.now = 30
+    throttle.finish(first, {"prompt_tokens": 70, "completion_tokens": 20})
+    assert throttle.snapshot()["token_estimated_total"] == 90
+    clock.now = 61
+    assert throttle.snapshot()["token_estimated_total"] == 20
+    clock.now = 90
+    assert throttle.snapshot()["token_estimated_total"] == 20
+    clock.now += .001
+    assert throttle.snapshot()["token_estimated_total"] == 0
+
+
+@pytest.mark.asyncio
+async def test_duplicate_finish_and_unknown_usage_cancellation_preserve_accounting():
+    throttle, clock = limiter(max_inflight=2)
+    first = await throttle.acquire(100)
+    clock.now = 90
+    throttle.finish(first, error=asyncio.CancelledError())
+    throttle.finish(first, {"total_tokens": 0})
+    assert throttle._slots._value == 2
+    assert throttle.snapshot()["reserved_tokens"] == 0
+    assert throttle.snapshot()["token_usage"] == 100
+    clock.now = 151
+    assert throttle.snapshot()["token_usage"] == 0
+
+
+@pytest.mark.asyncio
+async def test_many_cancelled_waiters_release_slots_and_events_without_dispatching():
+    throttle = RequestThrottle(max_inflight=4, warmup_s=0)
+    first = await throttle.acquire(1)
+    throttle._next_send = throttle._clock() + 100
+    waiters = [asyncio.create_task(throttle.acquire(1)) for _ in range(20)]
+    await asyncio.sleep(.01)
+    for waiter in waiters:
+        waiter.cancel()
+    results = await asyncio.gather(*waiters, return_exceptions=True)
+    assert all(isinstance(result, asyncio.CancelledError) for result in results)
+    throttle.finish(first)
+    assert throttle._slots._value == 4
+    snapshot = throttle.snapshot()
+    assert snapshot["pending"] == snapshot["inflight"] == 0
+    assert snapshot["total_requests"] == 1
+    assert snapshot["wait_reason"] is None
+    assert not throttle._lock.locked()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("message,status,kind,rpm,tpm,inflight", [
+    ("limit_requests", 429, "request", 240, 800_000, 128),
+    ("limit_tokens", 429, "token", 480, 400_000, 64),
+    ("limit_burst_rate", 429, "burst", 480, 800_000, 128),
+    ("busy", 503, "congestion", 240, 800_000, 64),
+    ("limited", 429, "unknown", 240, 400_000, 128),
+])
+async def test_feedback_distinguishes_limits_and_deduplicates_response_wave(message, status, kind, rpm, tpm, inflight):
+    throttle, clock = limiter()
+    first, second = await throttle.acquire(1), await throttle.acquire(1)
+    error = LimitError(message, status, "20")
+    throttle.finish(first, error=error)
+    throttle.finish(second, error=error)
+    snapshot = throttle.snapshot()
+    assert snapshot["last_limit_kind"] == kind
+    assert snapshot["request_budget"] == rpm
+    assert snapshot["token_budget"] == tpm
+    assert snapshot["inflight_limit"] == inflight
+    assert snapshot["cooldown_remaining"] >= 20
+    assert snapshot["total_limited"] == 2
+    third = await throttle.acquire(1)
+    assert third.sent >= 20
+    throttle.finish(third)
+
+
+@pytest.mark.parametrize("body,expected", [
+    ({"code": "Throttling.AllocationQuota"}, "token"),
+    ({"message": "Allocated quota exceeded"}, "token"),
+    ({"error": {"message": "Request rate increased too quickly"}}, "burst"),
+    ({"error": {"code": "Throttling.BurstQuota"}}, "burst"),
+    ({"error": {"code": "Throttling.RateQuota"}}, "request"),
+    ({"messages": [{"content": "token rate exceeded"}]}, "unknown"),
+])
+def test_provider_error_code_and_nested_body_classification(body, expected):
+    error = LimitError("provider error")
+    error.body = body
+    assert RequestThrottle._limit_kind(error) == expected
+
+
+@pytest.mark.asyncio
+async def test_adaptive_mode_requires_successes_time_and_backlog_and_stays_below_caps():
+    throttle, clock = limiter(adaptive=True)
+    clock.now = 120
+    assert throttle.snapshot()["request_budget"] == 480  # Idle never upgrades.
+    for _ in range(29):
+        record = await throttle.acquire(1)
+        throttle.finish(record, {"total_tokens": 1})
+    assert throttle.snapshot()["request_budget"] == 480
+    record = await throttle.acquire(1)
+    throttle.finish(record, {"total_tokens": 1})
+    record = await throttle.acquire(1)
+    assert throttle.snapshot()["request_budget"] == 495
+    assert throttle.snapshot()["token_budget"] == 825_000
+    throttle.finish(record, {"total_tokens": 1})
+    for _ in range(5):
+        clock.now += 61
+        for _ in range(30):
+            record = await throttle.acquire(1)
+            throttle.finish(record, {"total_tokens": 1})
+    assert throttle.snapshot()["request_budget"] == 540
+    assert throttle.snapshot()["token_budget"] == 900_000
+
+
+@pytest.mark.asyncio
+async def test_recovery_after_request_limit_needs_full_healthy_interval_and_backlog():
+    throttle, clock = limiter()
+    first = await throttle.acquire(1)
+    throttle.finish(first, error=LimitError("limit_requests"))
+    assert throttle.snapshot()["target_rps"] == 4
+    for _ in range(30):
+        record = await throttle.acquire(1)
+        throttle.finish(record, {"total_tokens": 1})
+    assert clock.now < 60
+    assert throttle.snapshot()["target_rps"] == 4
+    clock.now = 70
+    assert throttle.snapshot()["target_rps"] == 4  # No waiting work yet.
+    record = await throttle.acquire(1)
+    assert throttle.snapshot()["target_rps"] == 4.25
+    assert throttle.snapshot()["token_budget"] == 800_000
+    throttle.finish(record)
+
+
+@pytest.mark.asyncio
+async def test_default_budget_cannot_auto_upgrade_and_text_calibration_does_not_change_vision():
+    throttle, clock = limiter()
+    vision_before = throttle.estimate(100, "vision")
+    for _ in range(35):
+        record = await throttle.acquire(100, input_proxy=100, kind="text")
+        throttle.finish(record, {"prompt_tokens": 10, "completion_tokens": 1})
+    clock.now += 61
+    record = await throttle.acquire(100)
+    assert throttle.snapshot()["request_budget"] == 480
+    assert throttle.snapshot()["token_budget"] == DEFAULT_TPM
+    assert throttle.estimate(100, "vision") == vision_before
+    throttle.finish(record)
+
+
+@pytest.mark.parametrize("variable,value", [
+    ("AUTO_EVAL_BAILIAN_ADAPTIVE", "maybe"), ("AUTO_EVAL_BAILIAN_RPM", "541"),
+    ("AUTO_EVAL_BAILIAN_RPM", "0"), ("AUTO_EVAL_BAILIAN_TPM", "900001"),
+    ("AUTO_EVAL_BAILIAN_TPM", "nan"), ("AUTO_EVAL_BAILIAN_RPM", "540"),
+])
+def test_environment_rejects_invalid_or_unapproved_high_budgets(monkeypatch, variable, value):
+    for name in ("AUTO_EVAL_BAILIAN_ADAPTIVE", "AUTO_EVAL_BAILIAN_RPM", "AUTO_EVAL_BAILIAN_TPM"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(variable, value)
+    with pytest.raises(ValueError):
+        _configured_throttle()
+
+
+def test_explicit_low_account_limits_are_never_increased_by_adaptive_mode(monkeypatch):
+    monkeypatch.setenv("AUTO_EVAL_BAILIAN_ADAPTIVE", "true")
+    monkeypatch.setenv("AUTO_EVAL_BAILIAN_RPM", "120")
+    monkeypatch.setenv("AUTO_EVAL_BAILIAN_TPM", "10000")
+    throttle = _configured_throttle()
+    assert throttle.rpm == throttle._ceiling_rpm == 120
+    assert throttle.tpm == throttle._ceiling_tpm == 10000
+
+
+@pytest.mark.asyncio
+async def test_nested_active_deadlines_both_exclude_dispatch_wait():
+    async def dispatch():
+        with admission_wait():
+            await asyncio.sleep(.08)
+        await asyncio.sleep(.002)
+        return "ok"
+
+    async def per_http():
+        return await wait_for_active(dispatch(), .025)
+
+    assert await wait_for_active(per_http(), .04) == "ok"
+    with pytest.raises(asyncio.TimeoutError):
+        await wait_for_active(wait_for_active(asyncio.sleep(.08), .02), .1)
