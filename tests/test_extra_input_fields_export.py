@@ -247,6 +247,6 @@ def test_extra_fields_do_not_overwrite_query_image_columns():
     assert row["输入指纹"] == "runtime-hash"
     for number in (1, 2):
         headers, rows, _ = _workbook_rows(snapshot, number)
-        assert "输入图片原图" in headers
+        assert ("输入图片原图" in headers) == (number == 2)
         assert rows[0]["输入字段.输入图片原图"] == "user original field"
         assert json.loads(rows[0]["输入字段.query_image_meta"]) == {"source": True}

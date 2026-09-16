@@ -30,15 +30,76 @@ def tables_workbook(sheets: dict[str,list[StatisticsTable]], *, plain: bool=Fals
                 xml=_sheet_xml([dict(zip(table.headers,row)) for row in table.rows] or [dict.fromkeys(table.headers)])
                 # Empty annotation cells are truly blank, not zero or an empty-string formula.
                 xml=re.sub(r'<c r="[A-Z]+\d+" t="inlineStr"[^>]*><is><t xml:space="preserve"></t></is></c>', '', xml)
-            elif name in ("分歧明细","匹配与排除"):
+            elif name in ("逐题评分对比","匹配与排除"):
                 table=tables[0]
                 xml=_sheet_xml([dict(zip(table.headers,row)) for row in table.rows] or [dict.fromkeys(table.headers)])
+                # Wide case tables keep identifiers and the header visible while scrolling.
+                views=('<sheetViews><sheetView workbookViewId="0">'
+                       '<pane xSplit="2" ySplit="1" topLeftCell="C2" activePane="bottomRight" state="frozen"/>'
+                       '<selection pane="bottomRight" activeCell="C2" sqref="C2"/>'
+                       '</sheetView></sheetViews>')
+                xml=xml.replace('<cols>',views+'<cols>',1)
+                xml=xml.replace('<row r="1">','<row r="1" ht="78" customHeight="1">',1)
+                xml=re.sub(r'(<c r="[A-Z]+1" t="inlineStr") s="1"',r'\1 s="3"',xml)
+                xml=re.sub(r'<c r="[A-Z]+\d+" t="inlineStr"[^>]*><is><t xml:space="preserve"></t></is></c>', '', xml)
                 if table.rows:
                     xml=xml.replace('</worksheet>',f'<autoFilter ref="A1:{_col(len(table.headers))}{len(table.rows)+1}"/></worksheet>')
             else:
                 xml=statistics_sheet_xml(tables,style_start=2,escape_text=_xlsx_text,column_name=_col)
             archive.writestr(f"xl/worksheets/sheet{i}.xml",xml)
     return output.getvalue()
+
+
+def case_comparison_tables(report: dict) -> tuple[StatisticsTable, StatisticsTable]:
+    """Pivot frozen label rows without merging tasks or changing statistical samples."""
+    source=report["rows"]
+    tasks=report.get("task_ids") or list(dict.fromkeys(row["task_id"] for row in source))
+    dimensions=report["config"]["dimensions"]
+    products=report["baseline"]["products"]
+    cases={}
+    by_key={}
+    for row in source:
+        cases.setdefault(row["case_id"],row)
+        by_key[row["case_id"],row["task_id"],row["product_id"],row["dimension_id"]]=row
+    samples={(metric["task_id"],metric["product_id"],metric["dimension_id"],metric["scope"]):set(metric["sample_ids"])
+             for metric in report["metrics"]["scores"]}
+    score_fields=[("模型评分","model_score"),("人工评分","human_score"),("分差（模型－人工）","difference"),
+                  ("纳入各自样本","own")]
+    if len(tasks)>1:
+        score_fields.append(("纳入共同样本","common"))
+    score_fields.append(("统计排除原因","exclusion"))
+    detail_fields=[("人工状态","human_status"),("模型状态","model_status"),("人工批注","human_reason"),
+                   ("模型理由","model_reason"),("人工来源","human_source"),("身份状态","match_status"),
+                   ("核验依据","match_reasons"),("结果绑定","result_input_binding"),("绑定依据","binding_reasons"),
+                   ("排除原因","exclusion"),("匹配ID","match_id"),("证据引用","evidence"),
+                   ("人工适用性","human_applicable"),("模型适用性","model_applicable"),
+                   ("人工Gate","human_gates"),("模型Gate","model_gates"),("模型输入状态","model_input_status")]
+    groups=[(task,p["product_id"],dimension,
+             f'{DIMENSION_NAMES.get(dimension,dimension)}\n{p["display_name"]} [{p["product_id"]}]\n任务 {task}')
+            for dimension in dimensions for p in products for task in tasks]
+    headers=("题号","问题","分类")
+    scores=StatisticsTable("逐题评分对比",headers+tuple(f"{title}\n{label}" for *_,title in groups for label,_ in score_fields))
+    details=StatisticsTable("匹配与排除",headers+tuple(f"{title}\n{label}" for *_,title in groups for label,_ in detail_fields))
+    for cid,case in cases.items():
+        prefix=[cid,case["query"],case.get("category","")]
+        score_values,detail_values=list(prefix),list(prefix)
+        for task,pid,dimension,_ in groups:
+            row=by_key.get((cid,task,pid,dimension),{})
+            for _,field in score_fields:
+                if field in ("own","common"):
+                    score_values.append("是" if row.get("match_id") in samples.get((task,pid,dimension,field),set()) else "否")
+                else:
+                    score_values.append(row.get(field))
+            for _,field in detail_fields:
+                value=row.get(field)
+                if isinstance(value,(dict,list)):
+                    value=json.dumps(value,ensure_ascii=False)
+                elif isinstance(value,bool):
+                    value="是" if value else "否"
+                detail_values.append(value)
+        scores.rows.append(score_values)
+        details.rows.append(detail_values)
+    return scores,details
 
 
 def export_report(report: dict) -> bytes:
@@ -77,20 +138,17 @@ def export_report(report: dict) -> bytes:
     states=StatisticsTable("人工明确状态一致性",("任务","产品","维度","指标","有效数","一致率"),
                            ("text","text","text","text","count","percent"),
                            [[r["task_id"],product(r["product_id"]),dim(r["dimension_id"]),r["kind"],r["n"],r["agreement"]] for r in report["metrics"]["states"]])
-    detail=StatisticsTable("分歧明细",("任务","题号","产品","维度","问题","人工分","模型分","分差","人工状态","模型状态","人工来源","人工批注","模型理由","身份状态","结果绑定","排除原因","证据引用"))
-    matches=StatisticsTable("匹配与排除",("任务","题号","产品","维度","匹配ID","身份状态","核验依据","结果绑定","绑定依据","排除原因"))
-    for r in report["rows"]:
-        prefix=[r["task_id"],r["case_id"],product(r["product_id"]),dim(r["dimension_id"])]
-        detail.rows.append(prefix+[r["query"],r["human_score"],r["model_score"],r["difference"],r["human_status"],r["model_status"],json.dumps(r["human_source"],ensure_ascii=False),r["human_reason"],r["model_reason"],r["match_status"],r["result_input_binding"],r["exclusion"],r["evidence"]])
-        matches.rows.append(prefix+[r["match_id"],r["match_status"],"；".join(r["match_reasons"]),r["result_input_binding"],"；".join(r["binding_reasons"]),r["exclusion"]])
+    detail,matches=case_comparison_tables(report)
     policy=StatisticsTable("统计口径",("项目","定义"),rows=[
         ["指标版本",report["metrics"]["metric_version"]],["覆盖率", "可比标签数 / 范围内人工有效数字标签数；模型失败不补0"],
         ["一致率 / MAE / 偏差","同一有效集合上的 M=H 比例 / mean(abs(M-H)) / mean(M-H)"],
         ["产品配对","人工 A/B 与模型 A/B 四分均有效的同一题集；分位值=mean(A)/mean(B)"],
         ["共同样本","所选任务每产品维度/产品对的有效题集交集；空集合不排名"],
         ["空值","零分母为 —；NA 与未标注不计数字一致率；内容准确性仅留档"],
+        ["逐题核对","首表每行一个 Case；维度、产品、任务按列展开，模型评分 / 人工评分 / 分差相邻。分差=模型－人工；不符合统计口径时留空，不补0。"],
+        ["样本列","纳入各自样本 / 纳入共同样本直接取冻结统计的样本ID。先筛选为“是”再核对均分、一致率和误差；产品配对指标还需两产品同题均纳入。"],
         ["范围与映射",json.dumps(report["config"],ensure_ascii=False)],
         ["身份确认",json.dumps(report["confirmation"],ensure_ascii=False)],
         ["人工标签摘要",baseline["labels_sha256"]]])
-    return tables_workbook({"对比概览":[summary,coverage,states],"人机评分统计":[score,confusion],"产品差距对比":[pair,ranking],
-                            "分歧明细":[detail],"匹配与排除":[matches],"统计口径":[policy]})
+    return tables_workbook({"逐题评分对比":[detail],"对比概览":[summary,coverage,states],"人机评分统计":[score,confusion],
+                            "产品差距对比":[pair,ranking],"匹配与排除":[matches],"统计口径":[policy]})

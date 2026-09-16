@@ -15,6 +15,7 @@ async function main(){
       if(url==='/api/parse')return {ok:true,json:async()=>parsed};
       throw Error(url);
     }};
+  vm.runInNewContext(strip(read('compare-cases.js')),context);
   vm.runInNewContext(strip(read('app.js')),context);app.mode.value='compare';
   app.selectedEvaluationProfile.value='current-standard';
   app.useComparisonDataset({task_id:'source',dataset_name:'old.jsonl',items:raw});
@@ -30,11 +31,64 @@ async function main(){
   parsed={items:[],errors:['invalid JSONL']};
   await app.onOpManifestFile({target:{files:[{name:'bad.jsonl',text:async()=>''}],value:''}});
   assert.equal(app.datasetName.value,'old.jsonl');assert.equal(app.opItems.value.length,25);
+  assert.equal(app.importReport.value.accepted,0);assert.equal(app.importReport.value.rejected,1);
   allowReplace=true;parsed={items:raw.slice(0,2),errors:[]};
   await app.onOpManifestFile({target:{files:[{name:'new.jsonl',text:async()=>''}],value:''}});
   assert.equal(app.datasetName.value,'new.jsonl');assert.equal(app.datasetSourceTaskId.value,'');
   app.opItems.value[1].screenshot2Path='';submitted=null;await app.submit();
   assert.equal(submitted,null);assert.match(app.runError.value,/不会跳过/);
+
+  parsed={items:[
+    {id:'shots',query:'s',product_count:2,evidence_mode:'long_screenshot',screenshot1:'a.png',screenshot2:'b.png',
+      source_data:{video1:'a.mp4',video2:'b.mp4'}},
+    {id:'video',query:'v',product_count:2,evidence_mode:'video_frames',video1:'a.mp4',video2:'b.mp4',
+      source_data:{screenshot1:'inactive.png'}}],
+    errors:['Case rejected: screenshot2 / video1 missing'],rejected_count:1,
+    evidence_counts:{long_screenshot:1,video_frames:1}};
+  await app.onOpManifestFile({target:{files:[{name:'mixed.jsonl',text:async()=>''}],value:''}});
+  assert.equal(app.importReport.value.accepted,2);assert.equal(app.importReport.value.rejected,1);
+  assert.equal(app.importReport.value.screenshots,1);assert.equal(app.importReport.value.videos,1);
+  assert.match(app.errors.value[0],/Case rejected/);
+  await app.submit();
+  assert.equal(submitted.items.length,2);
+  assert.equal(submitted.items[0].screenshot2,'b.png');assert.equal(submitted.items[0].video1,undefined);
+  assert.equal(submitted.items[1].video2,'b.mp4');assert.equal(submitted.items[1].screenshot1,undefined);
+
+  // The editing selector never overrides the same complete-layer policy used at import.
+  const shotDraft=app.opItems.value[0];shotDraft.evidenceMode='video_frames';
+  await app.submit();
+  assert.equal(submitted.items[0].evidence_mode,'long_screenshot');
+  assert.equal(submitted.items[0].video1,undefined);
+  assert.equal(context.caseMedia(shotDraft)[0].role,'screenshot');
+  shotDraft.screenshot2Path='   ';
+  assert.equal(app.canSubmit.value,true);await app.submit();
+  assert.equal(submitted.items[0].evidence_mode,'video_frames');
+  assert.equal(submitted.items[0].video1,'a.mp4');
+  assert.equal(submitted.items[0].screenshot1,undefined);
+  assert.equal(context.caseMedia(shotDraft)[0].role,'video');
+  shotDraft.video2Path='';
+  assert.equal(app.canSubmit.value,false,'cleared draft paths cannot be restored from sourceData');
+  submitted=null;await app.submit();assert.equal(submitted,null);
+  assert.match(app.runError.value,/不会跳过/);
+  assert.equal(context.caseMedia(shotDraft).length,0,'incomplete evidence cannot preview mixed layers');
+
+  // All 2/3-product combinations follow screenshot priority and one shared fallback layer.
+  for(const count of [2,3])for(let mask=0;mask<2**(count*2);mask++){
+    const draft={productCount:count,evidenceMode:'video_frames',sourceData:{screenshot1:'ignored.png'}};
+    for(let n=1;n<=count;n++){
+      draft[`screenshot${n}Path`]=(mask&(1<<(n-1)))?' shot.png ':'';
+      draft[`video${n}Path`]=(mask&(1<<(n-1+count)))?' clip.mp4 ':'';
+    }
+    const complete=(1<<count)-1;
+    const expected=(mask&complete)===complete?'long_screenshot':((mask>>count)&complete)===complete?'video_frames':'';
+    assert.equal(context.selectEvidenceMode(draft),expected);
+  }
+  assert.equal(context.selectEvidenceMode({productCount:2,screenshot1Path:[],screenshot2Path:'x'}),'');
+  assert.equal(context.selectEvidenceMode({productCount:4,screenshot1Path:'x',screenshot2Path:'x'}),'');
+
+  const historical=context.fromDatasetItem({evidence_mode:'video_frames',product_count:2,video1:'a.mp4',video2:'b.mp4',
+    source_data:{screenshot1:'a.png',screenshot2:'b.png'}},0);
+  assert.equal(context.caseMedia(historical)[0].role,'video','readonly history follows its saved evaluated layer');
 
   const requests=[],watchers=[];let cleanup;
   const caseContext={...context,watch(source,fn){watchers.push({source,fn});},onUnmounted(fn){cleanup=fn;},
@@ -51,10 +105,13 @@ async function main(){
   cases.changePage(3);assert.equal(cases.rows.value.length,5);cleanup();
 
   const panelRequests=[],panelContext={...caseContext,nextTick:async()=>{},caseMedia:cases.caseMedia,
+    caseEvidenceMode:context.caseEvidenceMode,selectEvidenceMode:context.selectEvidenceMode,
     fromDatasetItem:caseContext.mapper,CompareCaseList:caseContext.CaseList,
     fetch(url,options){return new Promise(resolve=>panelRequests.push({url,options,resolve}));}};
   vm.runInNewContext(strip(read('compare-data.js')).replace(/^\{ref, computed, onMounted, onUnmounted, nextTick\};/m,'')+'\nthis.Panel=CompareDatasetPanel;',panelContext);
   const panel=panelContext.Panel.setup({items:[],datasetName:'',revision:0});
+  assert.equal(panel.counts([shotDraft]).invalid,1);
+  assert.equal(panel.counts([historical]).videos,1);assert.equal(panel.counts([historical]).shots,0);
   const first=panel.previewDataset('first'),second=panel.previewDataset('second');
   assert.equal(panelRequests[0].options.signal.aborted,true);
   panelRequests[1].resolve({ok:true,json:async()=>({task_id:'second',items:raw})});await second;

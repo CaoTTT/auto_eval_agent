@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <title>auto_eval 评估台</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260916_pause_resume">
+  <link rel="stylesheet" href="/static/style.css?v=20260916_mixed_evidence">
   <style>
     .op-cards { display:flex; flex-direction:column; gap:12px; }
     .op-card { border:1px solid #e2e8f0; border-radius:8px; padding:12px; background:#fafbfc; }
@@ -135,7 +135,7 @@
     <h2>{{ mode==='compare' ? '① 测试数据' : '① 批量输入' }}</h2>
     <p class="hint">{{ formatHint }}</p>
 
-    <compare-dataset-panel v-if="mode==='compare'" :items="opItems" :dataset-name="datasetName" :source-task-id="datasetSourceTaskId" :revision="datasetRevision" :busy="opPreparing || opItems.some(item => item.queryUploading)" :errors="errors"
+    <compare-dataset-panel v-if="mode==='compare'" :items="opItems" :dataset-name="datasetName" :source-task-id="datasetSourceTaskId" :revision="datasetRevision" :busy="opPreparing || opItems.some(item => item.queryUploading)" :errors="errors" :import-report="importReport"
       @upload="onOpManifestFile" @use="useComparisonDataset" @add="addOpItem" @remove="removeOpItem" @query-upload="onQueryImage" @query-path="setQueryImagePath"></compare-dataset-panel>
     <div v-if="isVideoMode && mode!=='compare'" class="op-cards">
       <div class="op-import">
@@ -233,7 +233,7 @@
     <div class="row">
       <span class="lbl">单题超时：</span>
       <input type="number" min="30" max="3600" step="30" v-model.number="evalTimeout" style="width:90px">
-      <span class="hint">秒；复杂题/多裁判建议 300–900，等待本地发送额度不计入。</span>
+      <span class="hint">秒；默认 900，可按需调整，等待本地发送额度不计入。</span>
     </div>
   </section>
 
@@ -520,6 +520,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20260916_pause_resume"></script>
+  <script type="module" src="/static/app.js?v=20260916_human_answers"></script>
 </body>
 </html>

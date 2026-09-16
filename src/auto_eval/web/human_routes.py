@@ -4,14 +4,17 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from urllib.parse import quote
 
 from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import Response
 from pydantic import Field
 
 from .human_baselines import HumanError, ImportMapping, StrictModel, atomic_json, read_json, safe_id
 from .human_baseline_import import MAX_UPLOAD, build_human_template, inspect_workbook, parse_human_labels
+from .human_baseline_export import export_baseline_answers
 from .human_compare import ComparisonRequest, GenerateRequest, freeze_run_snapshot
+from .human_report_export import export_report
 
 
 class PublishRequest(StrictModel):
@@ -95,6 +98,16 @@ def install_human_routes(app, service_getter, peek):
         return {k:v for k,v in data.items() if k not in ("cases","labels","states")}|{
             "labels":data["labels"][(page-1)*page_size:page*page_size],"total":len(data["labels"])}
 
+    @router.get("/api/human-baselines/{baseline_id}/versions/{version}/download")
+    async def baseline_download(baseline_id: str, version: int):
+        def build():
+            baseline=service_getter().store.load_baseline(baseline_id,version)
+            return baseline,export_baseline_answers(baseline)
+        baseline,payload=await asyncio.to_thread(build)
+        filename=f'{baseline["name"]}_人工基准v{version}_答案.xlsx'
+        return Response(payload,media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        headers={"Content-Disposition":f"attachment; filename*=utf-8''{quote(filename)}"})
+
     @router.post("/api/human-comparisons/preview")
     async def preview(request: ComparisonRequest):
         snapshots=[]
@@ -167,11 +180,18 @@ def install_human_routes(app, service_getter, peek):
 
     @router.get("/api/human-comparisons/{report_id}/download")
     async def download(report_id: str):
-        manifest=await asyncio.to_thread(read_json,service_getter().store.path("reports",report_id))
-        if manifest["status"]!="ready":
-            raise HumanError("报告尚未生成",409)
-        return FileResponse(service_getter().store.path("reports",report_id,"report.xlsx"),
-                            filename=f'{manifest["baseline_name"]}_人工基准v{manifest["version"]}_人机对比_{report_id}.xlsx',
-                            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        def build():
+            store=service_getter().store
+            manifest=read_json(store.path("reports",report_id))
+            if manifest["status"]!="ready":
+                raise HumanError("报告尚未生成",409)
+            # Regenerate presentation only, so historical frozen reports also
+            # receive the current layout without recomputing any statistics.
+            report=read_json(store.path("reports",report_id,"report.json"))
+            return manifest,export_report(report)
+        manifest,payload=await asyncio.to_thread(build)
+        filename=f'{manifest["baseline_name"]}_人工基准v{manifest["version"]}_人机对比_{report_id}.xlsx'
+        return Response(payload,media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        headers={"Content-Disposition":f"attachment; filename*=utf-8''{quote(filename)}"})
 
     app.include_router(router)

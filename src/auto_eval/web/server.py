@@ -31,7 +31,7 @@ from ..media import probe_duration
 from ..paths import RUNS_DIR
 from ..query_images import normalize_query_input, PREPARED_FIELDS, prepare_query_images, QueryImageError
 from ..preparation import run_preparation
-from .parse_input import Mode, compare_evidence_mode, parse_csv, parse_jsonl, parse_text
+from .parse_input import Mode, normalize_compare_evidence, parse_csv, parse_jsonl, parse_text
 from .history import (
     write_xlsx,
     delete_snapshot,
@@ -213,8 +213,17 @@ def _validate_eval_request(req: EvalReq, app_cfg) -> None:
             item.update(normalize_query_input(item))
             for field in PREPARED_FIELDS:
                 item.pop(field, None)
-            product_count, evidence_mode = compare_evidence_mode(item)
-            item.update(product_count=product_count, evidence_mode=evidence_mode)
+            for field in ("media", "frame_count", *(f"{prefix}{n}" for n in (1, 2, 3)
+                          for prefix in ("frames", "duration", "screenshot_meta"))):
+                item.pop(field, None)
+            for n in (1, 2, 3):
+                item.pop(f"video{n}_path", None)
+            normalized = normalize_compare_evidence(item)
+            # Preserve unused input paths for provenance, never prepared evidence.
+            normalized.setdefault("source_data", {key: value for key, value in item.items()
+                                                   if key != "source_data"})
+            item.clear()
+            item.update(normalized)
         except ValueError as exc:
             invalid.append(f"第{index}条 {exc}")
     if invalid:
@@ -289,7 +298,10 @@ def api_parse(req: ParseReq):
         items, errs = parse_text(req.text, req.mode)
     else:
         raise HTTPException(400, "需提供 text、jsonl 或 csv")
-    return {"items": items, "errors": errs, "count": len(items)}
+    return {"items": items, "errors": errs, "count": len(items),
+            "rejected_count": len(errs),
+            "evidence_counts": {mode: sum(item.get("evidence_mode") == mode for item in items)
+                                for mode in ("long_screenshot", "video_frames")}}
 
 
 @app.get("/api/request-pacing")

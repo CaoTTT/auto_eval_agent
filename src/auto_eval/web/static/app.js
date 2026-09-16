@@ -1,4 +1,4 @@
-import { createApp, ref, computed, onMounted, onUnmounted, nextTick } from "./compare-data.js?v=20260916_human_comparison";
+import { createApp, ref, computed, onMounted, onUnmounted, nextTick, selectEvidenceMode } from "./compare-data.js?v=20260916_human_answers";
 
 createApp({
   setup() {
@@ -22,6 +22,7 @@ createApp({
     const opJumpPage = ref("");
     const opPreparing = ref(false);
     const errors = ref([]);
+    const importReport = ref(null);
     const judges = ref([]);
     const selectedJudges = ref([]);
     const visibleJudges = computed(() => judges.value);
@@ -61,7 +62,7 @@ createApp({
         congestion: "服务拥塞", unknown: "未分类限流",
       })[kind] || (kind ? "未分类限流" : "无");
     }
-    const evalTimeout = ref(300);
+    const evalTimeout = ref(900);
     const submitting = ref(false);
     const running = ref(false);
     const progress = ref(0);
@@ -230,7 +231,7 @@ createApp({
     const formatHint = computed(
       () =>
         ({
-          compare: "支持文字题与图文题混合导入：query_images 可选填一张提问图片路径；product_count 为2或3；同题统一用 screenshot1/2/3 或 video1/2/3，不同题可以不同。整批使用同一标准。",
+          compare: "支持文字题与图文题混合导入：query_images 可选填一张提问图片路径；product_count 为2或3。每题优先使用全产品长截图，否则回退全产品录屏；无法统一证据的题目在导入时拒绝。",
           rich_content: "可逐题上传，也可导入 JSON / JSONL / CSV：query、context(可选)、video_path、category/answer_text/task_start_time/task_end_time(均可选)；sessionid 等额外字段会保留到 Excel 导出。普通图片不算挂卡，回答区域蓝色文字按 Superlink 统计。",
         }[mode.value])
     );
@@ -692,6 +693,7 @@ createApp({
 
     function switchMode(k) {
       datasetImportVersion++;
+      importReport.value = null;
       opPreparing.value=false;
       datasetSourceTaskId.value = "";
       datasetBaseline = "";
@@ -755,7 +757,7 @@ createApp({
       items.value=JSON.parse(JSON.stringify(data.items));
       opItems.value=comparisonDraftRows(items.value);
       datasetName.value=data.dataset_name || '历史测评数据';datasetSourceTaskId.value=data.task_id;
-      opPage.value=1;errors.value=[];datasetBaseline=draftFingerprint();datasetRevision.value++;
+      opPage.value=1;errors.value=[];importReport.value=null;datasetBaseline=draftFingerprint();datasetRevision.value++;
     }
     async function onQueryImage(event, index) {
       const item = opItems.value[index];
@@ -826,6 +828,7 @@ createApp({
       const importMode = mode.value;
       opPreparing.value = true;
       errors.value = [];
+      importReport.value = null;
       try {
         const content = await file.text();
         const isCsv = /\.csv$/i.test(file.name || "");
@@ -843,13 +846,19 @@ createApp({
         console.log("[onOpManifestFile] response ok:", parseResponse.ok, "items:", (parsed.items || []).length, "errors:", (parsed.errors || []).length);
         if (!parseResponse.ok) throw new Error(parsed.detail || (isCsv ? "CSV 解析请求失败" : "JSON / JSONL 解析请求失败"));
         const importErrors = [...(parsed.errors || [])];
+        const report = {filename: file.name || '', accepted: (parsed.items || []).length,
+          rejected: parsed.rejected_count ?? importErrors.length,
+          screenshots: parsed.evidence_counts?.long_screenshot ?? (parsed.items || []).filter(it => it.evidence_mode === 'long_screenshot').length,
+          videos: parsed.evidence_counts?.video_frames ?? (parsed.items || []).filter(it => it.evidence_mode === 'video_frames').length};
         if (!(parsed.items || []).length) {
+          importReport.value = report;
           errors.value = importErrors.length ? importErrors : ["文件中没有可导入的数据"];
           console.warn("[onOpManifestFile] no items parsed");
           return;
         }
 
         if (mode.value === 'compare' && !confirmDatasetReplacement()) return;
+        importReport.value = report;
         if (mode.value === 'compare') { cancelHistoryLoad();detachResultView(); }
         datasetName.value = file.name || '';
         datasetSourceTaskId.value = '';
@@ -906,19 +915,12 @@ createApp({
     function opItemReady(it) {
       if (!it.query.trim()) return false;
       if (mode.value !== "compare") return Boolean((it.frames || []).length || it.videoPath);
-      const productCount = Number(it.productCount) === 3 ? 3 : 2;
-      if (it.evidenceMode === "long_screenshot") {
-        return Boolean(it.screenshot1Path && it.screenshot2Path && (productCount === 2 || it.screenshot3Path));
-      }
-      return Boolean(
-        (it.video1Path || it.videoPath)
-        && it.video2Path
-        && (productCount === 2 || it.video3Path)
-      );
+      return Boolean(selectEvidenceMode(it));
     }
 
     const canSubmit = computed(() =>
-      !opPreparing.value && !opItems.value.some(it => it.queryUploading) && opItems.value.some(opItemReady)
+      !opPreparing.value && !opItems.value.some(it => it.queryUploading)
+      && (mode.value === 'compare' ? opItems.value.length > 0 && opItems.value.every(opItemReady) : opItems.value.some(opItemReady))
     );
 
     async function submit() {
@@ -946,15 +948,10 @@ createApp({
           item.query_images = [...(it.queryImages || [])];
           const productCount = Number(it.productCount) === 3 ? 3 : 2;
           item.product_count = productCount;
-          if (it.evidenceMode === "long_screenshot") {
-            item.evidence_mode = "long_screenshot";
-            item.screenshot1 = it.screenshot1Path;
-            item.screenshot2 = it.screenshot2Path;
-            if (productCount === 3) item.screenshot3 = it.screenshot3Path;
-          } else {
-            item.video1 = it.video1Path || it.videoPath || "";
-            item.video2 = it.video2Path || "";
-            if (productCount === 3) item.video3 = it.video3Path || "";
+          item.evidence_mode = selectEvidenceMode(it);
+          const evidencePrefix = item.evidence_mode === 'long_screenshot' ? 'screenshot' : 'video';
+          for (let n = 1; n <= productCount; n++) {
+            item[`${evidencePrefix}${n}`] = it[`${evidencePrefix}${n}Path`].trim();
           }
           item.context1 = (it.context1 || "").trim();
           item.context2 = (it.context2 || "").trim();
@@ -1850,7 +1847,7 @@ createApp({
     });
 
     return {
-      modes, mode, modeLabel, isVideoMode, items, errors, judges, visibleJudges, selectedJudges, datasetName,
+      modes, mode, modeLabel, isVideoMode, items, errors, importReport, judges, visibleJudges, selectedJudges, datasetName,
       datasetSourceTaskId, datasetRevision, useComparisonDataset,
       evaluationProfiles, compareProfiles, selectedEvaluationProfile, evaluationProfileLabel,
       concurrency, mediaConcurrency, requestPacing, evalTimeout, submitting, running, progress, total, results, summary, taskId, runError,

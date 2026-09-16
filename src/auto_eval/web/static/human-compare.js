@@ -11,6 +11,7 @@ export const HumanComparePanel = {
     const rows=ref([]),rowTotal=ref(0),rowPage=ref(1),rowFilters=ref({product_id:'',dimension_id:'',task_id:'',category:'',direction:'',input_modality:'',evidence_mode:'',min_difference:0,state_mismatch:false});
     const evidence=ref({}),scopeText=ref(''),selectedDimensions=ref(Object.keys(HUMAN_DIMENSIONS).filter(k=>k!=='accuracy'));
     const baseline=computed(()=>baselines.value.find(b=>`${b.baseline_id}:${b.version}`===baselineKey.value));
+    const baselineDownloadUrl=computed(()=>baseline.value?`/api/human-baselines/${encodeURIComponent(baseline.value.baseline_id)}/versions/${baseline.value.version}/download`:'');
     const scoreRows=computed(()=>report.value?.metrics?.scores||[]),pairRows=computed(()=>report.value?.metrics?.pairs||[]);
     const statsDimension=ref('understanding'),statsScope=ref('own');
     const visibleScores=computed(()=>scoreRows.value.filter(r=>r.dimension_id===statsDimension.value&&r.scope===statsScope.value));
@@ -63,7 +64,9 @@ export const HumanComparePanel = {
     async function publish(){await run(async()=>{const selected=baseline.value;
       const d=await post('/api/human-baselines',{import_id:imports.value.import_id,preview_sha256:importPreview.value.preview_sha256,name:name.value,valid_only:validOnly.value,
         baseline_id:upgrade.value&&selected?selected.baseline_id:'',expected_version:upgrade.value&&selected?selected.version:0});
-      baselineSearch.value='';await loadBaselines();baselineKey.value=`${d.baseline_id}:${d.version}`;imports.value=null;importPreview.value=null;baselineChanged();});}
+      baselineSearch.value='';await loadBaselines();
+      if(!baselines.value.some(b=>b.baseline_id===d.baseline_id&&b.version===d.version))baselines.value.unshift(d);
+      baselineKey.value=`${d.baseline_id}:${d.version}`;imports.value=null;importPreview.value=null;baselineChanged();});}
     async function match(){await run(async()=>{if(!baseline.value)throw Error('请先选择人工基准');
       preview.value=await post('/api/human-comparisons/preview',{baseline_id:baseline.value.baseline_id,version:baseline.value.version,
         dimensions:selectedDimensions.value,case_ids:scopeText.value?scopeText.value.replace(/\r\n/g,'\n').split('\n').filter(Boolean):null,
@@ -101,7 +104,7 @@ export const HumanComparePanel = {
       applicability:'维度适用性',response_gate:'响应 Gate',safety_gate:'安全 Gate',own:'各自有效样本',common:'共同有效样本'};
     const statusLabel=v=>statusNames[v]||v;
     const countsText=v=>Object.entries(v||{}).map(([k,n])=>statusLabel(k)+' '+n).join(' · ');
-    return {open,busy,error,baselines,baselineKey,baseline,baselineSearch,baselinePage,baselineTotal,imports,mapping,importPreview,name,validOnly,upgrade,mappingJson,
+    return {open,busy,error,baselines,baselineKey,baseline,baselineDownloadUrl,baselineSearch,baselinePage,baselineTotal,imports,mapping,importPreview,name,validOnly,upgrade,mappingJson,
       tasks,availableTasks,taskSearch,selectedTask,compatibility,preview,previewPage,confirmIdentity,confirmBinding,confirmReason,report,reports,rows,rowTotal,rowPage,rowFilters,evidence,
       standards,templateStandard,selectedDimensions,scopeText,dimensions:HUMAN_DIMENSIONS,visibleScores,visiblePairs,statsDimension,statsScope,
       show,close,run,loadBaselines,searchTasks,addTask,baselineChanged,invalidate,upload,inspect,mappingChanged,reuseMapping,applyJson,addLabel,parse,publish,match,previewRows,generate,viewReport,retry,loadRows,showEvidence,pname,number,percent,time,statusLabel,countsText};
@@ -115,6 +118,7 @@ export const HumanComparePanel = {
       <fieldset :disabled="busy"><legend>1. 选择或导入人工基准</legend>
         <div class="human-toolbar"><input v-model="baselineSearch" placeholder="搜索人工基准"><button @click="run(()=>loadBaselines(1))">搜索</button>
           <select v-model="baselineKey" @change="baselineChanged" aria-label="人工基准"><option value="">请选择人工基准</option><option v-for="b in baselines" :value="b.baseline_id+':'+b.version">{{b.name}} · v{{b.version}} · {{b.case_count}} 题 · {{b.human_standard_version}}</option></select>
+          <a v-if="baselineDownloadUrl" :href="baselineDownloadUrl" download>下载人工基准答案 Excel</a>
           <button v-if="baselinePage>1" @click="run(()=>loadBaselines(baselinePage-1))">上一页</button><button v-if="baselinePage*20<baselineTotal" @click="run(()=>loadBaselines(baselinePage+1))">下一页</button>
           <label class="op-upload-btn">上传人工 Excel<input type="file" accept=".xlsx" @change="upload" hidden></label>
         </div>
@@ -152,6 +156,7 @@ export const HumanComparePanel = {
       </fieldset>
       <div class="human-toolbar" v-if="reports.length"><label>已保存报告 <select @change="run(()=>viewReport($event.target.value))"><option value="">选择历史报告</option><option v-for="r in reports" :value="r.report_id">{{r.baseline_name}} v{{r.version}} · {{time(r.created_at)}} · {{statusLabel(r.status)}}</option></select></label></div>
       <section v-if="report" class="human-report"><div class="human-toolbar"><h3>对比报告</h3><span>{{report.baseline_name}} v{{report.version}} · {{report.report_id}}</span><a v-if="report.status==='ready'" :href="'/api/human-comparisons/'+report.report_id+'/download'" download>导出人机对比 Excel</a></div>
+        <p v-if="report.status==='ready'" class="hint">Excel 逐题对比每行一个 Case，各产品、各维度的模型评分与人工评分答案并列；同一 Case 的多个测评任务也按列排列，方便校对与统计。</p>
         <p v-if="report.status!=='ready'">{{report.status==='error'?report.error:'正在生成报告…'}} <button v-if="report.status==='error'" @click="retry">从冻结输入重试</button></p>
         <template v-else><p class="hint">{{report.compatibility_mode==='regression'?'相对既有人工基准的回归比较':'同标准比较'}} · {{report.warnings.join('；')}}</p>
           <div class="human-toolbar"><label>维度 <select v-model="statsDimension"><option v-for="d in report.config.dimensions" :value="d">{{dimensions[d]}}</option></select></label><label>样本口径 <select v-model="statsScope"><option value="own">各任务自身有效样本</option><option v-if="report.task_ids.length>1" value="common">所有任务共同有效样本</option></select></label></div>

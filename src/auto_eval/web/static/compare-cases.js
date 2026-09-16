@@ -1,5 +1,20 @@
 import {ref, computed, watch, onUnmounted} from "https://unpkg.com/vue@3/dist/vue.esm-browser.js";
 
+export function selectEvidenceMode(item) {
+  const count = Number(item.productCount);
+  if (count !== 2 && count !== 3) return '';
+  for (const [prefix, mode] of [['screenshot', 'long_screenshot'], ['video', 'video_frames']]) {
+    if (Array.from({length:count}, (_, index) => item[`${prefix}${index+1}Path`])
+      .every(path => typeof path === 'string' && path.trim())) return mode;
+  }
+  return '';
+}
+
+export function caseEvidenceMode(item) {
+  // History previews retain their evaluated layer; editable drafts follow current paths.
+  return item._savedEvidenceMode || selectEvidenceMode(item);
+}
+
 export function fromDatasetItem(item, index) {
   const source = item.source_data || {};
   const value = key => item[key] ?? source[key];
@@ -8,6 +23,7 @@ export function fromDatasetItem(item, index) {
     context: value('context') || '', queryImages: [...(item.query_images || [])],
     queryImageMeta: item.query_image_meta || [], productCount: value('product_count') || (value('video3') || value('screenshot3') ? 3 : 2),
     evidenceMode: item.evidence_mode || (value('screenshot1') ? 'long_screenshot' : 'video_frames'),
+    _savedEvidenceMode: item.evidence_mode || (value('screenshot1') ? 'long_screenshot' : 'video_frames'),
     ...Object.fromEntries([1,2,3].flatMap(n => [
       [`video${n}Path`, value(`video${n}`) || ''], [`screenshot${n}Path`, value(`screenshot${n}`) || ''],
       [`answer${n}`, value(`answer${n}`) || ''], [`context${n}`, value(`context${n}`) || ''],
@@ -19,9 +35,12 @@ export function fromDatasetItem(item, index) {
 export function caseMedia(item) {
   const files = [];
   if (item.queryImages?.[0]) files.push({id:'query', role:'query', label:'提问图片', path:item.queryImages[0], meta:item.queryImageMeta?.[0]});
+  const evidenceMode = caseEvidenceMode(item);
+  if (!evidenceMode) return files;
   for (let n=1;n<=item.productCount;n++) {
-    const screenshot = item.evidenceMode === 'long_screenshot';
-    const path = item[`${screenshot ? 'screenshot' : 'video'}${n}Path`];
+    const screenshot = evidenceMode === 'long_screenshot';
+    const rawPath = item[`${screenshot ? 'screenshot' : 'video'}${n}Path`];
+    const path = typeof rawPath === 'string' ? rawPath.trim() : '';
     if (path) files.push({id:`product${n}`, role:screenshot ? 'screenshot' : 'video',
       label:`产品${n}${screenshot ? '回答长截图' : '录屏'}`, path, meta:item[`screenshotMeta${n}`]});
   }
@@ -82,7 +101,7 @@ export const CompareCaseList = {
     watch(listOpen,open=>{if(!open){stopMedia();batchVersion++;}});
     onUnmounted(()=>{stopMedia();batchVersion++;});
     const hasImages=computed(()=>rows.value.some(({item})=>caseMedia(item).some(f=>f.role!=='video')));
-    return {page,search,expanded,media,listOpen,filtered,pageCount,rows,key,caseMedia,toggleCase,toggleMedia,allImages,changePage,hasImages,
+    return {page,search,expanded,media,listOpen,filtered,pageCount,rows,key,caseMedia,caseEvidenceMode,toggleCase,toggleMedia,allImages,changePage,hasImages,
       basename:path=>String(path||'').split(/[\\/]/).pop()};
   },
   template:`
@@ -98,16 +117,17 @@ export const CompareCaseList = {
             <button class="case-toggle" @click="toggleCase(entry.item)" :aria-expanded="!!expanded[entry.item._uiKey]">
               <span>{{expanded[entry.item._uiKey]?'▾':'▸'}} {{entry.index+1}}</span><span class="case-heading-query">{{entry.item.query || '尚未填写问题'}}</span>
             </button>
-            <span class="dataset-tag">{{entry.item.queryImages?.length?'图文':'文字'}}</span><span class="dataset-tag">{{entry.item.evidenceMode==='long_screenshot'?'长截图':'录屏'}}</span><span class="dataset-tag">{{entry.item.productCount}} 产品</span>
+            <span class="dataset-tag">{{entry.item.queryImages?.length?'图文':'文字'}}</span><span class="dataset-tag">{{caseEvidenceMode(entry.item)==='long_screenshot'?'长截图':caseEvidenceMode(entry.item)==='video_frames'?'录屏':'证据不齐全'}}</span><span class="dataset-tag">{{entry.item.productCount}} 产品</span>
           </div>
           <div v-if="expanded[entry.item._uiKey]" class="compare-case-body">
             <div class="dataset-toolbar"><strong>Case {{entry.item.id || entry.index+1}}</strong><button v-if="!readonly && items.length>1" @click="$emit('remove',entry.index)" class="btn-danger">删除此条</button></div>
             <label class="dataset-label">完整问题</label><p v-if="readonly" class="case-text">{{entry.item.query}}</p><textarea v-else v-model="entry.item.query" rows="2" placeholder="用户问题（必填）"></textarea>
             <label class="dataset-label">共享背景</label><p v-if="readonly" class="case-text">{{entry.item.context || '未填写'}}</p><textarea v-else v-model="entry.item.context" rows="2" placeholder="共享背景（可选）"></textarea>
             <div v-if="!readonly" class="dataset-toolbar">
-              <label>回答证据 <select v-model="entry.item.evidenceMode"><option value="video_frames">录屏视频</option><option value="long_screenshot">回答长截图</option></select></label>
+              <label>编辑证据类型 <select v-model="entry.item.evidenceMode"><option value="video_frames">录屏视频</option><option value="long_screenshot">回答长截图</option></select></label>
               <label>产品数 <select v-model.number="entry.item.productCount"><option :value="2">2</option><option :value="3">3</option></select></label>
             </div>
+            <p v-if="!readonly" :class="caseEvidenceMode(entry.item)?'hint':'err'">{{caseEvidenceMode(entry.item)==='long_screenshot'?'实际评估：所有产品统一使用长截图（长截图齐全时优先）。':caseEvidenceMode(entry.item)==='video_frames'?'实际评估：所有产品统一使用录屏采样帧（长截图不齐全，回退录屏）。':'证据不齐全：请为所有产品补齐长截图或录屏，当前 Case 无法提交。'}}</p>
             <div class="case-products"><div v-for="n in entry.item.productCount" :key="n" class="case-product">
               <strong>产品 {{n}}</strong><label class="dataset-label">回答文字</label><p v-if="readonly" class="case-text">{{entry.item['answer'+n] || '未填写'}}</p><textarea v-else v-model="entry.item['answer'+n]" rows="3" placeholder="产品回答文字（可选）"></textarea>
               <label class="dataset-label">产品背景</label><p v-if="readonly" class="case-text">{{entry.item['context'+n] || '未填写'}}</p><input v-else v-model="entry.item['context'+n]" placeholder="产品背景（可选）">

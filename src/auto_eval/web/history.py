@@ -649,6 +649,7 @@ _DERIVED_INPUT_FIELDS = {"source_line", "session_group", "turn_index"}
 _QUERY_EXPORT_FIELDS = {
     "题型", "提问图片", "提问图片元数据", "输入指纹", "输入图片原图",
     "query_image_meta", "input_manifest_sha256", "error",
+    "产品1原图", "产品2原图", "产品3原图",
 }
 
 
@@ -723,7 +724,9 @@ def _append_extra_input_values(rows: list[dict], items: list[dict], columns: dic
 def _item_visual_streams(item: dict) -> list[dict[str, Any]]:
     """统一返回 rich_content 单路或 compare 双/三路视频及关键帧。"""
     source = _source_data_for_item(item)
-    if item.get("evidence_mode") == "long_screenshot" or item.get("screenshot1") or source.get("screenshot1"):
+    if item.get("evidence_mode") == "long_screenshot" or (
+        not item.get("evidence_mode") and (item.get("screenshot1") or source.get("screenshot1"))
+    ):
         count = item.get("product_count") or (3 if item.get("screenshot3") or source.get("screenshot3") else 2)
         streams = []
         for product_no in range(1, count + 1):
@@ -1447,7 +1450,7 @@ def _original_screenshot_rows(snapshot: dict, images: WpsCellImages) -> list[dic
 
 
 def build_xlsx(snapshot: dict) -> bytes:
-    """生成评分数据及 WPS 原始长截图页；图片按原字节嵌入，不影响正式评分列。"""
+    """原图只嵌入逐题结果，保留 WPS 单元格图片和原始字节。"""
     buf = BytesIO()
     write_xlsx(snapshot, buf)
     return buf.getvalue()
@@ -1486,22 +1489,16 @@ def _write_xlsx(snapshot: dict, destination) -> None:
         query_rows = _query_image_rows(snapshot)
         query_cells: list[CellImage | str] = [""] * len(snapshot.get("items", []))
         if query_rows:
-            embedded = []
             for row in query_rows:
-                entry = {"数据集序号": row["数据集序号"], "id": row["id"], "query": row["query"]}
                 try:
-                    entry["提问原图"] = images.add(row.get("original_path", ""), row.get("original_sha256"))
+                    original = images.add(row.get("original_path", ""), row.get("original_sha256"))
                 except OriginalImageError as exc:
-                    entry["提问原图"] = str(exc)
-                query_cells[row["数据集序号"] - 1] = entry["提问原图"]
-                embedded.append(entry)
-            sheets["提问图片"] = embedded
+                    original = str(exc)
+                query_cells[row["数据集序号"] - 1] = original
         if screenshot_rows:
-            sheets["原始长截图"] = screenshot_rows
-        if query_rows:
-            for sheet_name, query_header in (("数据集明细", "query"), ("逐题结果", "题目"), ("原始长截图", "query")):
-                if sheet_name in sheets:
-                    sheets[sheet_name] = _insert_query_image_column(sheets[sheet_name], query_cells, query_header)
+            sheets["逐题结果"] = _insert_screenshot_columns(sheets["逐题结果"], screenshot_rows)
+        if query_rows and "逐题结果" in sheets:
+            sheets["逐题结果"] = _insert_query_image_column(sheets["逐题结果"], query_cells, "题目")
         if statistics:
             sheets[COMPARE_STATISTICS_SHEET] = []
         images.write_parts()
@@ -1515,7 +1512,7 @@ def _write_xlsx(snapshot: dict, destination) -> None:
             xml = statistics_sheet_xml(
                 statistics, style_start=3 if picture_styles else 2,
                 escape_text=_xlsx_text, column_name=_col,
-            ) if name == COMPARE_STATISTICS_SHEET else _sheet_xml(rows, picture_sheet=name in {"原始长截图", "提问图片"})
+            ) if name == COMPARE_STATISTICS_SHEET else _sheet_xml(rows)
             zf.writestr(f"xl/worksheets/sheet{i}.xml", xml)
 
 
@@ -1530,6 +1527,22 @@ def _insert_query_image_column(rows: list[dict], images: list[CellImage | str], 
             enriched[key] = value
             if key == query_header:
                 enriched["输入图片原图"] = images[index]
+        output.append(enriched)
+    return output
+
+
+def _insert_screenshot_columns(rows: list[dict], originals: list[dict]) -> list[dict]:
+    """Attach each product's original after its answer, aligned by dataset index."""
+    output = []
+    for row, original in zip(rows, originals):
+        images = {key: value for key, value in original.items() if re.fullmatch(r"产品[123]原图", key)}
+        enriched = {}
+        for key, value in row.items():
+            enriched[key] = value
+            match = re.fullmatch(r"产品([123])回答", key)
+            if match and (header := f"产品{match[1]}原图") in images:
+                enriched[header] = images.pop(header)
+        enriched.update(images)
         output.append(enriched)
     return output
 
@@ -1672,7 +1685,9 @@ def _sheet_xml(rows: list[dict], *, picture_sheet: bool = False) -> str:
                 cells.append(f'<c r="{ref}" t="inlineStr"{style}><is><t xml:space="preserve">{_xlsx_text(value)}</t></is></c>')
         height = ' ht="240" customHeight="1"' if picture_sheet and r_idx > 1 else ""
         if not picture_sheet and r_idx > 1 and any(isinstance(value, CellImage) for value in row):
-            height = ' ht="96" customHeight="1"'
+            has_screenshot = any(re.fullmatch(r"产品[123]原图", header) and isinstance(value, CellImage)
+                                 for header, value in zip(headers, row))
+            height = ' ht="240" customHeight="1"' if has_screenshot else ' ht="96" customHeight="1"'
         rows_xml.append(f'<row r="{r_idx}"{height}>{"".join(cells)}</row>')
     cols = "".join(
         f'<col min="{i}" max="{i}" width="{36 if picture_sheet and h.startswith("产品") else _width(h)}" customWidth="1"/>'
@@ -1712,6 +1727,8 @@ def _col(idx: int) -> str:
 
 
 def _width(header: str) -> int:
+    if re.fullmatch(r"产品[123]原图", header):
+        return 36
     if header == "输入图片原图":
         return 24
     if header in {"query", "answer", "generated_answer", "rationale", "理由", "options"}:

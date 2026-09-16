@@ -368,7 +368,7 @@ def _make_item_evaluator(
             "连续1秒请求上限": SECOND_REQUEST_LIMIT,
             "RPM目标": 480, "TPM目标": 800_000,
         })
-    eval_timeout = float(runtime_options.get("eval_timeout_s") or runtime_options.get("eval_timeout") or 300.0)
+    eval_timeout = float(runtime_options.get("eval_timeout_s") or runtime_options.get("eval_timeout") or 900.0)
     loop = asyncio.get_running_loop()
 
     async def _default_on_result(idx: int, res: dict, started: float) -> None:
@@ -474,7 +474,8 @@ def _make_item_evaluator(
                 res = None
                 item_dict.pop("input_manifest_sha256", None)
                 is_screenshot = task.mode == "compare" and (
-                    item_dict.get("evidence_mode") == "long_screenshot" or bool(item_dict.get("screenshot1"))
+                    item_dict.get("evidence_mode") == "long_screenshot"
+                    or (not item_dict.get("evidence_mode") and bool(item_dict.get("screenshot1")))
                 )
                 needs_visual_prepare = is_screenshot or (
                     not _compare_frames_ready(item_dict)
