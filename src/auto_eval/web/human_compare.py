@@ -64,7 +64,7 @@ def freeze_run_snapshot(task) -> dict:
     """Must be called without awaiting between the state check and deepcopy."""
     if task.mode != "compare":
         raise HumanError("人工评分对比仅支持 compare 任务")
-    if task.status not in ("done", "error", "cancelled") or task.active_runs or task.repair_status in ("queued", "running"):
+    if task.status not in ("done", "error", "cancelled", "paused") or task.active_runs or task.repair_status in ("queued", "running"):
         raise HumanError("任务或补跑仍在执行，请结束后生成预览", 409)
     data = copy.deepcopy(task_to_snapshot(task))
     data["results"] = [dict(copy.deepcopy(row),index=index) for index,row in latest_results_by_index(task).items()]

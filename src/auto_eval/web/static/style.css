@@ -383,6 +383,12 @@ tr.result-error td, tr.result-error-detail td { background: #fef2f2 !important; 
 .task-duration-heading strong { font-size: 20px; color: #1e3a5f; font-variant-numeric: tabular-nums; }
 .task-duration-heading small { color: #2563eb; }
 .task-duration-panel .hint { margin: 6px 0 0; }
+.task-control-panel { margin-top: 12px; padding: 16px; border: 1px solid #cbd5e1; border-radius: 8px; background: #f8fafc; }
+.task-control-heading, .task-control-options { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; margin-bottom: 10px; }
+.task-control-heading span { color: #475569; }
+.task-control-options label { display: inline-flex; align-items: center; gap: 8px; }
+.task-control-options input[type=number] { width: 80px; }
+.task-control-panel .hint { margin-bottom: 0; line-height: 1.7; }
 .task-duration-cell { font-variant-numeric: tabular-nums; min-width: 110px; }
 /* Human reference comparison: local post-processing, isolated from evaluation controls. */
 .human-comparison { margin: 12px 0; }

@@ -51,7 +51,8 @@ from .video_prepare import (
     operation_video_roots,
     resolve_operation_video_path,
 )
-from .runner import run_eval, run_retry, run_update_batch, spawn_background, snapshot_item_progress
+from .runner import run_eval, run_retry, run_resume, finish_pause, run_update_batch, spawn_background, snapshot_item_progress
+from .execution_control import resume_indexes
 from .scheduler import EvalScheduler
 from .exports import XlsxExports, xlsx_download_name
 from .dataset_media import DatasetMedia
@@ -145,6 +146,14 @@ class RetryReq(BaseModel):
 
 class QueuePositionReq(BaseModel):
     action: Literal["move_up", "move_down", "move_to_front"]
+
+
+class ResumeReq(BaseModel):
+    concurrency: int = Field(ge=1, le=128, strict=True)
+    include_failed: bool = False
+    idempotency_key: str = Field(default="", max_length=128)
+
+    model_config = {"extra": "forbid"}
 
 
 _VIDEO_EXTENSIONS = VIDEO_EXTENSIONS
@@ -371,6 +380,59 @@ async def api_queue_position(job_id: str, req: QueuePositionReq):
     raise HTTPException(404, "等待任务不存在")
 
 
+@app.post("/api/eval/{task_id}/pause", status_code=202)
+async def api_pause(task_id: str):
+    task = await get_task_async(_validate_param_id(task_id, "task_id"))
+    if not task:
+        raise HTTPException(404, "task not found")
+    if task.status == "paused" and not task.execution_control.get("save_error"):
+        return {"task_id": task.id, "status": "pausing" if task.active_runs else "paused"}
+    if not task.active_runs and not task.execution_control.get("save_error"):
+        raise HTTPException(409, "任务当前未在执行或排队")
+    if not task.pause_requested:
+        task.execution_control.update(state="pausing", requested_at=time.time())
+    EVAL_SCHEDULER.pause(task)
+    if not task.active_runs:
+        await finish_pause(task)
+    else:
+        if not await wait_task_save(task, save=save_task):
+            raise HTTPException(503, "暂停已请求，但保存失败；请保持服务运行并重试暂停")
+        if task.pause_requested:
+            task._fanout("pausing", {"message": "正在暂停，等待已开始的题目完成并保存", "execution_control": task.execution_control})
+    if task.execution_control.get("save_error"):
+        raise HTTPException(503, task.error)
+    return {"task_id": task.id, "status": task.execution_control["state"]}
+
+
+@app.post("/api/eval/{task_id}/resume", status_code=202)
+async def api_resume(task_id: str, req: ResumeReq):
+    task = await get_task_async(_validate_param_id(task_id, "task_id"))
+    if not task:
+        raise HTTPException(404, "task not found")
+    attempts = task.execution_control.setdefault("resumes", [])
+    idem = req.idempotency_key.strip()
+    for attempt in attempts:
+        if idem and attempt.get("idempotency_key") == idem:
+            return {"task_id": task.id, "resume_id": attempt["id"], "status": attempt["status"], "idempotent_replay": True}
+    if task.active_runs or task.pause_requested or task.execution_control.get("save_error"):
+        raise HTTPException(409, "任务仍在执行或保存，请等待暂停完成")
+    if task.status not in {"paused", "error", "cancelled", "done"}:
+        raise HTTPException(409, "当前任务状态不能恢复")
+    indexes = resume_indexes(task, req.include_failed)
+    if not indexes:
+        raise HTTPException(409, "没有待执行的题目；如需重试失败项，请勾选同时重试失败项")
+    app_cfg = cfg()
+    attempt = {"id": f"resume_{uuid.uuid4().hex[:10]}", "idempotency_key": idem,
+               "status": "queued", "created_at": time.time(), "indexes": indexes,
+               "concurrency": req.concurrency, "include_failed": req.include_failed,
+               "completed": 0, "failed": 0}
+    attempts.append(attempt)
+    task.execution_control.update(state="queued", concurrency=req.concurrency, pending_indexes=indexes.copy())
+    position = EVAL_SCHEDULER.enqueue(task, app_cfg, run_resume)
+    await wait_task_save(task, save=save_task)
+    return {"task_id": task.id, "resume_id": attempt["id"], "status": "queued", "selected": len(indexes), "queue_position": position}
+
+
 @app.post("/api/eval/{task_id}/retries", status_code=202)
 async def api_retry_failed(task_id: str, req: RetryReq):
     """手动创建失败补跑，并作为独立 job 加入全局 FIFO 队列。"""
@@ -466,6 +528,7 @@ async def api_retry_failed(task_id: str, req: RetryReq):
         },
     }
     task.retry_runs[retry_id] = retry
+    task.execution_control["pending_indexes"] = accepted_indexes.copy()
 
     async def _retry_runner(parent, app_cfg):
         await run_retry(parent, app_cfg, retry_id)
@@ -514,6 +577,13 @@ async def api_eval_items(req: EvalItemsReq):
     app_cfg = cfg()
     task = get_task(task_id)
     created = task is None
+    if task is not None and (task.pause_requested or task.status == "paused" or task.execution_control.get("state") in {"queued", "running"}):
+        raise HTTPException(409, "任务正在暂停或恢复；请先完成该任务再更新 items")
+    if task is not None:
+        pending_updates = {i for batch in task.execution_control.get("update_batches", {}).values() for i in batch.get("remaining", [])}
+        pending_ids = {task.items[i].get("id") for i in pending_updates if 0 <= i < len(task.items)}
+        if any(item.get("id") in pending_ids for item in req.items):
+            raise HTTPException(409, "这些题目仍有未完成的更新；请先完成或恢复原批次")
     if task is not None and task.repair_status in {"queued", "running"}:
         raise HTTPException(409, "任务正在失败补跑，暂不能同时更新 items")
     if task is not None and any(it.get("query_images") for it in [*task.items, *req.items]):
@@ -572,6 +642,11 @@ async def api_eval_items(req: EvalItemsReq):
         )
     batch, replaced_ids, added_ids = merge_items_by_id(task, req.items)
     effective_options = {**task.options, **req.options}
+    batch_id = uuid.uuid4().hex[:12]
+    task.execution_control.setdefault("update_batches", {})[batch_id] = {
+        "remaining": [index for index, _ in batch], "options": effective_options,
+        "prior_summary": "", "created_at": time.time(),
+    }
     task.active_runs += 1  # R1：提交时同步 pin（同 api_eval；run_update_batch 的 finally 负责解除）
     pending_save = queue_task_save(task, save=save_task)
 
@@ -584,6 +659,7 @@ async def api_eval_items(req: EvalItemsReq):
             batch,
             options=effective_options,
             manage_status=created,
+            batch_id=batch_id,
         )
 
     spawn_background(_start_later())
@@ -755,6 +831,8 @@ async def api_stream(task_id: str, compact: bool = False):
                     "progress": task.done_total,
                     "total": len(task.items),
                     "repair_status": task.repair_status,
+                    "execution_control": task.execution_control,
+                    "active_runs": task.active_runs,
                     "task_timing": task.timing_snapshot(),
                     "retry": max(task.retry_runs.values(), key=lambda row: float(row.get("created_at") or 0), default=None),
                 })
@@ -790,11 +868,14 @@ async def api_stream(task_id: str, compact: bool = False):
             if task.status == "cancelled" and task.active_runs <= 0:
                 yield _sse("cancelled", {"message": "排队任务已取消", "task_timing": task.timing_snapshot()})
                 return
+            if task.status == "paused" and task.active_runs <= 0:
+                yield _sse("paused", {"status": "paused", "summary": task.summary, "execution_control": task.execution_control, "task_timing": task.timing_snapshot()})
+                return
             # 实时跟进
             while True:
                 msg = await q.get()
                 yield _sse(msg["event"], msg["data"])
-                if msg["event"] in ("done", "error", "cancelled", "retry_cancelled"):
+                if msg["event"] in ("done", "error", "cancelled", "retry_cancelled", "paused"):
                     break
         finally:
             task.unsubscribe(q)
@@ -907,6 +988,7 @@ def api_history_detail(task_id: str):
         raise HTTPException(404, "task not found")
     snapshot = task_to_snapshot(task)
     snapshot["item_progress"] = snapshot_item_progress(task)
+    snapshot["active_runs"] = task.active_runs
     return snapshot_payload(snapshot)
 
 

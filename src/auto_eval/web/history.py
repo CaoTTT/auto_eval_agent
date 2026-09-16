@@ -142,6 +142,7 @@ def task_to_snapshot(task) -> dict:
         "error": task.error,
         "repair_status": getattr(task, "repair_status", "idle"),
         "retry_runs": getattr(task, "retry_runs", {}),
+        "execution_control": getattr(task, "execution_control", {}),
     }
 
 
@@ -392,6 +393,8 @@ def snapshot_payload(data: dict) -> dict:
         "error": data.get("error"),
         "repair_status": data.get("repair_status") or "idle",
         "retry_runs": data.get("retry_runs") or {},
+        "execution_control": data.get("execution_control") or {},
+        "active_runs": data.get("active_runs", 0),
     }
 
 

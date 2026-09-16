@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <title>auto_eval 评估台</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260916_human_comparison">
+  <link rel="stylesheet" href="/static/style.css?v=20260916_pause_resume">
   <style>
     .op-cards { display:flex; flex-direction:column; gap:12px; }
     .op-card { border:1px solid #e2e8f0; border-radius:8px; padding:12px; background:#fafbfc; }
@@ -88,7 +88,7 @@
             <td>{{ h.dataset_name || '未记录' }}</td>
             <td>{{ modeLabel(h.mode) }}</td>
             <td>{{ evaluationProfileLabel(h.evaluation_profile) }}</td>
-            <td>{{ h.status }}<small v-if="retryStatusLabel(h.repair_status)" class="running"> · {{ retryStatusLabel(h.repair_status) }}</small></td>
+            <td>{{ taskStatusLabel(h.status) }}<small v-if="retryStatusLabel(h.repair_status)" class="running"> · {{ retryStatusLabel(h.repair_status) }}</small></td>
             <td class="history-progress-cell">{{ h.done }}/{{ h.total }}</td>
             <td class="task-duration-cell">{{ h.status === 'queued' ? '尚未开始' : formatTaskDuration(h.task_timing) }}</td>
             <td>{{ h.preview }}</td>
@@ -245,7 +245,22 @@
     <p v-if="runError" class="run-error">{{ runError }}</p>
     <div v-if="taskId" class="task-duration-panel">
       <div class="task-duration-heading"><span>任务总耗时</span><strong>{{ selectedTaskStatus === 'queued' ? '尚未开始' : formatTaskDuration(selectedTaskTiming) }}</strong><small v-if="selectedTaskTiming && selectedTaskTiming.running">计时中</small></div>
-      <p class="hint">从任务实际开始执行计时，包含处理与等待；不含任务排队，失败补跑单独记录。</p>
+      <p class="hint">累计实际执行时间，包含处理与等待；不含任务排队和暂停时长，失败补跑单独记录。</p>
+    </div>
+    <div v-if="taskId" class="task-control-panel" aria-label="任务暂停与恢复">
+      <div class="task-control-heading"><strong>当前任务 · {{ taskId }}</strong><span>{{ isPausing ? '正在暂停' : taskStatusLabel(selectedTaskStatus) }}</span></div>
+      <template v-if="canPauseTask">
+        <button @click="controlTask('pause')" :disabled="controlSubmitting || isPausing || !!loadingTaskId">{{ isPausing ? '等待已开始的题目完成…' : (executionControl.save_error ? '重试保存暂停记录' : '暂停任务') }}</button>
+        <p class="hint">暂停后停止派发新题，已开始的题目会执行至完成或超时并保存。完成暂停后即可调整并发继续。</p>
+      </template>
+      <template v-if="canResumeTask">
+        <div class="task-control-options">
+          <label>恢复并发数 <input type="number" min="1" max="128" step="1" v-model.number="resumeConcurrency" :disabled="controlSubmitting" aria-label="恢复并发数"></label>
+          <label><input type="checkbox" v-model="resumeFailed" :disabled="controlSubmitting"> 同时重试失败项</label>
+          <button class="primary" @click="controlTask('resume')" :disabled="controlSubmitting || !!loadingTaskId">{{ controlSubmitting ? '提交中…' : '继续执行原任务' }}</button>
+        </div>
+        <p class="hint">保留已有记录，默认执行剩余题目；使用原任务的输入和评分协议。多轮会话重试失败轮次时，会重算受影响的后续轮次。</p>
+      </template>
     </div>
   </section>
 
@@ -346,7 +361,7 @@
       <button @click="exportXlsx()" :disabled="!taskId || !!loadingTaskId || !!exportingTaskId">{{ exportingTaskId === taskId ? '正在生成 Excel…' : '导出 XLSX（完整）' }}</button>
       <button v-if="isVideoMode" @click="exportFrames" :disabled="!taskId || !!loadingTaskId">导出视觉证据 ZIP</button>
       <span v-if="loadingTaskId">正在加载任务，请稍候…</span>
-      <button v-if="summary && summary.failed" @click="retryFailedCases(null)" :disabled="retrySubmitting || ['queued','running'].includes(repairStatus)">
+      <button v-if="summary && summary.failed && selectedTaskStatus === 'done'" @click="retryFailedCases(null)" :disabled="retrySubmitting || ['queued','running'].includes(repairStatus)">
         {{ retrySubmitting ? '提交中…' : '重跑全部失败项' }}
       </button>
       <button v-if="selectedRetryIndexes.length" @click="retryFailedCases(selectedRetryIndexes)" :disabled="retrySubmitting || ['queued','running'].includes(repairStatus)">
@@ -360,6 +375,7 @@
       <span>样本量 {{ summary.total }}</span>
       <span>成功评测 {{ summary.done }}</span>
       <span v-if="summary.failed">失败 {{ summary.failed }}</span>
+      <span v-if="summary.unfinished">未完成 {{ summary.unfinished }}</span>
       <span v-if="summary.card_presence_rate!=null">挂卡出现率 {{ (summary.card_presence_rate*100).toFixed(0) }}%（{{ summary.card_total }} 张）</span>
       <span v-if="summary.superlink_presence_rate!=null">Superlink 出现率 {{ (summary.superlink_presence_rate*100).toFixed(0) }}%（观察到 {{ summary.superlink_total_observed }} 个）</span>
       <span v-if="summary.both_count!=null">挂卡与链接同现 {{ summary.both_count }} 条</span>
@@ -504,6 +520,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20260916_human_comparison"></script>
+  <script type="module" src="/static/app.js?v=20260916_pause_resume"></script>
 </body>
 </html>

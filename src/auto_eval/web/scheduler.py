@@ -96,6 +96,9 @@ class EvalScheduler:
         self._pending.remove(job)
         task = job.task
         task.active_runs = max(0, task.active_runs - 1)
+        if task.execution_control.get("state") == "queued":
+            task.execution_control["state"] = "cancelled"
+            task.execution_control["resumes"][-1]["status"] = "cancelled"
         if job.kind == "retry":
             retry = task.retry_runs.get(job.job_id) or {}
             retry["status"] = "cancelled"
@@ -121,6 +124,18 @@ class EvalScheduler:
                 if not future.cancelled() and future.result() else None
             )
         return task
+
+    def pause(self, task: Task) -> None:
+        """Remove waiting jobs; running jobs observe the durable pause flag."""
+        for job in list(self._pending):
+            if job.task is not task:
+                continue
+            self._pending.remove(job)
+            task.active_runs = max(0, task.active_runs - 1)
+            if job.kind == "retry":
+                retry = task.retry_runs[job.job_id]
+                retry.update(status="paused", finished_at=time.time())
+                task.repair_status = "paused"
 
     def reprioritize(self, job_id: str, action: str) -> int | None:
         """调整等待任务位置；不影响正在运行的任务，返回新的 1-based 位置。"""
@@ -221,14 +236,18 @@ class EvalScheduler:
     @staticmethod
     def _entry(job: _QueuedEval, *, status: str) -> dict:
         task = job.task
+        attempt = (task.execution_control.get("resumes") or [{}])[-1]
+        resuming = job.kind == "initial" and attempt.get("status") in {"queued", "running"}
         entry = {
             "job_id": job.job_id,
-            "kind": job.kind,
+            "kind": "resume" if resuming else job.kind,
             "task_id": task.id,
             "dataset_name": task.dataset_name,
             "mode": task.mode,
             "status": status,
-            "concurrency": int(task.options.get("concurrency", 4)),
+            "concurrency": int((task.retry_runs.get(job.job_id, {}).get("options") or {}).get(
+                "concurrency", task.options.get("concurrency", 4)
+            ) if job.kind == "retry" else (attempt.get("concurrency", 4) if resuming else task.options.get("concurrency", 4))),
             "done": task.done_total if job.kind == "initial" else int(
                 (task.retry_runs.get(job.job_id) or {}).get("completed", 0)
             ),

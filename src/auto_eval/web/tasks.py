@@ -26,7 +26,7 @@ class Task:
     session_name: str = ""
     dataset_name: str = ""
     note: str = ""
-    status: str = "pending"  # pending | queued | running | done | error | cancelled
+    status: str = "pending"  # pending | queued | running | paused | done | error | cancelled
     results: list[dict] = field(default_factory=list)
     item_progress: dict[str, dict] = field(default_factory=dict)
     progress_events: dict[str, list[dict]] = field(default_factory=dict)
@@ -39,6 +39,8 @@ class Task:
     # 失败补跑是原任务的子运行，不改变主任务终态；状态和审计信息单独保存。
     repair_status: str = "idle"  # idle | queued | running | completed | partial | error | cancelled
     retry_runs: dict[str, dict] = field(default_factory=dict)
+    # Durable cooperative pause state, pending repairs/updates and resume audit.
+    execution_control: dict = field(default_factory=dict)
     # 更新批正在评测的 items 下标（运行时状态，不进快照），供单条查询给 evaluating 标志
     in_flight_indexes: set[int] = field(default_factory=set)
     # SSE 订阅者（每连接独立有界队列）与丢帧计数。订阅制取代旧的单条共享
@@ -49,6 +51,17 @@ class Task:
     # 退休判定用计数而非 status：run_update_batch(manage_status=False)
     # 全程 status=done，只有计数能 pin 住运行中的任务对象。
     active_runs: int = 0
+
+    @property
+    def pause_requested(self) -> bool:
+        return self.execution_control.get("state") == "pausing"
+
+    def resume_timing(self) -> None:
+        if not self.task_timing.get("started_at"):
+            self.start_timing()
+            return
+        self._timing_started_monotonic = time.monotonic()
+        self.task_timing.update(running=True, finished_at=None, measured_at=time.time())
 
     def start_timing(self) -> None:
         """Begin the original execution once; queued time and later repairs are separate."""
@@ -64,7 +77,7 @@ class Task:
     def timing_snapshot(self) -> dict:
         timing = snapshot_task_timing({"task_timing": self.task_timing})
         if self._timing_started_monotonic is not None:
-            timing["elapsed_s"] = round(max(0.0, time.monotonic() - self._timing_started_monotonic), 3)
+            timing["elapsed_s"] = round(float(self.task_timing.get("elapsed_s") or 0) + max(0.0, time.monotonic() - self._timing_started_monotonic), 3)
         timing["measured_at"] = time.time()
         return timing
 
@@ -90,7 +103,7 @@ class Task:
         同步实现是因为 _record_progress 可能经 call_soon_threadsafe 上环，
         不能 await。无订阅者时是空循环——事件不堆积。
         """
-        if event in {"start", "done", "error", "cancelled", "retry_start", "retry_cancelled"}:
+        if event in {"start", "done", "error", "cancelled", "retry_start", "retry_cancelled", "pausing", "paused"}:
             data = {**data, "task_timing": self.timing_snapshot()}
         msg = {"event": event, "data": data}
         for q in list(self.subscribers):
@@ -123,7 +136,7 @@ def _enforce_capacity() -> None:
     """LRU 容量兜底：从最旧开始淘汰空闲终态任务；全是运行中则不强制。"""
     while len(TASKS) > TASKS_CAPACITY:
         for tid, t in TASKS.items():
-            if t.active_runs <= 0 and t.status in {"done", "error", "cancelled"} and not task_save_pending(tid):
+            if t.active_runs <= 0 and t.status in {"done", "error", "cancelled", "paused"} and not task_save_pending(tid) and not t.execution_control.get("save_error"):
                 TASKS.pop(tid, None)
                 break
         else:
@@ -200,7 +213,7 @@ def upsert_result_by_index(task: Task, res: dict) -> str:
     返回 "replaced" | "appended"。"""
     idx = res.get("index")
     for pos in range(len(task.results) - 1, -1, -1):
-        if task.results[pos].get("index") == idx:
+        if str(task.results[pos].get("index")) == str(idx):
             task.results[pos] = res
             return "replaced"
     task.results.append(res)
@@ -223,6 +236,13 @@ def _task_from_snapshot(snapshot: dict, task_id: str) -> Task:
                 retry["status"] = "error"
                 retry["error"] = retry.get("error") or "服务中断，失败补跑未完成"
     options = snapshot.get("options") or {}
+    execution_control = snapshot.get("execution_control") or {}
+    if execution_control.get("state") in {"pausing", "queued", "running"}:
+        execution_control["state"] = "interrupted"
+        for attempt in execution_control.get("resumes", []):
+            if attempt.get("status") in {"queued", "running"}:
+                attempt["status"] = "error"
+                attempt["error"] = "服务中断，已保留已完成记录"
     evaluation_profile = _snapshot_evaluation_profile(snapshot)
     return Task(
         id=snapshot.get("task_id") or task_id,
@@ -251,6 +271,7 @@ def _task_from_snapshot(snapshot: dict, task_id: str) -> Task:
         error=error,
         repair_status=repair_status,
         retry_runs=retry_runs,
+        execution_control=execution_control,
     )
 
 
@@ -340,7 +361,7 @@ def retire_task(task: Task) -> None:
 
     身份校验防止误删同 id 的新对象（删除历史后重建等场景）。
     """
-    if task.active_runs > 0 or task.status not in {"done", "error", "cancelled"} or task_save_pending(task.id):
+    if task.active_runs > 0 or task.status not in {"done", "error", "cancelled", "paused"} or task_save_pending(task.id) or task.execution_control.get("save_error"):
         return
     if TASKS.get(task.id) is task:
         TASKS.pop(task.id, None)

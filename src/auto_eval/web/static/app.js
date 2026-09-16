@@ -148,6 +148,14 @@ createApp({
     const retrySubmitting = ref(false);
     const selectedRetryIndexes = ref([]);
     const activeRetry = ref(null);
+    const executionControl = ref({});
+    const selectedActiveRuns = ref(0);
+    const controlSubmitting = ref(false);
+    const resumeConcurrency = ref(4);
+    const resumeFailed = ref(false);
+    const isPausing = computed(() => executionControl.value.state === "pausing");
+    const canPauseTask = computed(() => !!taskId.value && (running.value || selectedActiveRuns.value > 0 || ["queued", "running"].includes(repairStatus.value) || executionControl.value.save_error));
+    const canResumeTask = computed(() => !!taskId.value && !running.value && !selectedActiveRuns.value && !isPausing.value && !executionControl.value.save_error && !["queued", "running"].includes(repairStatus.value) && ["paused", "error", "cancelled", "done"].includes(selectedTaskStatus.value));
     const clockNow = ref(Date.now());
     let tooltipHideTimer = null;
     let progressClockTimer = null;
@@ -197,7 +205,7 @@ createApp({
     }
 
     function retryStatusLabel(status) {
-      return ({ idle: "", queued: "补跑排队中", running: "补跑中", completed: "补跑完成", partial: "补跑后仍有失败", error: "补跑异常", cancelled: "补跑已取消" })[status] || status;
+      return ({ idle: "", queued: "补跑排队中", running: "补跑中", completed: "补跑完成", partial: "补跑后仍有失败", error: "补跑异常", cancelled: "补跑已取消", paused: "补跑已暂停" })[status] ?? status;
     }
 
     function retryIndexSelected(index) {
@@ -212,11 +220,11 @@ createApp({
     }
 
     function taskStatusLabel(status) {
-      return ({ queued: "排队中", running: "运行中", done: "已完成", error: "失败", cancelled: "已取消" })[status] || status;
+      return ({ queued: "排队中", running: "运行中", done: "已完成", error: "失败", cancelled: "已取消", paused: "已暂停", pausing: "正在暂停" })[status] || status;
     }
 
     function queueKindLabel(kind) {
-      return kind === "retry" ? "失败补跑" : "全量评测";
+      return kind === "resume" ? "恢复执行" : kind === "retry" ? "失败补跑" : "全量评测";
     }
 
     const formatHint = computed(
@@ -259,7 +267,7 @@ createApp({
         const result = progressResultByIndex.value.get(index);
         const events = progressEvents.value[index] || [];
         const startedAt = Number(current.started_at || 0);
-        const terminal = ["done", "error"].includes(current.status);
+        const terminal = ["done", "error", "paused"].includes(current.status) || selectedTaskStatus.value === "paused";
         const finishedAt = Number(current.finished_at || (terminal && Date.parse(current.updated_at || "")) || 0);
         const resultElapsed = Number(result?.total_s ?? result?.latency_s);
         const timings = terminal && result?.timings ? result.timings : current.timings || result?.timings;
@@ -306,7 +314,7 @@ createApp({
       const previous = newAttempt ? {} : existing;
       const previousRank = previous.stage_rank ?? progressStageRank(previous);
       const incomingRank = progressStageRank(incoming);
-      const terminal = incoming.status === "done" || incoming.status === "error";
+      const terminal = ["done", "error", "paused"].includes(incoming.status);
       const updatedAt = Date.parse(incoming.updated_at || "");
       itemProgress.value[index] = {
         ...previous,
@@ -360,6 +368,7 @@ createApp({
     }
 
     function progressDisplay(row) {
+      if (selectedTaskStatus.value === "paused" && !["done", "error"].includes(row.status)) return "已暂停，等待继续执行";
       const message = row.message || "排队中";
       const parts = [];
       if (row.judge && !message.includes(row.judge)) parts.push(row.judge);
@@ -370,6 +379,7 @@ createApp({
     }
 
     function progressStageLabel(row) {
+      if (selectedTaskStatus.value === "paused" && !["done", "error"].includes(row.status)) return "暂停";
       if (row.status === "error") return "失败";
       if (row.status === "done") return "完成";
       return progressStages[Math.max(0, Math.min(4, row.stageRank))];
@@ -1037,6 +1047,9 @@ createApp({
       );
       running.value = true;
       taskId.value = d.task_id;
+      executionControl.value = {};
+      selectedActiveRuns.value = 1;
+      resumeConcurrency.value = concurrency.value;
       selectedTaskTiming.value = receiveTaskTiming(d.task_timing);
       repairStatus.value = "idle";
       activeRetry.value = null;
@@ -1105,6 +1118,9 @@ createApp({
       } catch (_) {}
       if (viewVersion !== historyLoadVersion || taskId.value !== errorTaskId) return false;
       updateTaskTiming(snapshot?.task_timing);
+      executionControl.value = snapshot?.execution_control || {};
+      selectedActiveRuns.value = snapshot?.active_runs || 0;
+      if (snapshot?.status) selectedTaskStatus.value = snapshot.status;
       const snapshotResults = snapshot?.results || results.value;
       const resultByIndex = new Map(snapshotResults.map((entry) => [entry.index, entry]));
       const snapshotProgress = snapshot?.item_progress || {};
@@ -1148,6 +1164,33 @@ createApp({
       activeEventSource = null;
     }
 
+    async function controlTask(action) {
+      const id = taskId.value, version = historyLoadVersion;
+      if (!id || controlSubmitting.value || loadingTaskId.value) return;
+      if (action === "resume" && (!Number.isInteger(resumeConcurrency.value) || resumeConcurrency.value < 1 || resumeConcurrency.value > 128)) {
+        runError.value = "恢复并发数必须为 1–128 的整数";
+        return;
+      }
+      controlSubmitting.value = true;
+      runError.value = "";
+      try {
+        const response = await fetch(`/api/eval/${encodeURIComponent(id)}/${action}`, {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          ...(action === "resume" ? {body: JSON.stringify({concurrency: resumeConcurrency.value, include_failed: resumeFailed.value, idempotency_key: `resume-${Date.now()}-${Math.random().toString(16).slice(2)}`})} : {}),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : "操作失败，请刷新后重试");
+        if (id !== taskId.value || version !== historyLoadVersion || disposed) return;
+        await loadHistoryTask(id);
+        await loadQueue();
+        await loadHistory();
+      } catch (error) {
+        if (id === taskId.value && version === historyLoadVersion) runError.value = error.message || "操作失败";
+      } finally {
+        controlSubmitting.value = false;
+      }
+    }
+
     function connectSSE(streamTaskId = taskId.value) {
       closeActiveStream();
       const es = new EventSource(`/api/eval/${streamTaskId}/stream?compact=true`);
@@ -1158,6 +1201,8 @@ createApp({
         const data = JSON.parse(e.data);
         // 一次恢复结果和当前进度，旧结果不能覆盖正在补跑的状态。
         updateTaskTiming(data.task_timing);
+        executionControl.value = data.execution_control || {};
+        selectedActiveRuns.value = data.active_runs || 0;
         if (data.status) {
           selectedTaskStatus.value = data.status;
           running.value = ["pending", "queued", "running"].includes(data.status);
@@ -1182,6 +1227,7 @@ createApp({
         selectedTaskStatus.value = "running";
         queueNotice.value = "";
         running.value = true;
+        selectedActiveRuns.value = 1;
         loadQueue();
       });
       es.addEventListener("item_progress", (e) => {
@@ -1246,6 +1292,8 @@ createApp({
       es.addEventListener("done", (e) => {
         if (!isSelected()) return;
         const doneData = JSON.parse(e.data);
+        executionControl.value = doneData.execution_control || {};
+        selectedActiveRuns.value = 0;
         updateTaskTiming(doneData.task_timing);
         summary.value = doneData.summary;
         if (doneData.retry) {
@@ -1275,6 +1323,7 @@ createApp({
         } catch (_) {}
         running.value = false;
         selectedTaskStatus.value = "error";
+        selectedActiveRuns.value = 0;
         queueNotice.value = "";
         es.close();
         if (activeEventSource === es) activeEventSource = null;
@@ -1292,6 +1341,8 @@ createApp({
           message = data.message || message;
         } catch (_) {}
         running.value = false;
+        selectedActiveRuns.value = 0;
+        executionControl.value = {};
         selectedTaskStatus.value = "cancelled";
         queueNotice.value = message;
         es.close();
@@ -1302,7 +1353,30 @@ createApp({
       es.addEventListener("retry_cancelled", () => {
         if (!isSelected()) return;
         repairStatus.value = "cancelled";
+        selectedActiveRuns.value = 0;
         queueNotice.value = "失败补跑已取消";
+        es.close();
+        if (activeEventSource === es) activeEventSource = null;
+        loadQueue();
+        loadHistory();
+      });
+      es.addEventListener("pausing", (e) => {
+        if (!isSelected()) return;
+        const data = JSON.parse(e.data);
+        executionControl.value = data.execution_control || {state: "pausing"};
+        updateTaskTiming(data.task_timing);
+      });
+      es.addEventListener("paused", (e) => {
+        if (!isSelected()) return;
+        const data = JSON.parse(e.data);
+        executionControl.value = data.execution_control || {state: "paused"};
+        selectedTaskStatus.value = "paused";
+        selectedActiveRuns.value = 0;
+        running.value = false;
+        if (["queued", "running"].includes(repairStatus.value)) repairStatus.value = "paused";
+        updateTaskTiming(data.task_timing);
+        summary.value = data.summary || summary.value;
+        queueNotice.value = "已暂停，已完成记录已保存。";
         es.close();
         if (activeEventSource === es) activeEventSource = null;
         loadQueue();
@@ -1450,7 +1524,7 @@ createApp({
         const selected = queueEntries.value.find(item => item.task_id === taskId.value);
         if (selected) {
           updateTaskTiming(selected.task_timing);
-          if (selected.kind !== "retry") {
+          if (selected.kind !== "retry" && selectedTaskStatus.value !== "paused") {
             selectedTaskStatus.value = selected.status;
             running.value = ["pending", "queued", "running"].includes(selected.status);
             if (selected.status !== "queued") queueNotice.value = "";
@@ -1650,6 +1724,10 @@ createApp({
         expandedProgressLogs.value = {};
         summary.value = d.summary || null;
         repairStatus.value = d.repair_status || "idle";
+        executionControl.value = d.execution_control || {};
+        selectedActiveRuns.value = d.active_runs || 0;
+        resumeConcurrency.value = Number(executionControl.value.concurrency || d.options?.concurrency || 4);
+        resumeFailed.value = false;
         const retryRuns = Object.values(d.retry_runs || {});
         activeRetry.value = retryRuns.sort(
           (a, b) => Number(b.created_at || 0) - Number(a.created_at || 0)
@@ -1664,7 +1742,7 @@ createApp({
         resultPage.value = 1;
         progressPage.value = 1;
         if (mode.value !== "compare" && skillTabs.value.length) activeSkill.value = skillTabs.value[0].key;
-        if (running.value || ["queued", "running"].includes(repairStatus.value)) connectSSE(taskId.value);
+        if (running.value || selectedActiveRuns.value || ["queued", "running"].includes(repairStatus.value)) connectSSE(taskId.value);
         nextTick(() => resultBrowser.value && resultBrowser.value.scrollIntoView({ behavior: "smooth", block: "start" }));
       } catch (error) {
         if (version === historyLoadVersion && error?.name !== "AbortError") {
@@ -1779,6 +1857,7 @@ createApp({
       pacingStatus, pacingError, pacingNumber, pacingWaitLabel, pacingLimitLabel,
       queueState, queueEntries, selectedTaskStatus, queueNotice, taskStatusLabel, queueKindLabel,
       selectedTaskTiming, taskElapsedSeconds, formatTaskDuration,
+      executionControl, controlSubmitting, resumeConcurrency, resumeFailed, isPausing, canPauseTask, canResumeTask, controlTask,
       repairStatus, retryStatusLabel, retrySubmitting, selectedRetryIndexes, activeRetry,
       failedResultIndexes, retryIndexSelected, toggleRetryIndex, retryFailedCases,
       itemProgress, progressEvents, expandedProgressLogs, pagedProgressRows, progressStages,
