@@ -1,5 +1,5 @@
 import {createApp as vueCreateApp, ref, computed, watch, onMounted, onUnmounted, nextTick} from "https://unpkg.com/vue@3/dist/vue.esm-browser.js";
-import {CompareCaseList, fromDatasetItem, caseMedia, caseEvidenceMode, selectEvidenceMode} from "./compare-cases.js?v=20260916_mixed_evidence_edit";
+import {CompareCaseList, fromDatasetItem, caseMedia, caseEvidenceMode, selectEvidenceMode} from "./compare-cases.js?v=20260916_video_cache";
 import {HumanComparePanel} from "./human-compare.js?v=20260916_human_answers";
 export {ref, computed, onMounted, onUnmounted, nextTick};
 export {selectEvidenceMode};

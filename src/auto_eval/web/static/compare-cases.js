@@ -28,6 +28,7 @@ export function fromDatasetItem(item, index) {
       [`video${n}Path`, value(`video${n}`) || ''], [`screenshot${n}Path`, value(`screenshot${n}`) || ''],
       [`answer${n}`, value(`answer${n}`) || ''], [`context${n}`, value(`context${n}`) || ''],
       [`screenshotMeta${n}`, item[`screenshot_meta${n}`] || {}],
+      [`videoSource${n}`, item[`video_source${n}`] || {}],
     ])),
   };
 }
@@ -41,8 +42,10 @@ export function caseMedia(item) {
     const screenshot = evidenceMode === 'long_screenshot';
     const rawPath = item[`${screenshot ? 'screenshot' : 'video'}${n}Path`];
     const path = typeof rawPath === 'string' ? rawPath.trim() : '';
+    const source = item[`videoSource${n}`] || {};
     if (path) files.push({id:`product${n}`, role:screenshot ? 'screenshot' : 'video',
-      label:`产品${n}${screenshot ? '回答长截图' : '录屏'}`, path, meta:item[`screenshotMeta${n}`]});
+      label:`产品${n}${screenshot ? '回答长截图' : '录屏'}`, path,
+      meta:screenshot ? item[`screenshotMeta${n}`] : {original_path:source.input_path || source.path,original_sha256:source.sha256}});
   }
   return files;
 }

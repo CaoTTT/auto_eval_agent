@@ -751,6 +751,7 @@ def _item_visual_streams(item: dict) -> list[dict[str, Any]]:
             "product_no": None,
             "source_video": source.get("video_path") or item.get("video_path") or "",
             "runtime_video": item.get("video_path") or (media[0] if media else ""),
+            "video_source": item.get("video_source") or {},
             "frames": [Path(str(path)) for path in (item.get("frames") or [])],
             "duration": item.get("duration") or "",
         }]
@@ -768,6 +769,7 @@ def _item_visual_streams(item: dict) -> list[dict[str, Any]]:
             "evidence_mode": "video_frames",
             "product_no": product_no,
             "source_video": source.get(f"video{product_no}") or "",
+            "video_source": item.get(f"video_source{product_no}") or {},
             "runtime_video": item.get(f"video{product_no}_path") or (
                 media[product_no - 1] if len(media) >= product_no else ""
             ),
@@ -897,6 +899,7 @@ def _frame_manifest_rows(snapshot: dict) -> list[dict]:
                 "产品序号": product_no or "",
                 "录屏项目相对路径": _project_relative_path(stream["runtime_video"]),
                 "原始video_path": stream["source_video"],
+                "录屏内容SHA256": stream.get("video_source", {}).get("sha256", ""),
             }
             if not frames:
                 rows.append({
@@ -1225,6 +1228,7 @@ def write_frames_zip(
                     "query": item.get("query") or item.get("question") or "",
                     "product_no": product_no,
                     "source_video_path": stream["source_video"],
+                    "source_video_sha256": stream.get("video_source", {}).get("sha256", ""),
                     "video_project_path": _project_relative_path(
                         stream["runtime_video"],
                         project_root,

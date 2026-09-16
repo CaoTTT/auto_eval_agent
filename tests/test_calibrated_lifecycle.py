@@ -60,6 +60,12 @@ async def test_real_retry_uses_frozen_protocol_after_restore(tmp_path, monkeypat
     restored.active_runs = 1
     calls = []
     closed = []
+    prepared = []
+
+    def prepare(item, **kwargs):
+        # This protocol test uses synthetic frames, not actual video files.
+        prepared.append(item["id"])
+        return {**item, "frames1": [str(frame)], "frames2": [str(frame)]}
 
     class Client:
         def __init__(self, cfg):
@@ -82,6 +88,7 @@ async def test_real_retry_uses_frozen_protocol_after_restore(tmp_path, monkeypat
             closed.append(True)
 
     monkeypatch.setattr(runner, "JudgeClient", Client)
+    monkeypatch.setattr(runner, "prepare_session_visual_compare_item", prepare)
     monkeypatch.setattr(runner, "save_task", lambda _task: True)
     monkeypatch.setattr(runner, "retire_task", lambda _task: None)
     await runner.run_retry(restored, app_cfg, retry_id)
@@ -89,6 +96,7 @@ async def test_real_retry_uses_frozen_protocol_after_restore(tmp_path, monkeypat
     retry = restored.retry_runs[retry_id]
     assert retry["status"] == "completed", retry
     assert retry["succeeded"] == 1
+    assert prepared == ["q1"]
     assert len(calls) == len(closed) == 1
     assert f"qa_competitor_compare/{protocol.standard_version} 标准" in calls[0][0]
     assert ("【思考暴露（内部过程信息泄露）】" in calls[0][0]) == (

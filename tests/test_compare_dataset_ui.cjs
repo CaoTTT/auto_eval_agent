@@ -89,6 +89,10 @@ async function main(){
   const historical=context.fromDatasetItem({evidence_mode:'video_frames',product_count:2,video1:'a.mp4',video2:'b.mp4',
     source_data:{screenshot1:'a.png',screenshot2:'b.png'}},0);
   assert.equal(context.caseMedia(historical)[0].role,'video','readonly history follows its saved evaluated layer');
+  const boundVideo=context.fromDatasetItem({product_count:2,evidence_mode:'video_frames',video1:'a.mp4',video2:'b.mp4',
+    video_source1:{input_path:'a.mp4',path:'C:/data/a.mp4',sha256:'video-sha'}},0);
+  assert.equal(context.caseMedia(boundVideo)[0].meta.original_sha256,'video-sha');
+  assert.equal(context.caseMedia(boundVideo)[0].meta.original_path,'a.mp4');
 
   const requests=[],watchers=[];let cleanup;
   const caseContext={...context,watch(source,fn){watchers.push({source,fn});},onUnmounted(fn){cleanup=fn;},

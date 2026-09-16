@@ -150,6 +150,7 @@ def test_compare_preparation_reuses_each_validated_video_duration(monkeypatch, t
 
 
 def test_custom_extractor_does_not_require_new_duration_argument(tmp_path):
+    (tmp_path / "video.mp4").write_bytes(b"video")
     def extract(video_path, frame_dir):
         frame = frame_dir / "kf_001.jpg"
         frame.write_bytes(b"test")

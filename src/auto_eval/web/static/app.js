@@ -1,4 +1,4 @@
-import { createApp, ref, computed, onMounted, onUnmounted, nextTick, selectEvidenceMode } from "./compare-data.js?v=20260916_human_answers";
+import { createApp, ref, computed, onMounted, onUnmounted, nextTick, selectEvidenceMode } from "./compare-data.js?v=20260916_video_cache";
 
 createApp({
   setup() {
@@ -739,6 +739,7 @@ createApp({
             [`video${n}Path`,item[`video${n}`] || ''], [`screenshot${n}Path`,item[`screenshot${n}`] || ''],
             [`answer${n}`,item[`answer${n}`] || ''], [`context${n}`,item[`context${n}`] || ''],
             [`screenshotMeta${n}`,item[`screenshot_meta${n}`] || {}],
+            [`videoSource${n}`,item[`video_source${n}`] || {}],
           ])), taskStartTime:item.task_start_time ?? null, taskEndTime:item.task_end_time ?? null,
           sourceLine:item.source_line ?? null, sourceData:raw.source_data || null,
           sessionGroup:item.session_group ?? null, turnIndex:item.turn_index ?? null};

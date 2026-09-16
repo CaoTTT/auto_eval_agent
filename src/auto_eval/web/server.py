@@ -55,7 +55,7 @@ from .runner import run_eval, run_retry, run_resume, finish_pause, run_update_ba
 from .execution_control import resume_indexes
 from .scheduler import EvalScheduler
 from .exports import XlsxExports, xlsx_download_name
-from .dataset_media import DatasetMedia
+from .dataset_media import DatasetMedia, file_hash
 from .human_baselines import HumanStore
 from .human_compare import HumanComparisons
 from .human_routes import install_human_routes
@@ -213,8 +213,8 @@ def _validate_eval_request(req: EvalReq, app_cfg) -> None:
             item.update(normalize_query_input(item))
             for field in PREPARED_FIELDS:
                 item.pop(field, None)
-            for field in ("media", "frame_count", *(f"{prefix}{n}" for n in (1, 2, 3)
-                          for prefix in ("frames", "duration", "screenshot_meta"))):
+            for field in ("media", "frame_count", "video_source", *(f"{prefix}{n}" for n in (1, 2, 3)
+                          for prefix in ("frames", "duration", "screenshot_meta", "video_source"))):
                 item.pop(field, None)
             for n in (1, 2, 3):
                 item.pop(f"video{n}_path", None)
@@ -932,7 +932,7 @@ async def api_dataset(task_id: str):
     fields = {"id", "query", "question", "context", "category", "product_count", "evidence_mode",
               "query_images", "query_image_meta", "source_data", "source_line", "session_group", "turn_index",
               "task_start_time", "task_end_time"}
-    fields.update(f"{name}{n}" for name in ("video", "screenshot", "answer", "context", "screenshot_meta")
+    fields.update(f"{name}{n}" for name in ("video", "screenshot", "answer", "context", "screenshot_meta", "video_source")
                   for n in range(1, 4))
     return {"task_id": task.id, "dataset_name": task.dataset_name, "created_at": task.created_at,
             "note": task.note, "items": copy.deepcopy([
@@ -1154,6 +1154,9 @@ def api_export_item(task_id: str, item_index: int, format: str):
             video_path = _resolve_operation_video_path(raw_path)
         except ValueError as exc:
             raise HTTPException(404, str(exc)) from exc
+        source_identity = item.get("video_source") or item.get("video_source1") or {}
+        if source_identity.get("sha256") and file_hash(video_path) != source_identity["sha256"]:
+            raise HTTPException(409, "原视频内容已变更，与评测时采样帧不一致，请恢复原视频或重新评测")
         return FileResponse(
             video_path,
             filename=f"{stem}{video_path.suffix.lower()}",

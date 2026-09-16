@@ -332,14 +332,15 @@ async def test_screenshot_cancellation_closes_image_and_stops_pipeline(monkeypat
 @pytest.mark.asyncio
 async def test_cancelled_video_does_not_publish_complete_cache(tmp_path):
     frames_dir = tmp_path / "frames"
-    def extract(*args, **kwargs):
-        path = frames_dir / "kf_001.jpg"
+    (tmp_path / "video.mp4").write_bytes(b"video")
+    def extract(video, directory, **kwargs):
+        path = directory / "kf_001.jpg"
         path.write_bytes(b"partial")
         preparation._scope.get().cancelled.set()
         return [path]
     with pytest.raises(preparation.PreparationStopped):
         await preparation.run_preparation(video_prepare._extract_frames, tmp_path / "video.mp4", frames_dir, extract_fn=extract, timeout=5)
-    assert not (frames_dir / ".complete").exists()
+    assert not list(frames_dir.rglob(".complete"))
 
 
 @pytest.mark.asyncio

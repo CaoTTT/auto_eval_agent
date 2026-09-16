@@ -477,7 +477,12 @@ def _make_item_evaluator(
                     item_dict.get("evidence_mode") == "long_screenshot"
                     or (not item_dict.get("evidence_mode") and bool(item_dict.get("screenshot1")))
                 )
-                needs_visual_prepare = is_screenshot or (
+                has_source_video = (
+                    any(item_dict.get(f"video{n}") for n in (1, 2, 3))
+                    if task.mode == "compare"
+                    else bool(item_dict.get("video_path") or item_dict.get("media"))
+                )
+                needs_visual_prepare = is_screenshot or has_source_video or (
                     not _compare_frames_ready(item_dict)
                     if task.mode == "compare"
                     else not item_dict.get("frames")
@@ -739,6 +744,7 @@ _PREPARED_ITEM_FIELDS = {
     "evidence_mode", "screenshot_meta1", "screenshot_meta2", "screenshot_meta3",
     "frames", "frames1", "frames2", "frames3", "frame_count", "media",
     "video_name", "video1_path", "video2_path", "video3_path",
+    "video_source", "video_source1", "video_source2", "video_source3",
     "duration", "duration1", "duration2", "duration3",
 }
 

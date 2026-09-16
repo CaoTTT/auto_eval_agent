@@ -84,10 +84,13 @@ async def test_scheduler_runs_tasks_fifo_without_overlap(monkeypatch):
     assert max_active == 1
 
     release["b"].set()
-    for _ in range(20):
-        if scheduler.snapshot() == {"running": None, "queued": []}:
-            break
-        await asyncio.sleep(0)
+
+    async def wait_until_idle():
+        # Completion includes persistence in a worker thread, not just the runner.
+        while scheduler.snapshot() != {"running": None, "queued": []}:
+            await asyncio.sleep(0.001)
+
+    await asyncio.wait_for(wait_until_idle(), timeout=2)
     assert events == ["start:a", "done:a", "start:b", "done:b"]
     assert scheduler.snapshot() == {"running": None, "queued": []}
     await scheduler.stop()

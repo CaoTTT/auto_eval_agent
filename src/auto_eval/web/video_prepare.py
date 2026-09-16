@@ -1,10 +1,15 @@
 """视频视觉评估的路径校验、缓存与关键帧准备。"""
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
 import re
+import threading
+import weakref
+from contextlib import contextmanager
+from dataclasses import asdict
 from numbers import Real
 from pathlib import Path
 from typing import Callable
@@ -22,6 +27,43 @@ from ..preparation import check_preparation
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"}
 _TASK_TIME_FIELDS = ("task_start_time", "task_end_time")
+_CACHE_VERSION = "video-frame-cache-2"
+_cache_locks = weakref.WeakValueDictionary()
+_cache_locks_guard = threading.Lock()
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            check_preparation()
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _video_identity(path: Path) -> dict:
+    before = path.stat()
+    digest = _file_sha256(path)
+    after = path.stat()
+    fields = ("st_size", "st_mtime_ns", "st_ctime_ns", "st_ino")
+    if any(getattr(before, field) != getattr(after, field) for field in fields):
+        raise ValueError("读取期间视频文件发生变化，请停止替换文件后重试")
+    return {"path": str(path.resolve()), "sha256": digest, "size": after.st_size}
+
+
+@contextmanager
+def _cache_lock(directory: Path):
+    # Weak values bound the registry to in-flight extractions; waiting is cancellable.
+    key = os.path.normcase(str(directory.resolve()))
+    with _cache_locks_guard:
+        lock = _cache_locks.setdefault(key, threading.Lock())
+    while not lock.acquire(timeout=0.1):
+        check_preparation()
+    try:
+        check_preparation()
+        yield
+    finally:
+        lock.release()
 
 
 def _safe_name(value: str, fallback: str) -> str:
@@ -67,18 +109,32 @@ def resolve_operation_video_path(
 def _cached_frames(
     frame_dir: Path,
     cache_key: str = KEYFRAME_ALGORITHM_VERSION,
+    source_identity: dict | None = None,
 ) -> list[Path]:
     marker = frame_dir / ".complete"
     if not marker.exists():
         return []
     try:
         payload = json.loads(marker.read_text(encoding="utf-8"))
-        if payload.get("cache_key") != cache_key:
+        if not isinstance(payload, dict):
+            return []
+        if (payload.get("version") != _CACHE_VERSION or payload.get("cache_key") != cache_key
+                or not source_identity or payload.get("source") != source_identity):
             return []
         expected = int(payload["frame_count"])
         frames = sorted(frame_dir.glob("kf_*.jpg"))
-        return frames if expected > 0 and len(frames) == expected else []
+        records = payload["frames"]
+        if expected <= 0 or len(frames) != expected or len(records) != expected:
+            return []
+        for frame, record in zip(frames, records):
+            if record["name"] != frame.name or record["sha256"] != _file_sha256(frame):
+                return []
+        metadata = frame_dir / "keyframes.json"
+        if payload.get("metadata_sha256", "") != (_file_sha256(metadata) if metadata.is_file() else ""):
+            return []
+        return frames
     except (json.JSONDecodeError, KeyError, OSError, TypeError, ValueError):
+        check_preparation()
         return []
 
 
@@ -90,34 +146,49 @@ def _extract_frames(
     cache_key: str = KEYFRAME_ALGORITHM_VERSION,
     extract_kwargs: dict | None = None,
     duration: float | None = None,
+    source_identity: dict | None = None,
 ) -> list[Path]:
     check_preparation()
-    frames = _cached_frames(frame_dir, cache_key)
-    if frames:
+    source = source_identity or _video_identity(video_path)
+    identity = json.dumps([_CACHE_VERSION, source, cache_key], sort_keys=True, ensure_ascii=True)
+    # Changing a video's bytes or extraction policy never overwrites historical frames.
+    frame_dir = frame_dir / hashlib.sha256(identity.encode()).hexdigest()
+    with _cache_lock(frame_dir):
+        if _video_identity(video_path) != source:
+            raise ValueError("抽帧前视频文件发生变化，请重试")
+        frames = _cached_frames(frame_dir, cache_key, source)
+        if frames:
+            return frames
+        frame_dir.mkdir(parents=True, exist_ok=True)
+        for stale in frame_dir.glob("kf_*.jpg"):
+            stale.unlink(missing_ok=True)
+        (frame_dir / ".complete").unlink(missing_ok=True)
+        (frame_dir / "keyframes.json").unlink(missing_ok=True)
+        kwargs = dict(extract_kwargs or {})
+        if extract_fn is extract_scene_keyframes and duration is not None:
+            # Preserve the established extension point for custom extractors.
+            kwargs["duration"] = duration
+        frames = sorted(Path(path) for path in extract_fn(video_path, frame_dir, **kwargs))
+        check_preparation()  # Never mark an interrupted extraction as a complete cache.
+        if _video_identity(video_path) != source:
+            raise ValueError("抽帧期间视频文件发生变化，请重试")
+        if frames:
+            if frames != sorted(frame_dir.glob("kf_*.jpg")):
+                raise ValueError("抽帧结果与本次缓存目录不一致")
+            metadata = frame_dir / "keyframes.json"
+            payload = {
+                "version": _CACHE_VERSION,
+                "cache_key": cache_key,
+                "source": source,
+                "frame_count": len(frames),
+                "frames": [{"name": path.name, "sha256": _file_sha256(path)} for path in frames],
+                "metadata_sha256": _file_sha256(metadata) if metadata.is_file() else "",
+            }
+            check_preparation()
+            marker = frame_dir / ".complete.tmp"
+            marker.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            marker.replace(frame_dir / ".complete")
         return frames
-    frame_dir.mkdir(parents=True, exist_ok=True)
-    for stale in frame_dir.glob("kf_*.jpg"):
-        stale.unlink(missing_ok=True)
-    (frame_dir / ".complete").unlink(missing_ok=True)
-    (frame_dir / "keyframes.json").unlink(missing_ok=True)
-    kwargs = dict(extract_kwargs or {})
-    if extract_fn is extract_scene_keyframes and duration is not None:
-        # Preserve the established extension point for custom extractors.
-        kwargs["duration"] = duration
-    frames = list(extract_fn(video_path, frame_dir, **kwargs))
-    check_preparation()  # Never mark an interrupted extraction as a complete cache.
-    if frames:
-        (frame_dir / ".complete").write_text(
-            json.dumps(
-                {
-                    "cache_key": cache_key,
-                    "frame_count": len(frames),
-                },
-                ensure_ascii=False,
-            ),
-            encoding="utf-8",
-        )
-    return frames
 
 
 def _rich_content_timing(
@@ -128,8 +199,7 @@ def _rich_content_timing(
 ) -> tuple[dict, str]:
     """校验富内容视频时间窗，并构造专用抽帧配置和缓存键。
 
-    缓存键包含视频路径：同一 frame_dir（同 session/index/id）换视频重评时，
-    旧 ``.complete`` 标记因 key 不匹配自动失效重抽，避免评到旧帧。
+    缓存键包含完整实际抽帧配置；_extract_frames 另外绑定源视频内容哈希。
     """
     supplied: dict[str, float] = {}
     for field in _TASK_TIME_FIELDS:
@@ -172,18 +242,9 @@ def _rich_content_timing(
     )
     cache_payload = {
         "algorithm_version": extraction.algorithm_version,
+        "extractor_version": KEYFRAME_ALGORITHM_VERSION,
         "video": video_path,
-        "config": {
-            "task_start_time": start,
-            "task_end_time": end,
-            "max_frames": extraction.max_frames,
-            "sample_fps": extraction.sample_fps,
-            "scene_threshold": extraction.scene_threshold,
-            "scene_min_gap_s": extraction.scene_min_gap_s,
-            "state_layout_threshold": extraction.state_layout_threshold,
-            "stable_min_duration_s": extraction.stable_min_duration_s,
-            "max_edge": extraction.max_edge,
-        },
+        "config": asdict(config),
     }
     cache_key = json.dumps(
         cache_payload,
@@ -230,6 +291,7 @@ def prepare_session_rich_content_item(
     if not raw_path:
         raise ValueError("缺少 video_path")
     video_path = resolve_operation_video_path(raw_path, base_dir=base_dir)
+    source_identity = _video_identity(video_path)
     duration = float(probe_fn(video_path))
     if duration <= 0:
         raise ValueError(f"无法读取视频或视频时长为 0：{raw_path}")
@@ -254,10 +316,14 @@ def prepare_session_rich_content_item(
         cache_key=cache_key,
         extract_kwargs=extract_kwargs,
         duration=duration,
+        source_identity=source_identity,
     )
     if not frames:
         raise ValueError(f"视频抽帧失败：{raw_path}")
-    return _prepared_item(item, video_path, frames, duration)
+    return {
+        **_prepared_item(item, video_path, frames, duration),
+        "video_source": {**source_identity, "input_path": raw_path},
+    }
 
 
 def prepare_session_visual_compare_item(
@@ -303,6 +369,7 @@ def prepare_session_visual_compare_item(
         if not raw_path:
             raise ValueError(f"缺少 video{product_no}")
         video_path = resolve_operation_video_path(raw_path, base_dir=base_dir)
+        source_identity = _video_identity(video_path)
         duration = float(probe_fn(video_path))
         if duration <= 0:
             raise ValueError(
@@ -322,6 +389,7 @@ def prepare_session_visual_compare_item(
             cache_key=cache_key,
             extract_kwargs=extract_kwargs,
             duration=duration,
+            source_identity=source_identity,
         )
         if not frames:
             raise ValueError(f"视频{product_no}抽帧失败：{raw_path}")
@@ -331,6 +399,7 @@ def prepare_session_visual_compare_item(
         first_video_name = first_video_name or video_path.name
         first_duration = first_duration or duration
         prepared[f"video{product_no}_path"] = str(video_path)
+        prepared[f"video_source{product_no}"] = {**source_identity, "input_path": raw_path}
         prepared[f"frames{product_no}"] = [str(frame) for frame in frames]
         prepared[f"duration{product_no}"] = round(duration, 2)
 

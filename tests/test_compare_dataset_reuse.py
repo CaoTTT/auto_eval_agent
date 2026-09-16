@@ -52,7 +52,8 @@ async def test_dataset_list_filters_before_pagination_and_keeps_duplicate_names(
 async def test_preview_returns_inputs_only_without_mutating_original(environment,monkeypatch):
     items=[{"id":str(i),"query":"q","video1":"a.mp4","video2":"b.mp4",
             "query_images":["original.png"],"query_image_meta":[{"original_path":"original.png"}],
-            "source_data":{"custom":"preserved"},"frames1":["cache.jpg"]} for i in range(25)]
+            "source_data":{"custom":"preserved"},"frames1":["cache.jpg"],
+            "video_source1":{"input_path":"a.mp4","sha256":"source-sha"}} for i in range(25)]
     task=Task(id="source",mode="compare",items=items,options={},results=[{"index":0,"score":3}])
     before=copy.deepcopy(task.items)
     async def peek(key):return task if key==task.id else None
@@ -62,6 +63,7 @@ async def test_preview_returns_inputs_only_without_mutating_original(environment
         assert len(data["items"])==25 and "results" not in data
         assert "frames1" not in data["items"][0]
         assert data["items"][0]["query_image_meta"]==items[0]["query_image_meta"]
+        assert data["items"][0]["video_source1"]==items[0]["video_source1"]
         assert data["items"][0]["source_data"]=={"custom":"preserved"}
         data["items"][0]["query"]="changed"
         assert task.items==before
