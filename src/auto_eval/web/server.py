@@ -55,6 +55,9 @@ from .runner import run_eval, run_retry, run_update_batch, spawn_background, sna
 from .scheduler import EvalScheduler
 from .exports import XlsxExports, xlsx_download_name
 from .dataset_media import DatasetMedia
+from .human_baselines import HumanStore
+from .human_compare import HumanComparisons
+from .human_routes import install_human_routes
 from .persistence import queue_task_save, wait_task_save, task_save_pending
 from .tasks import (
     TASKS,
@@ -79,11 +82,14 @@ _state: dict = {}
 EVAL_SCHEDULER = EvalScheduler()
 XLSX_EXPORTS = XlsxExports(RUNS_DIR / "exports")
 DATASET_MEDIA = DatasetMedia()
+HUMAN_COMPARISONS = HumanComparisons(HumanStore(RUNS_DIR))
+install_human_routes(app, lambda: HUMAN_COMPARISONS, lambda task_id: peek_task_async(task_id))
 
 
 @app.on_event("startup")
 async def _load():
     _state["cfg"] = load_config(CONFIG_DIR)
+    await asyncio.to_thread(HUMAN_COMPARISONS.recover)
     EVAL_SCHEDULER.start()
 
 
@@ -91,6 +97,7 @@ async def _load():
 async def _shutdown():
     await EVAL_SCHEDULER.stop()
     await XLSX_EXPORTS.close()
+    await HUMAN_COMPARISONS.close()
 
 
 def cfg():

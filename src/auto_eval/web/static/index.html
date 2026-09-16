@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <title>auto_eval 评估台</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260916_task_duration">
+  <link rel="stylesheet" href="/static/style.css?v=20260916_human_comparison">
   <style>
     .op-cards { display:flex; flex-direction:column; gap:12px; }
     .op-card { border:1px solid #e2e8f0; border-radius:8px; padding:12px; background:#fafbfc; }
@@ -354,6 +354,7 @@
       </button>
       <span v-if="retryStatusLabel(repairStatus)" class="running">{{ retryStatusLabel(repairStatus) }}</span>
     </h2>
+    <human-compare-panel v-if="mode==='compare' && taskId && !loadingTaskId" :key="taskId" :task-id="taskId"></human-compare-panel>
     <div class="summary" v-if="summary">
       <span v-if="summary.input_modality_counts">文字题 {{ summary.input_modality_counts.text }} · 图文题 {{ summary.input_modality_counts.text_image }}</span>
       <span>样本量 {{ summary.total }}</span>
@@ -503,6 +504,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20260916_task_duration"></script>
+  <script type="module" src="/static/app.js?v=20260916_human_comparison"></script>
 </body>
 </html>

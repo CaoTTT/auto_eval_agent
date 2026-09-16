@@ -1,4 +1,4 @@
-import { createApp, ref, computed, onMounted, onUnmounted, nextTick } from "./compare-data.js?v=20260916_task_metadata";
+import { createApp, ref, computed, onMounted, onUnmounted, nextTick } from "./compare-data.js?v=20260916_human_comparison";
 
 createApp({
   setup() {

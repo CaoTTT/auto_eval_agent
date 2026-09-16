@@ -1,6 +1,6 @@
 # 人工评分基准对比功能：代码实现方案 v1.0
 
-状态：设计稿，未修改或实施业务代码。日期：2026-09-15。
+状态：设计稿日期为 2026-09-15；2026-09-16 已完成本地代码实施，使用入口、实现边界和验证记录见 [实现说明](human-score-comparison-implementation.md)。
 
 代码基线：`CaoTTT/auto_eval_agent`，`feat/bailian-request-throughput`，远端提交 `6c05c200cf6ec7ce7575b5c8e9676f6d9f40ffbf`。已同步核对新增校准 Prompt 之后的请求调度、Token 估算、阶段耗时及“最终回复内部过程信息泄露”修订。本功能以独立后处理方式接入。
 

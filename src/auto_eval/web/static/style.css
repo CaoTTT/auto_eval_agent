@@ -384,3 +384,24 @@ tr.result-error td, tr.result-error-detail td { background: #fef2f2 !important; 
 .task-duration-heading small { color: #2563eb; }
 .task-duration-panel .hint { margin: 6px 0 0; }
 .task-duration-cell { font-variant-numeric: tabular-nums; min-width: 110px; }
+/* Human reference comparison: local post-processing, isolated from evaluation controls. */
+.human-comparison { margin: 12px 0; }
+.human-entry { color: #174d79; border-color: #87adc8; background: #edf5fa; font-weight: 600; }
+.human-panel { border: 1px solid #c2d3df; border-radius: 10px; padding: 20px; background: #f8fafc; }
+.human-panel fieldset { min-width: 0; margin: 16px 0; border: 1px solid #d7e0e9; border-radius: 8px; padding: 16px; background: white; }
+.human-panel legend { font-weight: 600; color: #1e3a5f; padding: 0 8px; }
+.human-toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 10px 0; }
+.human-toolbar h3 { margin: 0; }.human-toolbar input[type=number] { width: 75px; }
+.human-panel input, .human-panel select { max-width: 100%; padding: 6px 8px; }
+.human-panel select { max-width: 350px; }.human-panel textarea { box-sizing: border-box; width: 100%; font-family: monospace; }
+.human-panel .table-scroll { overflow: auto; max-height: 580px; }.human-panel td { vertical-align: top; min-width: 100px; }
+.human-panel td select { max-width: 190px; }.human-panel small { display: block; color: #64748b; margin-top: 4px; }
+.human-panel details { margin: 10px 0; }.human-panel pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.human-panel label { display: inline-flex; gap: 5px; align-items: center; flex-wrap: wrap; }
+.human-panel .human-wide { display: flex; margin: 12px 0; }.human-wide input { flex: 1; min-width: 200px; }
+.human-task { padding: 12px; border-left: 3px solid #8aafca; margin: 10px 0; background: #f5f8fb; }
+.human-confirm { padding: 12px; background: #fff8e8; margin: 12px 0; }.human-confirm label { display: flex; margin: 10px 0; }
+.human-confirm input:not([type=checkbox]) { width: 90%; }.human-report { margin-top: 22px; padding-top: 14px; border-top: 2px solid #c2d3df; }
+.human-panel img { max-width: 600px; width: 100%; max-height: 600px; object-fit: contain; }.human-panel h4 { margin: 20px 0 10px; }
+.human-panel video { max-width: 600px; width: 100%; max-height: 600px; }
+@media(max-width: 700px) { .human-panel { padding: 10px; }.human-panel fieldset { padding: 10px; }.human-toolbar { align-items: stretch; } }

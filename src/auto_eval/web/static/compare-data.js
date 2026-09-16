@@ -1,5 +1,6 @@
 import {createApp as vueCreateApp, ref, computed, watch, onMounted, onUnmounted, nextTick} from "https://unpkg.com/vue@3/dist/vue.esm-browser.js";
 import {CompareCaseList, fromDatasetItem, caseMedia} from "./compare-cases.js?v=20260911_dataset_reuse";
+import {HumanComparePanel} from "./human-compare.js?v=20260916_human";
 export {ref, computed, onMounted, onUnmounted, nextTick};
 
 export const CompareDatasetPanel = {
@@ -96,5 +97,5 @@ export const CompareDatasetPanel = {
 };
 
 export function createApp(options) {
-  return vueCreateApp({...options, components:{...options.components,CompareDatasetPanel}});
+  return vueCreateApp({...options, components:{...options.components,CompareDatasetPanel,HumanComparePanel}});
 }
