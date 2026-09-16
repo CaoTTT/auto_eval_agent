@@ -402,7 +402,12 @@ class RequestThrottle:
                                 self._warm_start_on_send = False
                             warm = (min(1.0, .25 + .75 * (now - self._warm_started) / self._warmup_s)
                                     if self._warmup_s else 1.0)
-                            interval = max(60 / self._target_rpm, tokens * 60 / self._target_tpm) / warm
+                            # Ramp request frequency only. Applying warmup to the
+                            # token interval freezes a 4x delay after the first
+                            # large request, even beyond the warmup period. Token
+                            # pacing and the rolling budget still apply in full.
+                            interval = max(60 / self._target_rpm / warm,
+                                           tokens * 60 / self._target_tpm)
                             # Based on actual time, never on an old planned slot.
                             self._next_send = now + interval + DISPATCH_GUARD_S
                             self._last_send = now

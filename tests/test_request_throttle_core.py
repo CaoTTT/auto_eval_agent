@@ -74,9 +74,59 @@ async def test_large_request_pacing_does_not_restart_warmup_while_waiting():
     second = await throttle.acquire(500_000)
     throttle.finish(second, {"total_tokens": 10})
     third = await throttle.acquire(500_000)
-    assert second.sent - first.sent == pytest.approx(150 + DISPATCH_GUARD_S)
+    assert first.sent == 0  # Warmup never adds a delay before the first send.
+    assert second.sent - first.sent == pytest.approx(37.5 + DISPATCH_GUARD_S)
     assert third.sent - second.sent == pytest.approx(37.5 + DISPATCH_GUARD_S)
     throttle.finish(third)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tokens,expected_gap", [(50_000, 3.75), (100_000, 7.5), (150_000, 11.25)])
+async def test_startup_large_requests_use_token_pacing_without_extra_warmup(tokens, expected_gap):
+    clock = Clock()
+    throttle = RequestThrottle(clock=clock, sleep=clock.sleep, warmup_s=15)
+    first = await throttle.acquire(tokens)
+    assert first.sent == clock.now == 0
+    # The second call must start while the first response is still pending.
+    # These fixed workloads should not wait 15/30/45 seconds at startup.
+    second = await throttle.acquire(tokens)
+    assert second.sent - first.sent == pytest.approx(expected_gap + DISPATCH_GUARD_S)
+    assert throttle.snapshot()["inflight"] == 2
+    throttle.finish(first, {"total_tokens": tokens})
+    throttle.finish(second, {"total_tokens": tokens})
+
+
+@pytest.mark.asyncio
+async def test_idle_restart_does_not_multiply_large_request_token_interval():
+    clock = Clock()
+    throttle = RequestThrottle(clock=clock, sleep=clock.sleep, warmup_s=15)
+    first = await throttle.acquire(100_000)
+    throttle.finish(first, {"total_tokens": 10})
+    clock.now += 31  # Truly idle long enough to restart request-frequency warmup.
+    second = await throttle.acquire(100_000)
+    assert second.sent == 31
+    third = await throttle.acquire(100_000)
+    assert third.sent - second.sent == pytest.approx(7.5 + DISPATCH_GUARD_S)
+    throttle.finish(second)
+    throttle.finish(third)
+
+
+@pytest.mark.asyncio
+async def test_faster_startup_still_waits_for_full_token_budget_to_settle():
+    clock = Clock()
+    throttle = RequestThrottle(clock=clock, sleep=clock.sleep, warmup_s=15)
+    first = await throttle.acquire(DEFAULT_TPM)
+    clock.now = 61  # Soft pacing and HTTP windows have elapsed, tokens have not.
+    waiting = asyncio.create_task(throttle.acquire(150_000))
+    await asyncio.sleep(0)
+    assert not waiting.done()
+    assert throttle.snapshot()["wait_reason"] == "token_budget"
+    assert throttle.snapshot()["total_requests"] == 1
+    throttle.finish(first, {"total_tokens": 600_000})
+    second = await asyncio.wait_for(waiting, .5)
+    assert second.sent == 61
+    assert throttle.snapshot()["token_estimated_total"] == 750_000
+    throttle.finish(second)
 
 
 @pytest.mark.asyncio
