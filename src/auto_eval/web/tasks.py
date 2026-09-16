@@ -8,7 +8,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any
 
-from .history import _snapshot_evaluation_profile, load_snapshot, make_session_name, save_task
+from .history import _snapshot_evaluation_profile, load_snapshot, make_session_name, save_task, snapshot_task_timing
 from .persistence import queue_task_save, task_save_pending
 
 # 每个 SSE 连接的事件队列上限：慢消费者丢最旧保最新，杜绝无消费者时无限堆积
@@ -32,6 +32,8 @@ class Task:
     progress_events: dict[str, list[dict]] = field(default_factory=dict)
     summary: dict = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
+    task_timing: dict = field(default_factory=dict)
+    _timing_started_monotonic: float | None = field(default=None, repr=False)
     done_total: int = 0
     error: str | None = None
     # 失败补跑是原任务的子运行，不改变主任务终态；状态和审计信息单独保存。
@@ -48,6 +50,32 @@ class Task:
     # 全程 status=done，只有计数能 pin 住运行中的任务对象。
     active_runs: int = 0
 
+    def start_timing(self) -> None:
+        """Begin the original execution once; queued time and later repairs are separate."""
+        if self.task_timing.get("started_at") is not None:
+            return
+        now = time.time()
+        self._timing_started_monotonic = time.monotonic()
+        self.task_timing = {
+            "started_at": now, "finished_at": None, "elapsed_s": 0.0,
+            "running": True, "measured_at": now, "incomplete": False,
+        }
+
+    def timing_snapshot(self) -> dict:
+        timing = snapshot_task_timing({"task_timing": self.task_timing})
+        if self._timing_started_monotonic is not None:
+            timing["elapsed_s"] = round(max(0.0, time.monotonic() - self._timing_started_monotonic), 3)
+        timing["measured_at"] = time.time()
+        return timing
+
+    def finish_timing(self) -> None:
+        if self._timing_started_monotonic is None:
+            return
+        self.task_timing = self.timing_snapshot()
+        self.task_timing["finished_at"] = self.task_timing["measured_at"]
+        self.task_timing["running"] = False
+        self._timing_started_monotonic = None
+
     def subscribe(self) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue(maxsize=_MAX_SUB_QUEUE)
         self.subscribers.add(q)
@@ -62,6 +90,8 @@ class Task:
         同步实现是因为 _record_progress 可能经 call_soon_threadsafe 上环，
         不能 await。无订阅者时是空循环——事件不堆积。
         """
+        if event in {"start", "done", "error", "cancelled", "retry_start", "retry_cancelled"}:
+            data = {**data, "task_timing": self.timing_snapshot()}
         msg = {"event": event, "data": data}
         for q in list(self.subscribers):
             try:
@@ -210,6 +240,7 @@ def _task_from_snapshot(snapshot: dict, task_id: str) -> Task:
         progress_events=snapshot.get("progress_events") or {},
         summary=snapshot.get("summary") or {},
         created_at=float(snapshot.get("created_at") or time.time()),
+        task_timing=snapshot_task_timing(snapshot, interrupted=True),
         # done_total=0 是合法状态（更新批语义就是不动 done_total），显式 0
         # 必须保留；仅在字段缺失（legacy 快照）时才回退到 len(results)。
         done_total=(

@@ -67,7 +67,7 @@ export const CompareDatasetPanel = {
         <button @click="toggleHistory" :aria-expanded="historyOpen" :disabled="busy">{{historyOpen?'收起历史数据':'选择历史数据'}}</button>
         <span v-if="busy" class="hint">正在解析…</span>
       </div>
-      <details class="dataset-format-help"><summary>支持 JSONL / CSV · 查看格式说明</summary><p>JSONL 每行一个 Case，填写 query 与 screenshot1/2 或 video1/2。可选 query_images 单张提问原图；三产品填写 product_count: 3 及产品3字段。同一 Case 的产品证据类型保持一致。相对路径以服务器项目目录为基准。</p></details>
+      <details class="dataset-format-help"><summary>支持 JSON / JSONL / CSV · 查看格式说明</summary><p>JSON 支持数组或单个对象，JSONL 每行一个 Case，填写 query 与 screenshot1/2 或 video1/2。可选 query_images 单张提问原图；三产品填写 product_count: 3 及产品3字段。同一 Case 的产品证据类型保持一致。相对路径以服务器项目目录为基准。每条数据可添加 sessionid 等自定义字段，导出 Excel 时自动保留。</p></details>
       <section v-if="historyOpen" class="dataset-history">
         <div class="dataset-toolbar"><strong>历史测评数据</strong><input v-model="search" placeholder="搜索文件名、备注或任务编号" @keyup.enter="loadDatasets(1)" aria-label="搜索历史数据"><button @click="loadDatasets(1)">搜索 / 刷新</button></div>
         <p class="hint">复用该次任务提交的数据；同名文件的不同任务分别保留，不会覆盖原结果。</p>

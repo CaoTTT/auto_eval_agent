@@ -210,6 +210,7 @@ def _mark_interrupted_if_stuck(task: Task) -> bool:
         return False
     task.status = "error"
     task.error = task.error or "服务中断，已保留中断前完成的评估结果"
+    task.finish_timing()
     task._fanout("error", {"message": task.error})
     return True
 
@@ -219,22 +220,26 @@ async def run_eval(task: Task, cfg: AppConfig) -> None:
     （endpoint 在 spawn_background 之前），本函数只负责结束时解除——否则
     spawn 延迟窗口内任务可被 DELETE/LRU 淘汰，引发快照复活或双对象覆盖。"""
     try:
-        await task.publish("start", {"total": len(task.items), "mode": task.mode})
+        task.start_timing()
         task.status = "running"
+        await task.publish("start", {"total": len(task.items), "mode": task.mode})
         await _persist_task_and_wait(task)
         try:
             await _run(task, cfg)
             task.summary = _summarize(task)
             task.status = "done"
+            task.finish_timing()
             await task.publish("done", {"summary": task.summary, "total": len(task.items)})
             await _persist_task_and_wait(task)
         except Exception as e:
             task.status = "error"
             task.error = f"{type(e).__name__}: {e}"
+            task.finish_timing()
             await task.publish("error", {"message": task.error})
             await _persist_task_and_wait(task)
     finally:
         task.active_runs -= 1
+        task.finish_timing()
         _mark_interrupted_if_stuck(task)
         await _persist_task_and_wait(task)  # 退休前最后一次落盘，磁盘先于内存下线
         retire_task(task)
@@ -904,6 +909,7 @@ async def _run_update_batch_body(
     current: tuple[int, dict] | None = None
     try:
         if manage_status:
+            task.start_timing()
             task.status = "running"
             await _persist_task_and_wait(task)
         # 整批一个串行会话：前轮总结在批次内本地链式注入，
@@ -936,6 +942,7 @@ async def _run_update_batch_body(
                 prior_summary += f"【第{turn_no}轮】（评测未产出结果）\n"
         if manage_status:
             task.status = "done"
+            task.finish_timing()
             task.summary = _summarize(task)  # publish 前重算（节流后不再每题重算）
             await task.publish(
                 "done", {"summary": task.summary, "total": len(task.items)}
@@ -950,6 +957,7 @@ async def _run_update_batch_body(
         if manage_status:
             task.status = "error"
             task.error = f"{type(e).__name__}: {e}"
+            task.finish_timing()
             await task.publish("error", {"message": task.error})
         await _persist_task_and_wait(task)
     finally:
@@ -971,11 +979,15 @@ async def run_update_batch(
     对象（计数 pin），全部结束（idle）时才退休。
     """
     try:
+        if manage_status:
+            task.start_timing()
         await _run_update_batch_body(
             task, cfg, batch, options=options, manage_status=manage_status
         )
     finally:
         task.active_runs -= 1
+        if manage_status:
+            task.finish_timing()
         idle = task.active_runs <= 0
         interrupted = _mark_interrupted_if_stuck(task) if idle else False
         await _persist_task_and_wait(task)  # 退休前最后一次落盘，磁盘先于内存下线

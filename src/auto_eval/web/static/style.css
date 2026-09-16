@@ -378,3 +378,9 @@ tr.result-error td, tr.result-error-detail td { background: #fef2f2 !important; 
 .timing-details dd { margin: 0 0 5px; color: #0f172a; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .timing-details dd:last-child { margin-bottom: 0; }
 .timing-help { margin: 8px 0; }
+.task-duration-panel { margin-top: 14px; padding: 12px 16px; border: 1px solid #cbd5e1; border-radius: 8px; background: #f8fafc; }
+.task-duration-heading { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; color: #334155; }
+.task-duration-heading strong { font-size: 20px; color: #1e3a5f; font-variant-numeric: tabular-nums; }
+.task-duration-heading small { color: #2563eb; }
+.task-duration-panel .hint { margin: 6px 0 0; }
+.task-duration-cell { font-variant-numeric: tabular-nums; min-width: 110px; }

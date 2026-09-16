@@ -15,6 +15,7 @@ async function main() {
     createApp(options) { app = options.setup(); return { mount() {} }; },
     async fetch(url) {
       if (url === '/api/queue') return { ok: true, json: async () => ({ running: queueRunning }) };
+      if (url === '/api/history?limit=50') return { ok: true, json: async () => ({ items: [] }) };
       assert.equal(url, '/api/request-pacing');
       pacingCalls++;
       if (failPacing) return { ok: false };

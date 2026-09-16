@@ -742,11 +742,13 @@ async def api_stream(task_id: str, compact: bool = False):
                 # 首次 yield 前固定全部快照；回放期间的新事件由 q 按序补齐。
                 histories = [(key, list(events)) for key, events in task.progress_events.items()]
                 yield _sse("replay_state", {
+                    "status": task.status,
                     "results": list(task.results),
                     "item_progress": snapshot_item_progress(task),
                     "progress": task.done_total,
                     "total": len(task.items),
                     "repair_status": task.repair_status,
+                    "task_timing": task.timing_snapshot(),
                     "retry": max(task.retry_runs.values(), key=lambda row: float(row.get("created_at") or 0), default=None),
                 })
                 for key, events in histories:
@@ -767,7 +769,7 @@ async def api_stream(task_id: str, compact: bool = False):
             # status=done，仅看 status 会在批运行中立即下发伪 done；批结束时
             # 由 run_update_batch 补发终态事件驱动下方实时循环退出。
             if task.status == "done" and task.active_runs <= 0:
-                payload = {"summary": task.summary, "total": len(task.items)}
+                payload = {"summary": task.summary, "total": len(task.items), "task_timing": task.timing_snapshot()}
                 if task.retry_runs and task.repair_status != "idle":
                     payload["retry"] = max(
                         task.retry_runs.values(),
@@ -776,10 +778,10 @@ async def api_stream(task_id: str, compact: bool = False):
                 yield _sse("done", payload)
                 return
             if task.status == "error" and task.active_runs <= 0:
-                yield _sse("error", {"message": task.error})
+                yield _sse("error", {"message": task.error, "task_timing": task.timing_snapshot()})
                 return
             if task.status == "cancelled" and task.active_runs <= 0:
-                yield _sse("cancelled", {"message": "排队任务已取消"})
+                yield _sse("cancelled", {"message": "排队任务已取消", "task_timing": task.timing_snapshot()})
                 return
             # 实时跟进
             while True:
@@ -875,6 +877,8 @@ async def api_history(limit: int = 50):
     # 对象需覆盖回来，避免历史列表把正在排队或运行的任务误显示为 error。
     for row in rows:
         task = TASKS.get(row.get("task_id"))
+        if task is not None:
+            row["task_timing"] = task.timing_snapshot()
         if task is None or task.active_runs <= 0:
             continue
         row["status"] = task.status

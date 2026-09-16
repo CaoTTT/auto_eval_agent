@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <title>auto_eval 评估台</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260915_stage_timings">
+  <link rel="stylesheet" href="/static/style.css?v=20260916_task_duration">
   <style>
     .op-cards { display:flex; flex-direction:column; gap:12px; }
     .op-card { border:1px solid #e2e8f0; border-radius:8px; padding:12px; background:#fafbfc; }
@@ -81,7 +81,7 @@
     <p class="hint">历史结果保存在本地 runs/web_history，服务重启后仍可加载；运行中断时会保留已完成的题目。</p>
     <div class="table-scroll" v-if="historyItems.length">
       <table class="grid history-table auto-table">
-        <thead><tr><th>时间</th><th>数据集</th><th>模式</th><th>评测标准</th><th>状态</th><th class="history-progress-cell">进度</th><th>预览</th><th>操作</th><th>批跑备注</th></tr></thead>
+        <thead><tr><th>时间</th><th>数据集</th><th>模式</th><th>评测标准</th><th>状态</th><th class="history-progress-cell">进度</th><th>任务总耗时</th><th>预览</th><th>操作</th><th>批跑备注</th></tr></thead>
         <tbody>
           <tr v-for="h in historyItems" :key="h.task_id">
             <td>{{ formatTime(h.updated_at || h.created_at) }}</td>
@@ -90,6 +90,7 @@
             <td>{{ evaluationProfileLabel(h.evaluation_profile) }}</td>
             <td>{{ h.status }}<small v-if="retryStatusLabel(h.repair_status)" class="running"> · {{ retryStatusLabel(h.repair_status) }}</small></td>
             <td class="history-progress-cell">{{ h.done }}/{{ h.total }}</td>
+            <td class="task-duration-cell">{{ h.status === 'queued' ? '尚未开始' : formatTaskDuration(h.task_timing) }}</td>
             <td>{{ h.preview }}</td>
             <td style="white-space:nowrap">
               <button @click="loadHistoryTask(h.task_id)">{{ loadingTaskId === h.task_id ? '加载中…' : '加载' }}</button>
@@ -141,7 +142,7 @@
         <div class="op-import-row">
           <label class="op-upload-btn">
             <input type="file" accept=".jsonl,.json,.csv,application/json,text/csv" @change="onOpManifestFile" hidden>
-            导入{{ mode==='compare' ? '垂域视觉对比' : '垂域视觉评测' }} JSONL / CSV
+            导入{{ mode==='compare' ? '垂域视觉对比' : '垂域视觉评测' }} JSON / JSONL / CSV
           </label>
           <span v-if="opPreparing" class="running">正在解析…</span>
           <span v-else-if="items.length" class="ok">✓ 已导入 {{ items.length }} 条（开始评估时准备视觉证据）</span>
@@ -151,6 +152,7 @@
         <p v-if="mode==='compare'" class="hint">双产品示例：{"id":"c001","query":"查询天气","product_count":2,"video1":"./video_a.mp4","video2":"./video_b.mp4","answer1":"今天多云","answer2":"今天晴"}<br>三产品示例再增加："product_count":3、"video3"、"context3"、"answer3"。</p>
         <p v-if="mode==='compare'" class="hint">长截图示例：{"id":"c002","query":"查询天气","screenshot1":"./product1.png","screenshot2":"./product2.png","answer1":"今天多云","answer2":"今天晴"}；三产品增加 screenshot3。路径须为服务可读取的本地文件，同一题不可混用截图与录屏。</p>
         <p v-else class="hint">示例：{"id":"rich_001","query":"北京明天天气怎么样","context":"当前地点北京","video_path":"data/rich_content/weather.mp4","category":"weather","answer_text":"北京明天晴","task_start_time":0,"task_end_time":18.5}</p>
+        <p class="hint">支持 JSON 数组或单个对象，也支持每行一个对象的 JSONL。每条数据可添加 sessionid 等自定义字段，导出 Excel 时自动保留。</p>
         <details v-if="errors.length"><summary>导入错误明细</summary><pre>{{ errors.join('\n') }}</pre></details>
       </div>
       <div v-if="mode!=='compare'" v-for="entry in pagedOpItems" :key="entry.item._uiKey" class="op-card"
@@ -241,6 +243,10 @@
     <span v-else-if="running" class="running">评估中… {{ progress }}/{{ total }}</span>
     <span v-if="queueNotice" class="queue-notice">{{ queueNotice }}</span>
     <p v-if="runError" class="run-error">{{ runError }}</p>
+    <div v-if="taskId" class="task-duration-panel">
+      <div class="task-duration-heading"><span>任务总耗时</span><strong>{{ selectedTaskStatus === 'queued' ? '尚未开始' : formatTaskDuration(selectedTaskTiming) }}</strong><small v-if="selectedTaskTiming && selectedTaskTiming.running">计时中</small></div>
+      <p class="hint">从任务实际开始执行计时，包含处理与等待；不含任务排队，失败补跑单独记录。</p>
+    </div>
   </section>
 
   <section v-if="running || Object.keys(itemProgress).length" class="live-progress">
@@ -497,6 +503,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20260915_stage_timings"></script>
+  <script type="module" src="/static/app.js?v=20260916_task_duration"></script>
 </body>
 </html>

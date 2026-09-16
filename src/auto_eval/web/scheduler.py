@@ -186,6 +186,8 @@ class EvalScheduler:
                     job = self._pending.popleft()
                     self._running = job
                     try:
+                        if job.kind == "initial":
+                            job.task.start_timing()
                         await job.runner(job.task, job.cfg)
                     except asyncio.CancelledError:
                         raise
@@ -202,9 +204,13 @@ class EvalScheduler:
                         else:
                             job.task.status = "error"
                             job.task.error = f"{type(exc).__name__}: {exc}"
+                            job.task.finish_timing()
                         await wait_task_save(job.task, save=save_task)
                         retire_task(job.task)
                     finally:
+                        if job.kind == "initial" and job.task._timing_started_monotonic is not None:
+                            job.task.finish_timing()
+                            await wait_task_save(job.task, save=save_task)
                         self._running = None
                         job = None  # The idle worker otherwise retains the last task.
                         retry = None
@@ -231,6 +237,7 @@ class EvalScheduler:
                 (task.retry_runs.get(job.job_id) or {}).get("created_at", task.created_at)
                 if job.kind == "retry" else task.created_at
             ),
+            "task_timing": task.timing_snapshot(),
         }
         if task.evaluation_profile:
             entry["evaluation_profile"] = task.evaluation_profile

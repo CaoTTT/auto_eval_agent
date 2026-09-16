@@ -101,6 +101,21 @@ def _task_path(task_id: str, session_name: str = "") -> Path:
     return _find_task_path(task_id)
 
 
+def snapshot_task_timing(data: dict, *, interrupted: bool = False) -> dict:
+    """Keep measured execution time separate from mutable history timestamps."""
+    timing = {
+        "started_at": None, "finished_at": None, "elapsed_s": None,
+        "running": False, "measured_at": None, "incomplete": False,
+        **(data.get("task_timing") or {}),
+    }
+    if interrupted and timing.get("running"):
+        # After a process loss only the last saved measurement is known.
+        timing["finished_at"] = timing.get("measured_at") or data.get("updated_at")
+        timing["running"] = False
+        timing["incomplete"] = True
+    return timing
+
+
 def task_to_snapshot(task) -> dict:
     return {
         "task_id": task.id,
@@ -118,6 +133,10 @@ def task_to_snapshot(task) -> dict:
         "progress_events": task.progress_events,
         "summary": task.summary,
         "created_at": task.created_at,
+        "task_timing": (
+            task.timing_snapshot() if callable(getattr(task, "timing_snapshot", None))
+            else snapshot_task_timing({"task_timing": getattr(task, "task_timing", {})})
+        ),
         "updated_at": time.time(),
         "done_total": task.done_total,
         "error": task.error,
@@ -273,6 +292,7 @@ def _snapshot_meta_row(data: dict, path: Path) -> dict:
         "total": len(data.get("items") or []),
         "done": len([r for r in latest_results.values() if not r.get("error")]),
         "created_at": created_at,
+        "task_timing": snapshot_task_timing(data),
         "updated_at": data.get("updated_at") or data.get("created_at"),
         "error": data.get("error"),
         "repair_status": data.get("repair_status") or "idle",
@@ -324,6 +344,7 @@ def _load_meta_row(path: Path) -> dict | None:
     status, error = _apply_interrupted_status(row.get("status"), row.get("error"))
     row["status"] = status
     row["error"] = error
+    row["task_timing"] = snapshot_task_timing(row, interrupted=True)
     if row.get("repair_status") in {"queued", "running"}:
         row["repair_status"] = "error"
     return row
@@ -366,6 +387,7 @@ def snapshot_payload(data: dict) -> dict:
         "progress_events": data.get("progress_events") or {},
         "summary": data.get("summary") or {},
         "created_at": data.get("created_at"),
+        "task_timing": snapshot_task_timing(data),
         "updated_at": data.get("updated_at"),
         "error": data.get("error"),
         "repair_status": data.get("repair_status") or "idle",
@@ -401,8 +423,9 @@ def export_rows(snapshot: dict) -> dict[str, list[dict]]:
         result_rows = _visual_compare_export_rows(aligned_results)
     else:
         result_rows = _result_rows(aligned_results)
+    dataset_rows = _dataset_rows(snapshot, include_extra=False)
     rows: dict[str, list[dict]] = {
-        "数据集明细": _dataset_rows(snapshot),
+        "数据集明细": dataset_rows,
         "逐题结果": result_rows,
     }
     frame_rows = _frame_manifest_rows(snapshot)
@@ -421,6 +444,10 @@ def export_rows(snapshot: dict) -> dict[str, list[dict]]:
     rows["运行信息"] = [_run_info(snapshot)]
     if summary:
         rows["汇总指标"] = [_flatten_dict(summary, skip_keys={"by_category"})]
+    extra_columns = _extra_input_columns(snapshot, dataset_rows=dataset_rows, result_rows=result_rows)
+    items = snapshot.get("items") or []
+    _append_extra_input_values(dataset_rows, items, extra_columns)
+    _append_extra_input_values(result_rows, items, extra_columns)
     return rows
 
 
@@ -599,6 +626,97 @@ def _source_data_for_item(item: dict) -> dict:
     }
 
 
+# Exact names consumed by input normalization. Do not exclude by prefix:
+# sessionid, video3_sessionid, metadata, etc. remain ordinary source fields.
+_COMMON_INPUT_FIELDS = {
+    "id", "query", "question", "context", "category",
+    "task_start_time", "task_end_time", "content_start_time", "content_end_time",
+}
+_CSV_INPUT_FIELDS = {
+    "index", "is_start", "is_end", "开始时间", "结束时间", "文件路径", "回复内容",
+    "开始时间节点", "位置信息",
+}
+_COMPARE_INPUT_FIELDS = {
+    "product_count", "evidence_mode", "query_images", "input_modality",
+    *(f"{prefix}{number}" for prefix in ("video", "screenshot", "answer", "context")
+      for number in (1, 2, 3)),
+}
+_RICH_CONTENT_INPUT_FIELDS = {"video_path", "answer_text"}
+_DERIVED_INPUT_FIELDS = {"source_line", "session_group", "turn_index"}
+_QUERY_EXPORT_FIELDS = {
+    "题型", "提问图片", "提问图片元数据", "输入指纹", "输入图片原图",
+    "query_image_meta", "input_manifest_sha256", "error",
+}
+
+
+def _consumed_input_fields(item: dict, mode: str | None) -> set[str]:
+    fields = _COMMON_INPUT_FIELDS | (
+        _COMPARE_INPUT_FIELDS if mode == "compare"
+        else _RICH_CONTENT_INPUT_FIELDS if mode == "rich_content"
+        else _COMPARE_INPUT_FIELDS | _RICH_CONTENT_INPUT_FIELDS
+    )
+    # Only CSV normalization generates this group. An uploaded JSON sessionid
+    # is unrelated, and JSON's arbitrary `index` is not a consumed input field.
+    if str(item.get("session_group", "")).startswith("csv-sess-"):
+        fields |= _CSV_INPUT_FIELDS
+    if not isinstance(item.get("source_data"), dict):
+        # Legacy normalized items contain parser bookkeeping, not original
+        # business fields. Explicit same-name source_data fields still export.
+        fields |= _DERIVED_INPUT_FIELDS
+    return fields
+
+
+def _extra_input_columns(snapshot: dict, *, dataset_rows: list[dict] | None = None,
+                         result_rows: list[dict] | None = None) -> dict[str, str]:
+    """One source-key -> column map shared by every row and export format."""
+    keys = dict.fromkeys(
+        key for item in snapshot.get("items") or []
+        for key in _source_data_for_item(item)
+        if key not in _consumed_input_fields(item, snapshot.get("mode"))
+    )
+    if not keys:
+        return {}
+    if dataset_rows is None:
+        dataset_rows = _dataset_rows(snapshot, include_extra=False)
+    mode = snapshot.get("mode")
+    template_rows = (
+        _visual_compare_export_rows([{}]) if mode == "compare"
+        else _rich_content_export_rows([{}]) if mode == "rich_content"
+        else _result_rows(_aligned_results(snapshot, _results_with_identity(snapshot)))
+    )
+    reserved = set(_headers(dataset_rows)) | set(_headers(template_rows)) | _QUERY_EXPORT_FIELDS
+    if result_rows is not None:
+        reserved.update(_headers(result_rows))
+    columns: dict[str, str] = {}
+    for key in keys:
+        column = key if key not in reserved else f"输入字段.{key}"
+        base, suffix = column, 2
+        while column in reserved or (column != key and column in keys):
+            column = f"{base}（{suffix}）"
+            suffix += 1
+        columns[key] = column
+        reserved.add(column)
+    return columns
+
+
+def _extra_input_value(value: Any) -> Any:
+    """Distinguish explicit null from a missing field and retain identifier precision."""
+    if value is None or isinstance(value, float) and not math.isfinite(value):
+        return "null"
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, int) and not isinstance(value, bool) and abs(value) >= 10 ** 15:
+        return str(value)  # Excel numeric cells retain only 15 significant digits.
+    return value
+
+
+def _append_extra_input_values(rows: list[dict], items: list[dict], columns: dict[str, str]) -> None:
+    for row, item in zip(rows, items):
+        source = _source_data_for_item(item)
+        for key, column in columns.items():
+            row[column] = _extra_input_value(source[key]) if key in source else ""
+
+
 def _item_visual_streams(item: dict) -> list[dict[str, Any]]:
     """统一返回 rich_content 单路或 compare 双/三路视频及关键帧。"""
     source = _source_data_for_item(item)
@@ -656,7 +774,7 @@ def _item_visual_streams(item: dict) -> list[dict[str, Any]]:
     return streams
 
 
-def _dataset_rows(snapshot: dict) -> list[dict]:
+def _dataset_rows(snapshot: dict, *, include_extra: bool = True) -> list[dict]:
     rows: list[dict] = []
     for index, item in enumerate(snapshot.get("items") or []):
         source = _source_data_for_item(item)
@@ -667,7 +785,7 @@ def _dataset_rows(snapshot: dict) -> list[dict]:
             "query": item.get("query") or item.get("question") or "",
         }
         for key, value in source.items():
-            if key not in row:
+            if key in _consumed_input_fields(item, snapshot.get("mode")) and key not in row:
                 row[key] = value
 
         streams = _item_visual_streams(item)
@@ -706,6 +824,9 @@ def _dataset_rows(snapshot: dict) -> list[dict]:
                        query_image_meta=item.get("query_image_meta", []),
                        input_manifest_sha256=item.get("input_manifest_sha256", ""))
         rows.append(row)
+    if include_extra:
+        columns = _extra_input_columns(snapshot, dataset_rows=rows)
+        _append_extra_input_values(rows, snapshot.get("items") or [], columns)
     return rows
 
 
@@ -973,7 +1094,8 @@ def result_export_row(mode: str, result: dict, index: int, items: list[dict]) ->
     """单条 result → 与 xlsx/CSV「逐题结果」同名列、同转换的行。
 
     供 GET /api/eval/item/result 使用：键名与导出列完全一致，
-    多余字段不返回；失败结果额外附加 error。item_id/query 缺失时
+    评测内部字段不返回；原始扩展字段按整个数据集的列映射追加。
+    失败结果额外附加 error。item_id/query 缺失时
     按 index 从 items 回填，与导出的对齐逻辑保持一致。
     """
     row = dict(result)
@@ -989,6 +1111,8 @@ def result_export_row(mode: str, result: dict, index: int, items: list[dict]) ->
     )[0]
     if result.get("error"):
         export["error"] = result["error"]
+    columns = _extra_input_columns({"mode": mode, "items": items})
+    _append_extra_input_values([export], [item], columns)
     return export
 
 
@@ -1339,13 +1463,14 @@ def _write_xlsx(snapshot: dict, destination) -> None:
         if snapshot.get("mode") == "compare" else []
     )
     if snapshot.get("mode") == "compare" and not _compare_snapshot_uses_product3(snapshot):
+        extra_headers = set(_extra_input_columns(snapshot).values())
         for sheet_name in ("数据集明细", "逐题结果"):
             if sheet_name in sheets:
                 sheets[sheet_name] = [
                     {
                         key: value
                         for key, value in row.items()
-                        if not str(key).startswith(_PRODUCT3_XLSX_COLUMN_PREFIXES)
+                        if key in extra_headers or not str(key).startswith(_PRODUCT3_XLSX_COLUMN_PREFIXES)
                     }
                     for row in sheets[sheet_name]
                 ]

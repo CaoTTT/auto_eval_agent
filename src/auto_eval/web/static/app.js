@@ -1,4 +1,4 @@
-import { createApp, ref, computed, onMounted, onUnmounted, nextTick } from "./compare-data.js?v=20260911_dataset_reuse";
+import { createApp, ref, computed, onMounted, onUnmounted, nextTick } from "./compare-data.js?v=20260916_task_metadata";
 
 createApp({
   setup() {
@@ -137,10 +137,12 @@ createApp({
     const exportError = ref("");
     const exportDownloadUrl = ref("");
     let historyLoadVersion = 0;
+    let historyListVersion = 0;
     let historyLoadController = null;
     let disposed = false;
     const queueState = ref({ running: null, queued: [] });
     const selectedTaskStatus = ref("");
+    const selectedTaskTiming = ref(null);
     const queueNotice = ref("");
     const repairStatus = ref("idle");
     const retrySubmitting = ref(false);
@@ -165,6 +167,34 @@ createApp({
         .filter((result) => result && result.error && Number.isInteger(Number(result.index)))
         .map((result) => Number(result.index))
     );
+
+    function receiveTaskTiming(timing) {
+      return timing && typeof timing === "object" ? { ...timing, _received_at: Date.now() } : null;
+    }
+
+    function updateTaskTiming(timing) {
+      if (!timing) return;
+      const previous = selectedTaskTiming.value;
+      if (previous && Number(timing.measured_at) < Number(previous.measured_at)) return;
+      selectedTaskTiming.value = receiveTaskTiming(timing);
+    }
+
+    function taskElapsedSeconds(timing) {
+      if (!timing || typeof timing.elapsed_s !== "number" || !Number.isFinite(timing.elapsed_s)) return null;
+      const extra = timing.running && !timing.incomplete && timing.finished_at == null
+        ? Math.max(0, (clockNow.value - (timing._received_at ?? clockNow.value)) / 1000) : 0;
+      return Math.max(0, timing.elapsed_s + extra);
+    }
+
+    function formatTaskDuration(timing) {
+      const seconds = taskElapsedSeconds(timing);
+      if (seconds == null) return "未记录";
+      const whole = Math.floor(seconds);
+      const hours = Math.floor(whole / 3600), minutes = Math.floor(whole / 60) % 60, rest = whole % 60;
+      const label = hours ? `${hours} 小时 ${minutes} 分 ${rest} 秒`
+        : minutes ? `${minutes} 分 ${rest} 秒` : `${rest} 秒`;
+      return timing.incomplete ? `${label}（截至中断前）` : label;
+    }
 
     function retryStatusLabel(status) {
       return ({ idle: "", queued: "补跑排队中", running: "补跑中", completed: "补跑完成", partial: "补跑后仍有失败", error: "补跑异常", cancelled: "补跑已取消" })[status] || status;
@@ -193,7 +223,7 @@ createApp({
       () =>
         ({
           compare: "支持文字题与图文题混合导入：query_images 可选填一张提问图片路径；product_count 为2或3；同题统一用 screenshot1/2/3 或 video1/2/3，不同题可以不同。整批使用同一标准。",
-          rich_content: "可逐题上传，也可导入 JSONL：query、context(可选)、video_path、category/answer_text/task_start_time/task_end_time(均可选)；普通图片不算挂卡，回答区域蓝色文字按 Superlink 统计。",
+          rich_content: "可逐题上传，也可导入 JSON / JSONL / CSV：query、context(可选)、video_path、category/answer_text/task_start_time/task_end_time(均可选)；sessionid 等额外字段会保留到 Excel 导出。普通图片不算挂卡，回答区域蓝色文字按 Superlink 统计。",
         }[mode.value])
     );
 
@@ -704,6 +734,7 @@ createApp({
     }
     function detachResultView() {
       closeActiveStream();taskId.value='';results.value=[];summary.value=null;
+      selectedTaskTiming.value = null;
       itemProgress.value={};progressEvents.value={};running.value=false;selectedTaskStatus.value='';
       repairStatus.value='idle';activeRetry.value=null;selectedRetryIndexes.value=[];
       runError.value='';queueNotice.value='';progress.value=0;total.value=0;
@@ -800,10 +831,10 @@ createApp({
         const parsed = await parseResponse.json().catch(() => ({}));
         if (importVersion !== datasetImportVersion || importMode !== mode.value) return;
         console.log("[onOpManifestFile] response ok:", parseResponse.ok, "items:", (parsed.items || []).length, "errors:", (parsed.errors || []).length);
-        if (!parseResponse.ok) throw new Error(parsed.detail || (isCsv ? "CSV 解析请求失败" : "JSONL 解析请求失败"));
+        if (!parseResponse.ok) throw new Error(parsed.detail || (isCsv ? "CSV 解析请求失败" : "JSON / JSONL 解析请求失败"));
         const importErrors = [...(parsed.errors || [])];
         if (!(parsed.items || []).length) {
-          errors.value = importErrors.length ? importErrors : ["JSONL 中没有可导入的数据"];
+          errors.value = importErrors.length ? importErrors : ["文件中没有可导入的数据"];
           console.warn("[onOpManifestFile] no items parsed");
           return;
         }
@@ -1006,6 +1037,7 @@ createApp({
       );
       running.value = true;
       taskId.value = d.task_id;
+      selectedTaskTiming.value = receiveTaskTiming(d.task_timing);
       repairStatus.value = "idle";
       activeRetry.value = null;
       selectedRetryIndexes.value = [];
@@ -1072,6 +1104,7 @@ createApp({
         if (response.ok) snapshot = await response.json();
       } catch (_) {}
       if (viewVersion !== historyLoadVersion || taskId.value !== errorTaskId) return false;
+      updateTaskTiming(snapshot?.task_timing);
       const snapshotResults = snapshot?.results || results.value;
       const resultByIndex = new Map(snapshotResults.map((entry) => [entry.index, entry]));
       const snapshotProgress = snapshot?.item_progress || {};
@@ -1124,6 +1157,12 @@ createApp({
         if (!isSelected()) return;
         const data = JSON.parse(e.data);
         // 一次恢复结果和当前进度，旧结果不能覆盖正在补跑的状态。
+        updateTaskTiming(data.task_timing);
+        if (data.status) {
+          selectedTaskStatus.value = data.status;
+          running.value = ["pending", "queued", "running"].includes(data.status);
+          if (data.status !== "queued") queueNotice.value = "";
+        }
         results.value = data.results || [];
         refreshEvidence(results.value);
         itemProgress.value = receiveProgress(data.item_progress);
@@ -1137,8 +1176,9 @@ createApp({
         const data = JSON.parse(e.data);
         progressEvents.value[data.item_index] = normalizeProgressEvents(data.events);
       });
-      es.addEventListener("start", () => {
+      es.addEventListener("start", (e) => {
         if (!isSelected()) return;
+        updateTaskTiming(JSON.parse(e.data || "{}").task_timing);
         selectedTaskStatus.value = "running";
         queueNotice.value = "";
         running.value = true;
@@ -1206,6 +1246,7 @@ createApp({
       es.addEventListener("done", (e) => {
         if (!isSelected()) return;
         const doneData = JSON.parse(e.data);
+        updateTaskTiming(doneData.task_timing);
         summary.value = doneData.summary;
         if (doneData.retry) {
           activeRetry.value = doneData.retry;
@@ -1229,6 +1270,7 @@ createApp({
         let message = "未知错误";
         try {
           const d = JSON.parse(e.data);
+          updateTaskTiming(d.task_timing);
           message = d.message || message;
         } catch (_) {}
         running.value = false;
@@ -1245,7 +1287,9 @@ createApp({
         if (!isSelected()) return;
         let message = "排队任务已取消";
         try {
-          message = JSON.parse(e.data).message || message;
+          const data = JSON.parse(e.data);
+          updateTaskTiming(data.task_timing);
+          message = data.message || message;
         } catch (_) {}
         running.value = false;
         selectedTaskStatus.value = "cancelled";
@@ -1371,17 +1415,24 @@ createApp({
     }
 
     async function loadHistory() {
+      const version = ++historyListVersion;
       loadingHistory.value = true;
       try {
         const r = await fetch("/api/history?limit=50");
+        if (!r.ok) return;
         const d = await r.json();
-        historyItems.value = d.items || [];
+        if (version !== historyListVersion) return;
+        historyItems.value = (d.items || []).map(item => ({ ...item, task_timing: receiveTaskTiming(item.task_timing) }));
+        const selected = historyItems.value.find(item => item.task_id === taskId.value);
+        if (selected) updateTaskTiming(selected.task_timing);
         historyNoteDrafts.value = Object.fromEntries(
-          historyItems.value.map((item) => [item.task_id, item.note || ""]),
+          historyItems.value.map((item) => [item.task_id,
+            historyNoteEditing.value[item.task_id] ? historyNoteDrafts.value[item.task_id] : item.note || ""]),
         );
-        historyNoteEditing.value = {};
+        historyNoteEditing.value = Object.fromEntries(historyItems.value
+          .filter(item => historyNoteEditing.value[item.task_id]).map(item => [item.task_id, true]));
       } finally {
-        loadingHistory.value = false;
+        if (version === historyListVersion) loadingHistory.value = false;
       }
     }
 
@@ -1390,10 +1441,32 @@ createApp({
         const response = await fetch("/api/queue");
         if (!response.ok) return;
         const data = await response.json();
+        const previousRunning = queueState.value.running;
+        const previousQueued = queueState.value.queued || [];
         queueState.value = {
           running: data.running || null,
           queued: data.queued || [],
         };
+        const selected = queueEntries.value.find(item => item.task_id === taskId.value);
+        if (selected) {
+          updateTaskTiming(selected.task_timing);
+          if (selected.kind !== "retry") {
+            selectedTaskStatus.value = selected.status;
+            running.value = ["pending", "queued", "running"].includes(selected.status);
+            if (selected.status !== "queued") queueNotice.value = "";
+          }
+        }
+        historyItems.value = historyItems.value.map(item => {
+          const active = queueEntries.value.find(entry => entry.task_id === item.task_id);
+          return active ? { ...item, task_timing: receiveTaskTiming(active.task_timing),
+            ...(active.kind === "retry" ? {} : { status: active.status }) } : item;
+        });
+        const jobKey = entry => entry?.job_id || entry?.task_id;
+        const currentKeys = new Set(queueEntries.value.map(jobKey));
+        if (jobKey(previousRunning) !== jobKey(queueState.value.running)
+            || previousQueued.some(entry => !currentKeys.has(jobKey(entry)))) {
+          await loadHistory().catch(() => {});
+        }
         await loadRequestPacing();
       } catch (_) {}
     }
@@ -1503,6 +1576,7 @@ createApp({
       }
       if (taskId.value === id) {
         taskId.value = "";
+        selectedTaskTiming.value = null;
         results.value = [];
         summary.value = null;
       }
@@ -1540,6 +1614,7 @@ createApp({
         loaded = true;
         closeActiveStream();
         taskId.value = d.task_id || id;
+        selectedTaskTiming.value = receiveTaskTiming(d.task_timing);
         mode.value = d.mode;
         if (d.mode === "compare") {
           selectedEvaluationProfile.value = d.evaluation_profile || defaultEvaluationProfile();
@@ -1703,6 +1778,7 @@ createApp({
       concurrency, mediaConcurrency, requestPacing, evalTimeout, submitting, running, progress, total, results, summary, taskId, runError,
       pacingStatus, pacingError, pacingNumber, pacingWaitLabel, pacingLimitLabel,
       queueState, queueEntries, selectedTaskStatus, queueNotice, taskStatusLabel, queueKindLabel,
+      selectedTaskTiming, taskElapsedSeconds, formatTaskDuration,
       repairStatus, retryStatusLabel, retrySubmitting, selectedRetryIndexes, activeRetry,
       failedResultIndexes, retryIndexSelected, toggleRetryIndex, retryFailedCases,
       itemProgress, progressEvents, expandedProgressLogs, pagedProgressRows, progressStages,
