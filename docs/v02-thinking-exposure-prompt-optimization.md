@@ -1,0 +1,74 @@
+# V0.2 简化版·思考暴露优化（实验）：0.2.4
+
+## 基线、交付状态与范围
+
+基于 `CaoTTT/auto_eval_agent` 的 `feat/judge-model-thinking`，核对的基线提交为 `6ae156dcceea3b6ff677bc84670652534c884b88`。
+
+本次 GitHub 写入被平台安全检查拦截，未创建提交或更新远端分支。交付为可在本地仓库自动应用的更新包：脚本校验原文件、执行定点替换、生成旧模板快照和新增文件，并再次校验结果哈希；不是整仓覆盖。
+
+仅优化 `qa_competitor_compare@0.2-simplified-thinking-exposure`。稳定版 Prompt、共享 `internal_process_rules.py`、V0.3、评分校准版、模型配置、抽帧/切片、输出 Schema、1—5 分制、七个质量维度及统计处理均不修改。没有新增模型调用或输入输出字段。
+
+## 优化方案汇总
+
+| 改动 | 实现 |
+| --- | --- |
+| 语义标定 | 提炼信息获取、检索充分性、材料准备、自我指令、检索缺口五类；不依赖工具名、第一人称、特定关键词或完整推理链 |
+| 示例去污染 | 使用书目、设备手册、学习安排、对照说明、出版信息等跨场景合成正反例，不复制诊断样本或只换城市/实体名称 |
+| 专项核查 | 定位候选 → 语义分类 → 最终保留取证 → Gate 决策；在 System、评测步骤、Gate、输出自检和 User 提示中保持一致 |
+| 可审计理由 | 仍使用 `answerN_response_gate_reason`，有候选须给实际短引文、位置、分类及最终保留证据/缺口；不能仅写“无思考暴露” |
+| 防误判 | 保留来源引用、客观不确定性、具体来源信息缺口、结果导读、必要计算、用户要求的方法/计划、独立 UI、用户消息及引用材料等边界 |
+| 图文证据 | 纯文本复制不全、最后一帧未覆盖、滚动出屏、仍在生成，不能单独证明句子已删除；出现过也不自动证明最终保留 |
+
+反馈的五条理由没有引用候选句，不足以查明是漏读还是错误归类。本次针对共同风险优化，不能仅凭 Prompt 检查宣称真实模型漏判已解决。
+
+## Gate 决策
+
+输入 failed 时仍优先执行原规则：两个 Gate unclear、该产品七维分数 null、人工复核。
+
+对于其余有效输入，确认片段符合定义且属于本轮最终回复，则 response_gate=fail；不能只在直观高效扣分，不能仅因泄露本身判安全失败。候选的关键语义、归属或最终保留无法确认，且没有其他确定响应失败项，则 unclear 并复核；已有其他确定失败项时保持 fail，不用不确定覆盖确定失败。
+
+有证据证明候选后来删除、属于豁免，或没有候选且证据充分，本项不构成失败，继续检查其他 Gate 项。不改成“任意中间态曾可见就失败”，也不要求每个字必须在最后一帧重现。
+
+## 版本与历史任务
+
+- 当前实验版实现：bundle_revision 从 **0.2.3 升为 0.2.4**。
+- standard_version 和界面名称保持不变：`0.2-simplified-thinking-exposure` / “V0.2 简化版·思考暴露优化（实验）”。
+- 稳定版仍为 `0.2-simplified` / bundle 0.2.1。
+- 原实验模板逐字节保存为 `visual_compare_prompt_v02_thinking_exposure_r023.py`；冻结 0.2.3 的历史任务恢复实际旧 System/User 模板，不是只恢复版本标签。
+- 新规则使用实验专属 `thinking_exposure_rules_v02.py`，不修改共享模块，避免波及其他协议。
+
+**应用后重启服务，并新建实验版任务。**已冻结 0.2.3 的旧任务补跑仍使用旧 Prompt，不应用于验证新版。新任务导出应显示 bundle_revision=0.2.4。
+
+## 变更文件（应用脚本生成的最终清单）
+
+1. 修改 `src/auto_eval/judges/visual_compare_prompt_v02_thinking_exposure.py`。
+2. 新增 `src/auto_eval/judges/thinking_exposure_rules_v02.py`。
+3. 新增 `src/auto_eval/judges/visual_compare_prompt_v02_thinking_exposure_r023.py`，复制修改前的实验模板。
+4. 修改 `src/auto_eval/judges/compare_protocols.py`，仅实验版 revision 和旧模板恢复分支。
+5. 修改 `tests/test_compare_protocol_versions.py`，更新版本断言及新旧版本恢复测试。
+6. 新增 `tests/test_thinking_exposure_prompt_contract.py`。
+7. 新增本文档。
+
+## 验证与局限
+
+已完成 **30 项离线 Prompt 合同检查**：2/3 产品 × 录屏帧/长截图渲染、输入变量、输出 JSON 示例、七维及安全规则不变、稳定/共享/旧实验版源码哈希、语义与证据要求存在性；Python 编译检查通过。实际协议解析函数体的隔离测试通过，检查默认协议、新旧模板分流、旧版本恢复及跨协议拒绝。
+
+未运行完整 Web/API 集成测试或全仓测试，也未调用百炼进行真实模型复测。更新包对三份修改结果以及规则和合同测试文件使用已检查版本的 Git blob 哈希校验。
+
+在完整项目环境执行：
+
+```bash
+python -m pytest -q tests/test_thinking_exposure_prompt_contract.py tests/test_compare_protocol_versions.py
+```
+
+只运行不依赖 Web 应用的合同检查（Linux）：
+
+```bash
+python -m pytest -q --noconftest -c /dev/null tests/test_thinking_exposure_prompt_contract.py
+```
+
+## 真实模型验收
+
+五条已知反馈参与了规则设计，应仅作为回归集；另建未参与设计的正例、正常引用/导读/不确定性反例、已删除中间态、保留证据不足样本。固定模型、thinking 配置、图片序列和回答文本，对比 0.2.3/0.2.4 的漏判率、误判率、unclear/复核率及理由证据支持情况。
+
+同时检查 Gate 通过率与各维度有效评分样本数，避免把更多样本变为 null 误解为质量提升。保存实际请求 Prompt、prompt_sha256、模型配置、原始输出和人工标签以便复核。

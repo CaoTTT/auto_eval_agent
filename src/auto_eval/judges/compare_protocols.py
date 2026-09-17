@@ -168,7 +168,7 @@ _PROTOCOLS = {
         id=V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID,
         standard_id=STANDARD_ID,
         standard_version="0.2-simplified-thinking-exposure",
-        bundle_revision="0.2.3",
+        bundle_revision="0.2.4",
         display="V0.2 简化版·思考暴露优化（实验）",
         status="experimental",
         system_template=V02_THINKING_EXPOSURE_SYSTEM,
@@ -190,6 +190,18 @@ def resolve_compare_protocol(protocol_id: str | None, bundle_revision: str | Non
     try:
         protocol = _PROTOCOLS[selected]
         if bundle_revision and bundle_revision != protocol.bundle_revision:
+            if selected == V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID and bundle_revision == "0.2.3":
+                # Restore the actual frozen templates, not just their revision label.
+                from .visual_compare_prompt_v02_thinking_exposure_r023 import (
+                    VISUAL_COMPARE_SYSTEM as legacy_system,
+                    VISUAL_COMPARE_USER as legacy_user,
+                )
+                return replace(
+                    protocol,
+                    bundle_revision=bundle_revision,
+                    system_template=legacy_system,
+                    user_template=legacy_user,
+                )
             legacy = {
                 DEFAULT_COMPARE_PROTOCOL_ID: "0.2.0",
                 V03_COMPARE_PROTOCOL_ID: "0.3.0",
