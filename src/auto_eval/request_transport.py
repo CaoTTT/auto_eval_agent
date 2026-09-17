@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 import httpx
 
 from .request_throttle import DEFAULT_CONCURRENCY, RequestThrottle
+from .task_control import check_pause
 from .timing import record_model_attempt
 
 
@@ -29,6 +30,7 @@ class HeaderAdmission:
         # Request hooks run before connection-pool acquisition and TCP/TLS setup.
         # Otherwise a large backlog opens sockets that gateways can close while
         # they sit idle waiting for the first HTTP headers.
+        check_pause()
         if self._dispatch_held:
             return
         if self.reservations:
@@ -36,6 +38,7 @@ class HeaderAdmission:
         await self.throttle.wait_for_dispatch()
         self._dispatch_held = True
         try:
+            check_pause()
             await self.throttle.wait_until_ready(
                 lambda: self.throttle.estimate(self.input_tokens, self.kind),
             )
@@ -63,6 +66,7 @@ class HeaderAdmission:
             return
         if name != "http11.send_request_headers.started":
             return
+        check_pause()
         # The hook queues before connecting; only the actual header boundary
         # reserves tokens and counts a request. Recheck after network setup.
         if not self._dispatch_held:
@@ -113,12 +117,13 @@ def header_admission(admission: HeaderAdmission):
 
 
 async def install_header_trace(request: httpx.Request) -> None:
+    check_pause()
     admission = _admission.get()
-    if admission is None:
-        return
-    await admission.prepare()
+    if admission is not None:
+        await admission.prepare()
     previous = request.extensions.get("trace")
-    if getattr(previous, "_auto_eval_admission", None) is admission:
+    if (hasattr(previous, "_auto_eval_admission")
+            and previous._auto_eval_admission is admission):
         return  # HTTPX redirects copy extensions and run request hooks again.
     while hasattr(previous, "_auto_eval_admission"):
         previous = previous._auto_eval_previous_trace
@@ -126,7 +131,15 @@ async def install_header_trace(request: httpx.Request) -> None:
     async def trace(name, info):
         if previous is not None:
             await previous(name, info)
-        await admission.trace(name, info)
+        if (name == "http11.send_request_headers.started"
+                and getattr(info.get("request"), "method", None) != b"CONNECT"):
+            # This runs after pool/TCP/TLS waits, including for models without
+            # Bailian pacing. Do not check while receiving an already sent stream.
+            check_pause()
+            if admission is None:
+                record_model_attempt()
+        if admission is not None:
+            await admission.trace(name, info)
 
     trace._auto_eval_admission = admission
     trace._auto_eval_previous_trace = previous

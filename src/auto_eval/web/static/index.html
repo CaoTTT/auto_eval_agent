@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <title>auto_eval 评估台</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260917_model_quota">
+  <link rel="stylesheet" href="/static/style.css?v=20260917_pause_dispatch">
   <style>
     .op-cards { display:flex; flex-direction:column; gap:12px; }
     .op-card { border:1px solid #e2e8f0; border-radius:8px; padding:12px; background:#fafbfc; }
@@ -267,8 +267,8 @@
       <p class="task-judge-summary"><strong>本任务实际配置：</strong>{{ judgeRuntimeLabel(taskJudgeRuntime, taskJudgeSummary) }}</p>
       <p class="hint">模型或思考设置如需变更，请使用上方配置创建新任务；原任务的恢复和补跑不会使用上方的新选择。</p>
       <template v-if="canPauseTask">
-        <button @click="controlTask('pause')" :disabled="controlSubmitting || isPausing || !!loadingTaskId">{{ isPausing ? '等待已开始的题目完成…' : (executionControl.save_error ? '重试保存暂停记录' : '暂停任务') }}</button>
-        <p class="hint">暂停后停止派发新题，已开始的题目会执行至完成或超时并保存。完成暂停后即可调整并发继续。</p>
+        <button @click="controlTask('pause')" :disabled="controlSubmitting || isPausing || !!loadingTaskId">{{ isPausing ? '等待已发送响应并保存…' : (executionControl.save_error ? '重试保存暂停记录' : '暂停任务') }}</button>
+        <p class="hint">暂停后本任务不再发送新模型请求，未完成题目保留待恢复；已发送的响应会继续接收并保存可用结果。等待资源清理和保存完成后，即可调整并发继续。其他排队任务仍可执行。</p>
       </template>
       <template v-if="canResumeTask">
         <div class="task-control-options">
@@ -537,6 +537,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20260917_model_quota"></script>
+  <script type="module" src="/static/app.js?v=20260917_pause_dispatch"></script>
 </body>
 </html>

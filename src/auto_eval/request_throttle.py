@@ -21,6 +21,7 @@ from urllib.parse import urlparse
 from .config import default_bailian_rate_limit
 from .observability import log_event
 from .token_estimation import estimate_input_tokens
+from .task_control import check_pause, pause_aware
 from .timing import timing_span
 
 
@@ -267,11 +268,11 @@ class RequestThrottle:
         signal = timer = None
         try:
             if delay is None:
-                await event.wait()
+                await pause_aware(event.wait())
             else:
                 signal = asyncio.create_task(event.wait())
                 timer = asyncio.create_task(self._sleep(max(DISPATCH_GUARD_S, delay)))
-                await asyncio.wait({signal, timer}, return_when=asyncio.FIRST_COMPLETED)
+                await pause_aware(asyncio.wait({signal, timer}, return_when=asyncio.FIRST_COMPLETED))
                 if timer.done():
                     timer.result()
         finally:
@@ -358,11 +359,12 @@ class RequestThrottle:
 
     async def wait_for_dispatch(self) -> None:
         """Queue one connection candidate without opening an idle socket."""
+        check_pause()
         self._begin_waiting()
         self._wait_reasons["pacing"] = self._wait_reasons.get("pacing", 0) + 1
         try:
             with admission_wait(), timing_span("request_wait"):
-                await self.dispatch_lock.acquire()
+                await pause_aware(self.dispatch_lock.acquire(), on_cancel=lambda _: self.release_dispatch())
         finally:
             self._end_waiting()
             self._wait_reasons["pacing"] -= 1
@@ -383,6 +385,7 @@ class RequestThrottle:
             try:
                 while True:
                     async with self._lock:
+                        check_pause()
                         now = self._clock()
                         current_tokens = estimate()
                         self._validate_tokens(current_tokens)
@@ -404,6 +407,7 @@ class RequestThrottle:
 
     async def acquire(self, tokens: int, *, input_proxy: int = 0, kind: str = "text",
                       input_tokens: int | None = None, reestimate: bool = False) -> Reservation:
+        check_pause()
         self._validate_tokens(tokens)
         if kind not in self._input_scale:
             raise ValueError("kind must be text or vision")
@@ -416,12 +420,13 @@ class RequestThrottle:
             try:
                 self._wait_reasons["inflight"] = self._wait_reasons.get("inflight", 0) + 1
                 try:
-                    await self._slots.acquire()
+                    await pause_aware(self._slots.acquire(), on_cancel=lambda _: self._slots.release())
                     slot = True
                 finally:
                     self._wait_reasons["inflight"] -= 1
                 while True:
                     async with self._lock:
+                        check_pause()
                         now = self._clock()
                         if reestimate:
                             tokens = self.estimate(input_proxy, kind)

@@ -472,7 +472,7 @@ async def api_pause(task_id: str):
         if not await wait_task_save(task, save=save_task):
             raise HTTPException(503, "暂停已请求，但保存失败；请保持服务运行并重试暂停")
         if task.pause_requested:
-            task._fanout("pausing", {"message": "正在暂停，等待已开始的题目完成并保存", "execution_control": task.execution_control})
+            task._fanout("pausing", {"message": "正在暂停，已停止新模型请求，等待已发送响应和资源清理后保存", "execution_control": task.execution_control})
     if task.execution_control.get("save_error"):
         raise HTTPException(503, task.error)
     return {"task_id": task.id, "status": task.execution_control["state"]}

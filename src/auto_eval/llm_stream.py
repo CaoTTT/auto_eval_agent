@@ -14,6 +14,7 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimi
 from .observability import current_context, error_details, log_event
 from .request_throttle import RequestThrottle, estimate_input_tokens, wait_for_active
 from .request_transport import HeaderAdmission, header_admission, paced_http_client
+from .task_control import check_pause, pause_aware
 from .timing import record_model_attempt, timing_span
 
 
@@ -194,6 +195,7 @@ def _rejects_stream_usage(exc: BaseException) -> bool:
 
 
 async def _collect_stream(client, kwargs: dict, *, include_usage: bool):
+    check_pause()
     started = time.perf_counter()
     request = {**kwargs, "stream": True}
     if include_usage:
@@ -397,13 +399,14 @@ async def stream_chat_completion(
     """
     if max_attempts < 1:
         raise ValueError("max_attempts 必须大于等于 1")
+    check_pause()
     if throttle is not None and not getattr(client, "_auto_eval_header_pacing", False):
         from openai import AsyncOpenAI
 
         if isinstance(client, AsyncOpenAI):
             raise ValueError("百炼限流调用必须使用 build_openai_client 创建的传输客户端")
 
-    input_tokens = await asyncio.to_thread(estimate_input_tokens, kwargs) if throttle else 0
+    input_tokens = await pause_aware(asyncio.to_thread(estimate_input_tokens, kwargs)) if throttle else 0
     request_kind = "vision" if any(
         isinstance(message.get("content"), list) and any(
             part.get("type") == "image_url" for part in message["content"]
@@ -411,6 +414,7 @@ async def stream_chat_completion(
     ) else "text"
 
     async def send(include_usage: bool):
+        check_pause()
         reservation = None
         admission = None
         response = None
@@ -421,30 +425,37 @@ async def stream_chat_completion(
                       progress_message="等待模型请求额度（请求数 / Token / 在途上限）")
             if getattr(client, "_auto_eval_header_pacing", False):
                 admission = HeaderAdmission(throttle, input_tokens, request_kind)
-            else:
-                # Compatibility for synthetic/test clients. Production clients
-                # constructed above always gate after pool/connect waits.
-                reservation = await throttle.acquire(
-                    throttle.estimate(input_tokens, request_kind),
-                    input_proxy=input_tokens, kind=request_kind,
-                )
-                record_model_attempt()
             request = {**kwargs, "extra_headers": {
                 "X-DashScope-Wait-Timeout": "30", **(kwargs.get("extra_headers") or {}),
             }}
+
+        async def collect():
+            nonlocal reservation
+            check_pause()
+            if not getattr(client, "_auto_eval_header_pacing", False):
+                # Synthetic clients have no HTTP header hook. Keep acquisition
+                # and the call in one coroutine so pausing cannot strand a permit
+                # between an outer admission and a newly scheduled collector.
+                if throttle is not None:
+                    reservation = await throttle.acquire(
+                        throttle.estimate(input_tokens, request_kind),
+                        input_proxy=input_tokens, kind=request_kind,
+                    )
+                record_model_attempt()
+            return await _collect_stream(client, request, include_usage=include_usage)
+
         try:
             if admission is not None:
                 with header_admission(admission), timing_span("model"):
                     response, chunks, stats = await wait_for_active(
-                        _collect_stream(client, request, include_usage=include_usage),
+                        collect(),
                         timeout=total_timeout_s,
                     )
             else:
-                if reservation is None:
-                    record_model_attempt()
                 with timing_span("model"):
-                    response, chunks, stats = await asyncio.wait_for(
-                        _collect_stream(client, request, include_usage=include_usage),
+                    wait = wait_for_active if throttle is not None else asyncio.wait_for
+                    response, chunks, stats = await wait(
+                        collect(),
                         timeout=total_timeout_s,
                     )
             return response, chunks, stats
@@ -463,6 +474,7 @@ async def stream_chat_completion(
     last_exc: BaseException | None = None
     use_usage = include_usage
     for attempt in range(max_attempts):
+        check_pause()
         module = current_context().module or "模型调用"
         call_started = time.perf_counter()
         log_event(
@@ -588,7 +600,7 @@ async def stream_chat_completion(
                 progress_message=f"{module}：调用失败，准备第{attempt + 2}次重试",
             )
             with timing_span("retry_wait"):
-                await asyncio.sleep(wait)
+                await pause_aware(asyncio.sleep(wait))
 
     assert last_exc is not None
     raise last_exc
