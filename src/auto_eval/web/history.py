@@ -1418,35 +1418,34 @@ def _compare_snapshot_uses_product3(snapshot: dict) -> bool:
 
 
 def _original_screenshot_rows(snapshot: dict, images: WpsCellImages) -> list[dict]:
-    """一条输入一行、每个产品一列；原图缺失时不以切片或其他产品代替。"""
+    """导出所有提供的长截图原图，独立于实际评测使用的证据层。"""
     items = snapshot.get("items") or []
-    streams_by_item = [_item_visual_streams(item) for item in items]
-    screenshot_streams = [
-        stream for streams in streams_by_item for stream in streams
-        if stream["evidence_mode"] == "long_screenshot"
-    ]
-    if not screenshot_streams:
+    originals_by_item = []
+    for item in items:
+        source = _source_data_for_item(item)
+        originals = {}
+        for product_no in (1, 2, 3):
+            meta = item.get(f"screenshot_meta{product_no}") or {}
+            original = (meta.get("original_path") or item.get(f"screenshot{product_no}")
+                        or source.get(f"screenshot{product_no}"))
+            if isinstance(original, (str, Path)) and str(original).strip():
+                originals[product_no] = (str(PROJECT_ROOT / str(original).strip()), meta.get("original_sha256"))
+        originals_by_item.append(originals)
+    if not any(originals_by_item):
         return []
-    count = max(stream["product_no"] for stream in screenshot_streams)
+    count = 3 if (_compare_snapshot_uses_product3(snapshot)
+                  or any(3 in originals for originals in originals_by_item)) else 2
     rows = []
-    for index, (item, streams) in enumerate(zip(items, streams_by_item)):
+    for index, (item, originals) in enumerate(zip(items, originals_by_item)):
         row = {
             "数据集序号": index + 1, "id": item.get("id") or f"q{index}",
             "query": item.get("query") or item.get("question") or "",
             **{f"产品{n}原图": "" for n in range(1, count + 1)},
         }
-        for stream in streams:
-            product_no = stream["product_no"]
-            if product_no not in range(1, count + 1):
-                continue
+        for product_no, (path, expected_sha256) in originals.items():
             key = f"产品{product_no}原图"
-            if stream["evidence_mode"] != "long_screenshot":
-                row[key] = "录屏模式，无原始长截图"
-                continue
             try:
-                row[key] = images.add(
-                    stream["original_path"], stream["screenshot_meta"].get("original_sha256"),
-                )
+                row[key] = images.add(path, expected_sha256)
             except OriginalImageError as exc:
                 row[key] = str(exc)
         rows.append(row)

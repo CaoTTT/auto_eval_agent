@@ -250,11 +250,13 @@ def test_excel_uses_complete_original_even_above_model_limits(tmp_path, limit):
     ("missing", "原图文件缺失"), ("changed", "原图已变更，未嵌入"),
     ("corrupt", "原图损坏或无法识别"), ("unsupported", "原图不是静态 PNG/JPEG/WebP"),
 ])
-def test_unavailable_original_never_replaced_by_model_slice(tmp_path, problem, message):
+@pytest.mark.parametrize("evidence_mode", ["long_screenshot", "video_frames"])
+def test_unavailable_original_never_replaced_by_model_slice(tmp_path, problem, message, evidence_mode):
     first, second = tmp_path / "first.png", tmp_path / "second.png"
     make_image(first)
     raw = make_image(second, color="red")
     item = screenshot_item([first, second])
+    item["evidence_mode"] = evidence_mode
     if problem == "missing":
         first.unlink()
     elif problem == "changed":
@@ -298,7 +300,9 @@ def test_history_source_paths_relative_to_project_and_mixed_product_counts(tmp_p
     cells = product_cells(archive, sheets["逐题结果"])
     assert cells == {"P1:2": originals[0], "P2:2": originals[1], "P3:2": originals[2], "P1:4": originals[0], "P2:4": originals[1]}
     assert len(sheets["逐题结果"].findall("s:sheetData/s:row", NS)) == 4
-    assert "录屏模式，无原始长截图" in cell_text(sheets["逐题结果"])
+    labels = headers(sheets["逐题结果"])
+    video_row = sheets["逐题结果"].findall("s:sheetData/s:row", NS)[2]
+    assert all(cell_text(video_row[labels.index(f"产品{n}原图")]) == "" for n in (1, 2, 3))
     assert_result_only_images(archive, sheets)
     assert_valid_package(archive)
 
@@ -332,9 +336,9 @@ def test_old_video_exports_do_not_add_image_parts(mode):
     assert_valid_package(archive)
 
 
-def test_video_fallback_does_not_embed_inactive_screenshot_and_query_only_once(tmp_path):
+def test_video_fallback_embeds_provided_screenshot_and_query_only_once(tmp_path):
     screenshot = tmp_path / "inactive.png"
-    make_image(screenshot, color="red")
+    screenshot_raw = make_image(screenshot, color="red")
     query = tmp_path / "query.png"
     raw = make_image(query, color="blue", size=(80, 60))
     item = {"id": "vqa", "query": "question", "product_count": 2, "evidence_mode": "video_frames",
@@ -346,10 +350,61 @@ def test_video_fallback_does_not_embed_inactive_screenshot_and_query_only_once(t
     result = sheets["逐题结果"]
     labels = headers(result)
     assert labels[labels.index("题目") + 1] == "输入图片原图"
-    assert not any(re.fullmatch(r"产品[123]原图", label) for label in labels)
-    assert list(embedded_cells(archive, result).values()) == [raw]
+    assert labels[labels.index("产品1回答") + 1] == "产品1原图"
+    assert product_cells(archive, result) == {"P1:2": screenshot_raw}
+    assert list(embedded_cells(archive, result).values()) == [raw, screenshot_raw]
+    assert len([name for name in archive.namelist() if name.startswith("xl/media/")]) == 2
+    assert result.find('s:sheetData/s:row[@r="2"]', NS).attrib["ht"] == "240"
+    assert_valid_package(archive)
+
+
+@pytest.mark.parametrize("location", ["item", "source_data", "metadata"])
+@pytest.mark.parametrize("count", [2, 3])
+def test_unused_screenshots_keep_product_alignment_and_deduplicate(tmp_path, monkeypatch, location, count):
+    path = tmp_path / "data" / "unused.png"
+    raw = make_image(path, color="green")
+    relative = path.relative_to(tmp_path).as_posix()
+    item = {"id": "video", "query": "q", "product_count": count, "evidence_mode": "video_frames",
+            **{f"video{n}": f"{n}.mp4" for n in range(1, count + 1)}}
+    # Product 1 has no screenshot; products 2/3 share identical original bytes.
+    for n in range(2, count + 1):
+        if location == "metadata":
+            item[f"screenshot_meta{n}"] = {
+                "original_path": relative, "original_sha256": hashlib.sha256(raw).hexdigest(),
+            }
+        else:
+            target = item if location == "item" else item.setdefault("source_data", {})
+            target[f"screenshot{n}"] = f" {relative} "
+    data = snapshot([{"id": "without-screenshot", "query": "q", "video1": "a.mp4", "video2": "b.mp4"}, item, item])
+    before = json.dumps(data)
+    monkeypatch.setattr(history, "PROJECT_ROOT", tmp_path)
+    monkeypatch.chdir(tmp_path.parent)
+    archive, sheets = workbook(history.build_xlsx(data))
+    assert product_cells(archive, sheets["逐题结果"]) == {
+        f"P{n}:{row}": raw for n in range(2, count + 1) for row in (3, 4)
+    }
     assert len([name for name in archive.namelist() if name.startswith("xl/media/")]) == 1
-    assert result.find('s:sheetData/s:row[@r="2"]', NS).attrib["ht"] == "96"
+    assert all(stream["evidence_mode"] == "video_frames" for stream in history._item_visual_streams(item))
+    assert json.dumps(data) == before
+    assert_result_only_images(archive, sheets)
+    assert_valid_package(archive)
+
+
+def test_imported_video_fallback_exports_available_original_and_missing_file_reason(tmp_path):
+    path = tmp_path / "available.png"
+    raw = make_image(path, color="blue")
+    source = {"id": "fallback", "query": "q", "product_count": 3,
+              "video1": "a.mp4", "video2": "b.mp4", "video3": "c.mp4",
+              "screenshot2": str(path), "screenshot3": str(tmp_path / "missing.png")}
+    parsed = server.api_parse(server.ParseReq(mode="compare", jsonl=json.dumps(source)))
+    assert not parsed["errors"] and parsed["items"][0]["evidence_mode"] == "video_frames"
+    assert "screenshot2" not in parsed["items"][0]
+    archive, sheets = workbook(history.build_xlsx(snapshot(parsed["items"])))
+    assert product_cells(archive, sheets["逐题结果"]) == {"P2:2": raw}
+    labels = headers(sheets["逐题结果"])
+    row = sheets["逐题结果"].findall("s:sheetData/s:row", NS)[1]
+    assert cell_text(row[labels.index("产品3原图")]) == "原图文件缺失"
+    assert_result_only_images(archive, sheets)
     assert_valid_package(archive)
 
 
