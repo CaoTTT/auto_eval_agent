@@ -30,6 +30,7 @@ async function check(kind, count) {
     },
   };
   const source = fs.readFileSync(path.join(__dirname, "../src/auto_eval/web/static/app.js"), "utf8");
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../src/auto_eval/web/static/compare-cases.js"), "utf8").replace(/^import[^\n]*\n/gm, "").replace(/^export /gm, ""), sandbox);
   vm.runInNewContext(source.replace(/^import[^\n]+\n/, ""), sandbox);
   app.mode.value = "compare";
   await app.onOpManifestFile({ target: { value: "manifest.jsonl", files: [{ name: "manifest.jsonl", text: async () => JSON.stringify(item) }] } });

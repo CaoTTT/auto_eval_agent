@@ -117,6 +117,23 @@ def assert_valid_package(archive):
                 assert target in names
 
 
+def product_cells(archive, sheet):
+    labels = headers(sheet)
+    columns = {history._col(labels.index(f"产品{n}原图") + 1): n
+               for n in (1, 2, 3) if f"产品{n}原图" in labels}
+    return {f"P{columns[re.match(r'[A-Z]+', cell)[0]]}:{re.search(r'\d+', cell)[0]}": raw
+            for cell, raw in embedded_cells(archive, sheet).items()
+            if re.match(r"[A-Z]+", cell)[0] in columns}
+
+
+def assert_result_only_images(archive, sheets):
+    assert list(sheets)[:2] == ["数据集明细", "逐题结果"]
+    assert "原始长截图" not in sheets and "提问图片" not in sheets
+    for name, sheet in sheets.items():
+        if name != "逐题结果":
+            assert not any("DISPIMG" in (formula.text or "") for formula in sheet.findall(".//s:f", NS))
+
+
 def test_question_original_immediately_after_query_in_result_sheets(tmp_path, monkeypatch):
     original = tmp_path / "question.jpg"
     exif = Image.Exif()
@@ -138,7 +155,7 @@ def test_question_original_immediately_after_query_in_result_sheets(tmp_path, mo
     for method in ("save", "resize", "convert", "crop"):
         monkeypatch.setattr(Image.Image, method, lambda *a, **k: pytest.fail("必须嵌入原文件，不能重编码"))
     archive, sheets = workbook(history.build_xlsx(before))
-    for name, query_header in (("数据集明细", "query"), ("逐题结果", "题目"), ("原始长截图", "query")):
+    for name, query_header in (("逐题结果", "题目"),):
         sheet = sheets[name]
         labels = headers(sheet)
         column = labels.index(query_header) + 1
@@ -148,12 +165,12 @@ def test_question_original_immediately_after_query_in_result_sheets(tmp_path, mo
         assert cell_text(rows[1][column]) == ""  # Text-only first row does not move later images.
         assert "原图文件缺失" in cell_text(rows[3][column])
         assert embedded_cells(archive, sheet)[f"{history._col(column + 1)}3"] == raw
-        if name != "原始长截图":
-            assert rows[2].attrib["ht"] == "96"
-            assert "ht" not in rows[1].attrib
+        assert rows[2].attrib["ht"] == "240"  # Long screenshots keep their original display height.
     media = [archive.read(name) for name in archive.namelist() if name.startswith("xl/media/")]
     assert media.count(raw) == 1  # All sheets share one byte-identical embedded original.
     assert model_view.read_bytes() not in media
+    assert "输入图片原图" not in headers(sheets["数据集明细"])
+    assert_result_only_images(archive, sheets)
     assert json.dumps(before) == unchanged
     assert all("输入图片原图" not in row for row in history.export_rows(before)["逐题结果"])
     assert_valid_package(archive)
@@ -169,7 +186,7 @@ def test_one_query_per_row_product_columns_and_originals_only(tmp_path, monkeypa
             path = tmp_path / str(i) / str(n) / "原图.png"
             raw = make_image(path, color=(i * 80, n * 80, 30))
             paths.append(path)
-            expected[f"{chr(68 + n)}{i + 2}"] = raw
+            expected[f"P{n + 1}:{i + 2}"] = raw
         items.append(screenshot_item(paths, index=i))
     original_snapshot = snapshot(items)
     before = json.dumps(original_snapshot)
@@ -180,16 +197,18 @@ def test_one_query_per_row_product_columns_and_originals_only(tmp_path, monkeypa
     for method in ("save", "resize", "convert", "crop"):
         monkeypatch.setattr(Image.Image, method, forbidden)
     archive, sheets = workbook(history.build_xlsx(original_snapshot))
-    sheet = sheets["原始长截图"]
-    assert headers(sheet) == ["数据集序号", "id", "query"] + [f"产品{n}原图" for n in range(1, count + 1)]
+    sheet = sheets["逐题结果"]
+    labels = headers(sheet)
+    for n in range(1, count + 1):
+        assert labels[labels.index(f"产品{n}回答") + 1] == f"产品{n}原图"
     rows = sheet.findall("s:sheetData/s:row", NS)
     assert len(rows) == 3
-    assert [cell_text(row[2]) for row in rows[1:]] == ["Query 0", "Query 1"]
+    assert [cell_text(row[labels.index("题目")]) for row in rows[1:]] == ["Query 0", "Query 1"]
     assert all(float(row.attrib["ht"]) <= 409 for row in rows[1:])
-    assert embedded_cells(archive, sheet) == expected
+    assert product_cells(archive, sheet) == expected
     assert len([n for n in archive.namelist() if n.startswith("xl/media/")]) == len(expected)
     assert sheet.find("s:mergeCells", NS) is None
-    assert sheet.find("s:sheetViews/s:sheetView/s:pane", NS).attrib["topLeftCell"] == "D2"
+    assert_result_only_images(archive, sheets)
     if count == 2:
         assert not any("产品3" in h for h in headers(sheets["逐题结果"]))
     assert json.dumps(original_snapshot) == before
@@ -202,7 +221,7 @@ def test_original_formats_bytes_and_dimensions_preserved(tmp_path, fmt, mode):
     path = tmp_path / "misnamed.png"
     raw = make_image(path, fmt=fmt, mode=mode)
     archive, sheets = workbook(history.build_xlsx(snapshot([screenshot_item([path, path])])))
-    assert embedded_cells(archive, sheets["原始长截图"]) == {"D2": raw, "E2": raw}
+    assert product_cells(archive, sheets["逐题结果"]) == {"P1:2": raw, "P2:2": raw}
     assert len([n for n in archive.namelist() if n.startswith("xl/media/")]) == 1
     extent = ET.fromstring(archive.read("xl/cellimages.xml")).find(".//a:ext", NS)
     assert extent.attrib == {"cx": str(96 * 9525), "cy": str(800 * 9525)}
@@ -221,8 +240,8 @@ def test_excel_uses_complete_original_even_above_model_limits(tmp_path, limit):
     path = tmp_path / "long.png"
     raw = make_image(path, size=size, metadata=info)
     archive, sheets = workbook(history.build_xlsx(snapshot([screenshot_item([path, path])])))
-    assert embedded_cells(archive, sheets["原始长截图"])["D2"] == raw
-    assert len(sheets["原始长截图"].findall("s:sheetData/s:row", NS)) == 2
+    assert product_cells(archive, sheets["逐题结果"])["P1:2"] == raw
+    assert len(sheets["逐题结果"].findall("s:sheetData/s:row", NS)) == 2
     with Image.open(io.BytesIO(archive.read("xl/media/original_image1.png"))) as image:
         assert image.size == size
 
@@ -231,11 +250,13 @@ def test_excel_uses_complete_original_even_above_model_limits(tmp_path, limit):
     ("missing", "原图文件缺失"), ("changed", "原图已变更，未嵌入"),
     ("corrupt", "原图损坏或无法识别"), ("unsupported", "原图不是静态 PNG/JPEG/WebP"),
 ])
-def test_unavailable_original_never_replaced_by_model_slice(tmp_path, problem, message):
+@pytest.mark.parametrize("evidence_mode", ["long_screenshot", "video_frames"])
+def test_unavailable_original_never_replaced_by_model_slice(tmp_path, problem, message, evidence_mode):
     first, second = tmp_path / "first.png", tmp_path / "second.png"
     make_image(first)
     raw = make_image(second, color="red")
     item = screenshot_item([first, second])
+    item["evidence_mode"] = evidence_mode
     if problem == "missing":
         first.unlink()
     elif problem == "changed":
@@ -249,8 +270,8 @@ def test_unavailable_original_never_replaced_by_model_slice(tmp_path, problem, m
     # 即使切片文件存在，也不能代替缺失或变化的原图。
     item["frames1"] = [str(second)]
     archive, sheets = workbook(history.build_xlsx(snapshot([item])))
-    assert embedded_cells(archive, sheets["原始长截图"]) == {"E2": raw}
-    assert message in cell_text(sheets["原始长截图"])
+    assert product_cells(archive, sheets["逐题结果"]) == {"P2:2": raw}
+    assert message in cell_text(sheets["逐题结果"])
     assert "逐题结果" in sheets
     assert_valid_package(archive)
 
@@ -258,9 +279,9 @@ def test_unavailable_original_never_replaced_by_model_slice(tmp_path, problem, m
 def test_missing_all_originals_still_keeps_rows_without_dangling_relationships(tmp_path):
     item = screenshot_item([tmp_path / "a.png", tmp_path / "b.png"], prepared=False)
     archive, sheets = workbook(history.build_xlsx(snapshot([item])))
-    assert "原始长截图" in sheets
+    assert "原始长截图" not in sheets
     assert not any("cellimages" in name or "/media/" in name for name in archive.namelist())
-    assert "原图文件缺失" in cell_text(sheets["原始长截图"])
+    assert "原图文件缺失" in cell_text(sheets["逐题结果"])
     assert_valid_package(archive)
 
 
@@ -276,10 +297,13 @@ def test_history_source_paths_relative_to_project_and_mixed_product_counts(tmp_p
     monkeypatch.setattr(history, "PROJECT_ROOT", tmp_path)
     monkeypatch.chdir(tmp_path.parent)
     archive, sheets = workbook(history.build_xlsx(snapshot(items)))
-    cells = embedded_cells(archive, sheets["原始长截图"])
-    assert cells == {"D2": originals[0], "E2": originals[1], "F2": originals[2], "D4": originals[0], "E4": originals[1]}
-    assert len(sheets["原始长截图"].findall("s:sheetData/s:row", NS)) == 4
-    assert "录屏模式，无原始长截图" in cell_text(sheets["原始长截图"])
+    cells = product_cells(archive, sheets["逐题结果"])
+    assert cells == {"P1:2": originals[0], "P2:2": originals[1], "P3:2": originals[2], "P1:4": originals[0], "P2:4": originals[1]}
+    assert len(sheets["逐题结果"].findall("s:sheetData/s:row", NS)) == 4
+    labels = headers(sheets["逐题结果"])
+    video_row = sheets["逐题结果"].findall("s:sheetData/s:row", NS)[2]
+    assert all(cell_text(video_row[labels.index(f"产品{n}原图")]) == "" for n in (1, 2, 3))
+    assert_result_only_images(archive, sheets)
     assert_valid_package(archive)
 
 
@@ -289,11 +313,13 @@ def test_input_text_cannot_become_dispimg_or_other_formula(tmp_path):
     item = screenshot_item([path, path])
     item["query"] = '=DISPIMG("UNTRUSTED",1) & <Query>'
     archive, sheets = workbook(history.build_xlsx(snapshot([item])))
-    cell = sheets["原始长截图"].find('s:sheetData/s:row/s:c[@r="C2"]', NS)
+    sheet = sheets["逐题结果"]
+    column = history._col(headers(sheet).index("题目") + 1)
+    cell = sheet.find(f's:sheetData/s:row/s:c[@r="{column}2"]', NS)
     assert cell.attrib["t"] == "inlineStr"
     assert cell_text(cell) == item["query"]
     assert cell.find("s:f", NS) is None
-    assert embedded_cells(archive, sheets["原始长截图"])
+    assert embedded_cells(archive, sheet)
 
 
 @pytest.mark.parametrize("mode", ["compare", "rich_content", "operation"])
@@ -307,6 +333,78 @@ def test_old_video_exports_do_not_add_image_parts(mode):
     # image parts or changing the two original data/header styles.
     assert len(styles) == (8 if mode == "compare" else 2)
     assert [style.attrib["numFmtId"] for style in list(styles)[:2]] == ["0", "0"]
+    assert_valid_package(archive)
+
+
+def test_video_fallback_embeds_provided_screenshot_and_query_only_once(tmp_path):
+    screenshot = tmp_path / "inactive.png"
+    screenshot_raw = make_image(screenshot, color="red")
+    query = tmp_path / "query.png"
+    raw = make_image(query, color="blue", size=(80, 60))
+    item = {"id": "vqa", "query": "question", "product_count": 2, "evidence_mode": "video_frames",
+            "video1": "a.mp4", "video2": "b.mp4", "query_images": [str(query)],
+            "query_image_meta": [{"original_path": str(query), "original_sha256": hashlib.sha256(raw).hexdigest()}],
+            "source_data": {"screenshot1": str(screenshot)}}
+    archive, sheets = workbook(history.build_xlsx(snapshot([item])))
+    assert_result_only_images(archive, sheets)
+    result = sheets["逐题结果"]
+    labels = headers(result)
+    assert labels[labels.index("题目") + 1] == "输入图片原图"
+    assert labels[labels.index("产品1回答") + 1] == "产品1原图"
+    assert product_cells(archive, result) == {"P1:2": screenshot_raw}
+    assert list(embedded_cells(archive, result).values()) == [raw, screenshot_raw]
+    assert len([name for name in archive.namelist() if name.startswith("xl/media/")]) == 2
+    assert result.find('s:sheetData/s:row[@r="2"]', NS).attrib["ht"] == "240"
+    assert_valid_package(archive)
+
+
+@pytest.mark.parametrize("location", ["item", "source_data", "metadata"])
+@pytest.mark.parametrize("count", [2, 3])
+def test_unused_screenshots_keep_product_alignment_and_deduplicate(tmp_path, monkeypatch, location, count):
+    path = tmp_path / "data" / "unused.png"
+    raw = make_image(path, color="green")
+    relative = path.relative_to(tmp_path).as_posix()
+    item = {"id": "video", "query": "q", "product_count": count, "evidence_mode": "video_frames",
+            **{f"video{n}": f"{n}.mp4" for n in range(1, count + 1)}}
+    # Product 1 has no screenshot; products 2/3 share identical original bytes.
+    for n in range(2, count + 1):
+        if location == "metadata":
+            item[f"screenshot_meta{n}"] = {
+                "original_path": relative, "original_sha256": hashlib.sha256(raw).hexdigest(),
+            }
+        else:
+            target = item if location == "item" else item.setdefault("source_data", {})
+            target[f"screenshot{n}"] = f" {relative} "
+    data = snapshot([{"id": "without-screenshot", "query": "q", "video1": "a.mp4", "video2": "b.mp4"}, item, item])
+    before = json.dumps(data)
+    monkeypatch.setattr(history, "PROJECT_ROOT", tmp_path)
+    monkeypatch.chdir(tmp_path.parent)
+    archive, sheets = workbook(history.build_xlsx(data))
+    assert product_cells(archive, sheets["逐题结果"]) == {
+        f"P{n}:{row}": raw for n in range(2, count + 1) for row in (3, 4)
+    }
+    assert len([name for name in archive.namelist() if name.startswith("xl/media/")]) == 1
+    assert all(stream["evidence_mode"] == "video_frames" for stream in history._item_visual_streams(item))
+    assert json.dumps(data) == before
+    assert_result_only_images(archive, sheets)
+    assert_valid_package(archive)
+
+
+def test_imported_video_fallback_exports_available_original_and_missing_file_reason(tmp_path):
+    path = tmp_path / "available.png"
+    raw = make_image(path, color="blue")
+    source = {"id": "fallback", "query": "q", "product_count": 3,
+              "video1": "a.mp4", "video2": "b.mp4", "video3": "c.mp4",
+              "screenshot2": str(path), "screenshot3": str(tmp_path / "missing.png")}
+    parsed = server.api_parse(server.ParseReq(mode="compare", jsonl=json.dumps(source)))
+    assert not parsed["errors"] and parsed["items"][0]["evidence_mode"] == "video_frames"
+    assert "screenshot2" not in parsed["items"][0]
+    archive, sheets = workbook(history.build_xlsx(snapshot(parsed["items"])))
+    assert product_cells(archive, sheets["逐题结果"]) == {"P2:2": raw}
+    labels = headers(sheets["逐题结果"])
+    row = sheets["逐题结果"].findall("s:sheetData/s:row", NS)[1]
+    assert cell_text(row[labels.index("产品3原图")]) == "原图文件缺失"
+    assert_result_only_images(archive, sheets)
     assert_valid_package(archive)
 
 
@@ -327,6 +425,7 @@ async def test_existing_export_endpoint_includes_original_images(tmp_path, monke
     assert response.media_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     assert unquote(response.headers["content-disposition"]).endswith("测试数据_模型测评结果.xlsx")
     archive, sheets = workbook(Path(response.path).read_bytes())
-    assert embedded_cells(archive, sheets["原始长截图"]) == {"D2": raw, "E2": raw}
+    assert product_cells(archive, sheets["逐题结果"]) == {"P1:2": raw, "P2:2": raw}
+    assert_result_only_images(archive, sheets)
     await response.background()
     assert not Path(response.path).exists()

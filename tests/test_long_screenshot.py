@@ -216,9 +216,9 @@ def test_jsonl_and_api_screenshots(count):
 
 
 @pytest.mark.parametrize("updates", [
-    {"video1": "a.mp4"}, {"screenshot2": None, "video2": "b.mp4"},
+    {"screenshot2": None, "video2": "b.mp4"},
     {"product_count": 2, "screenshot3": "c.png"}, {"product_count": 2, "answer3": "c"},
-    {"product_count": 2, "context3": "c"}, {"evidence_mode": "video_frames"},
+    {"product_count": 2, "context3": "c"}, {"evidence_mode": "unknown"},
     {"screenshot2": 42},
 ])
 def test_jsonl_and_direct_api_reject_conflicts(updates):
@@ -226,6 +226,71 @@ def test_jsonl_and_direct_api_reject_conflicts(updates):
     assert parse_jsonl(json.dumps(item), "compare")[1]
     with pytest.raises(HTTPException):
         server._validate_eval_request(server.EvalReq(mode="compare", items=[item]), AppConfig(judges=[JudgeConfig(name="test")]))
+
+
+@pytest.mark.parametrize("count", [2, 3])
+def test_all_evidence_combinations_use_one_complete_layer(count):
+    for present in itertools.product((False, True), repeat=count * 2):
+        raw = {"id": "mixed", "query": "q", "product_count": count}
+        for n in range(count):
+            for offset, kind in ((0, "screenshot"), (count, "video")):
+                if present[offset + n]:
+                    raw[f"{kind}{n+1}"] = f" {kind}{n+1}.file "
+        expected = ("long_screenshot" if all(present[:count]) else
+                    "video_frames" if all(present[count:]) else None)
+        items, errors = parse_jsonl(json.dumps(raw), "compare")
+        req = server.EvalReq(mode="compare", items=[dict(raw)])
+        if expected is None:
+            assert not items and len(errors) == 1
+            assert "Case mixed" in errors[0] and "统一证据层" in errors[0]
+            for n in range(count):
+                for offset, kind in ((0, "screenshot"), (count, "video")):
+                    if not present[offset + n]:
+                        assert f"{kind}{n+1}" in errors[0]
+            with pytest.raises(HTTPException) as exc:
+                server._validate_eval_request(req, AppConfig(judges=[]))
+            assert exc.value.status_code == 422
+            continue
+        assert not errors
+        server._validate_eval_request(req, AppConfig(judges=[]))
+        for item in (items[0], req.items[0]):
+            assert item["evidence_mode"] == expected
+            selected = "screenshot" if expected == "long_screenshot" else "video"
+            other = "video" if selected == "screenshot" else "screenshot"
+            for n in range(1, count + 1):
+                assert item[f"{selected}{n}"] == raw[f"{selected}{n}"].strip()
+                assert f"{other}{n}" not in item
+            assert all(item["source_data"][key] == value for key, value in raw.items())
+
+
+def test_mixed_import_reports_rejected_cases_and_layer_counts():
+    rows = [
+        {"id": "shots", "query": "q", "screenshot1": "a.png", "screenshot2": "b.png",
+         "video1": "a.mp4", "video2": "b.mp4", "evidence_mode": "video_frames"},
+        {"id": "reject", "query": "q", "screenshot1": "a.png", "video2": "b.mp4"},
+        {"id": "fallback", "query": "q", "screenshot1": "a.png",
+         "video1": "a.mp4", "video2": "b.mp4", "evidence_mode": "long_screenshot"},
+    ]
+    for content in (json.dumps(rows), "\n".join(map(json.dumps, rows))):
+        response = server.api_parse(server.ParseReq(mode="compare", jsonl=content))
+        assert response["count"] == 2 and response["rejected_count"] == 1
+        assert response["evidence_counts"] == {"long_screenshot": 1, "video_frames": 1}
+        assert [item["id"] for item in response["items"]] == ["shots", "fallback"]
+        assert "Case reject" in response["errors"][0]
+        assert "screenshot2" in response["errors"][0] and "video1" in response["errors"][0]
+
+
+def test_direct_api_drops_prepared_evidence_before_selection():
+    raw = {"query": "q", "screenshot1": "a.png", "video1": "a.mp4", "video2": "b.mp4",
+           "evidence_mode": "long_screenshot", "frames1": ["stale.png"],
+           "screenshot_meta1": {"original_path": "stale.png"}, "video1_path": "stale.mp4"}
+    req = server.EvalReq(mode="compare", items=[raw])
+    server._validate_eval_request(req, AppConfig(judges=[]))
+    item = req.items[0]
+    assert item["evidence_mode"] == "video_frames" and "screenshot1" not in item
+    assert item["source_data"]["screenshot1"] == "a.png"
+    for field in ("frames1", "screenshot_meta1", "video1_path"):
+        assert field not in item and field not in item["source_data"]
 
 
 def model_data(count=2):
@@ -249,6 +314,44 @@ class FakeClient:
         return json.dumps(model_data(self.count))
     async def aclose(self):
         pass
+
+
+@pytest.mark.parametrize("count", [2, 3])
+async def test_mixed_batch_runner_uses_selected_prompt_for_all_products(tmp_path, monkeypatch, count):
+    shots = {f"screenshot{n}": str(save_image(tmp_path, f"{n}.png")) for n in range(1, count+1)}
+    videos = {f"video{n}": f"{n}.mp4" for n in range(1, count+1)}
+    rows = [{"id": "shots", "query": "q", **shots, **videos},
+            {"id": "video", "query": "q", "screenshot1": shots["screenshot1"], **videos}]
+    response = server.api_parse(server.ParseReq(mode="compare", jsonl=json.dumps(rows)))
+    assert not response["errors"]
+    monkeypatch.setenv("OPERATION_VIDEO_ROOTS", str(tmp_path))
+    real_prepare = video_prepare.prepare_session_long_screenshot_item
+    monkeypatch.setattr(runner, "prepare_session_long_screenshot_item",
+                        lambda item, **kw: real_prepare(item, **kw, runs_dir=tmp_path / "runs"))
+    video_calls = []
+    def prepare_video(item, **kwargs):
+        video_calls.append(item["id"])
+        assert item["evidence_mode"] == "video_frames"
+        assert all(f"screenshot{n}" not in item for n in range(1, count+1))
+        return {**item, "frame_count": count,
+                **{f"frames{n}": [shots[f"screenshot{n}"]] for n in range(1, count+1)}}
+    monkeypatch.setattr(runner, "prepare_session_visual_compare_item", prepare_video)
+    monkeypatch.setattr(runner, "_persist_task", lambda *a: None)
+    monkeypatch.setattr(runner, "_write_eval_error", lambda *a, **k: None)
+    client = FakeClient(count)
+    monkeypatch.setattr(runner, "JudgeClient", lambda *a: client)
+    task = Task(id="mixed", mode="compare", items=response["items"], options={})
+    app_cfg = AppConfig(judges=[JudgeConfig(name="test")], visual_modes={"rich_content": profile()})
+    one, _ = runner._make_item_evaluator(task, app_cfg)
+    for index, item in enumerate(task.items):
+        result = await one(index, item)
+        assert "error" not in result, result
+    assert video_calls == ["video"] and len(client.calls) == 2
+    assert "最终回答长截图证据规则" in client.calls[0][0]
+    assert "关键帧按时间" not in client.calls[0][1]
+    assert "最终回答长截图证据规则" not in client.calls[1][0]
+    assert "关键帧按" in client.calls[1][1]
+    assert f"产品{count}录屏" in client.calls[1][1]
 
 
 @pytest.mark.parametrize("protocol", ["0.2-simplified", "0.3"])

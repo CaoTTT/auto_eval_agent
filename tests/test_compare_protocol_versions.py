@@ -5,6 +5,8 @@ from fastapi import HTTPException
 from auto_eval.judges.compare_protocols import (
     DEFAULT_COMPARE_PROTOCOL_ID,
     V03_COMPARE_PROTOCOL_ID,
+    V02_CALIBRATED_COMPARE_PROTOCOL_ID,
+    V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID,
     VisualCompareObservationV02,
     list_compare_protocols,
     resolve_compare_protocol,
@@ -31,13 +33,27 @@ def _observation_data(score: int, response_gate: str = "pass") -> dict:
     }
 
 
-def test_registry_defaults_to_stable_v02_and_exposes_v03():
+def test_registry_defaults_to_stable_v02_and_exposes_experimental_versions():
     assert resolve_compare_protocol(None).id == DEFAULT_COMPARE_PROTOCOL_ID
     assert {profile.id for profile in list_compare_protocols()} == {
         DEFAULT_COMPARE_PROTOCOL_ID,
         V03_COMPARE_PROTOCOL_ID,
+        V02_CALIBRATED_COMPARE_PROTOCOL_ID,
+        V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID,
     }
     assert resolve_compare_protocol(V03_COMPARE_PROTOCOL_ID).status == "experimental"
+    calibrated = resolve_compare_protocol(V02_CALIBRATED_COMPARE_PROTOCOL_ID)
+    assert calibrated.status == "experimental"
+    assert calibrated.public_metadata()["input_modalities"] == ["text", "text_image"]
+    assert calibrated.observation_model is VisualCompareObservationV02
+    thinking_exposure = resolve_compare_protocol(V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID)
+    assert thinking_exposure.status == "experimental"
+    assert thinking_exposure.display == "V0.2 简化版·思考暴露优化（实验）"
+    assert thinking_exposure.public_metadata()["input_modalities"] == ["text", "text_image"]
+    assert thinking_exposure.observation_model is VisualCompareObservationV02
+    assert thinking_exposure.require_response_pass is True
+    assert thinking_exposure.system_template is not resolve_compare_protocol(None).system_template
+    assert thinking_exposure.user_template is not resolve_compare_protocol(None).user_template
     with pytest.raises(ValueError, match="未知评测协议"):
         resolve_compare_protocol("qa_competitor_compare@9.9")
 
@@ -87,7 +103,7 @@ def test_task_snapshot_freezes_protocol_and_legacy_v03_is_inferred():
 @pytest.mark.asyncio
 async def test_eval_api_freezes_selected_protocol_on_new_task(monkeypatch):
     app_cfg = AppConfig(judges=[JudgeConfig(name="judge")])
-    server_module._state["cfg"] = app_cfg
+    monkeypatch.setitem(server_module._state, "cfg", app_cfg)
     created = []
 
     def fake_new_task(mode, items, options, dataset_name="", **kwargs):
@@ -123,6 +139,39 @@ async def test_eval_api_freezes_selected_protocol_on_new_task(monkeypatch):
     assert v03_response["evaluation_profile"] == V03_COMPARE_PROTOCOL_ID
     assert created[-1].protocol_manifest["score_range"] == [0, 3]
 
+    calibrated_response = await server_module.api_eval(
+        server_module.EvalReq(
+            mode="compare",
+            items=[item],
+            evaluation_profile=V02_CALIBRATED_COMPARE_PROTOCOL_ID,
+        )
+    )
+    assert calibrated_response["evaluation_profile"] == V02_CALIBRATED_COMPARE_PROTOCOL_ID
+    manifest = created[-1].protocol_manifest
+    assert manifest["standard_version"] == "0.2-simplified-calibrated"
+    assert manifest["bundle_revision"] == "0.2.2"
+    assert manifest["score_range"] == [1, 5]
+    thinking_exposure_response = await server_module.api_eval(
+        server_module.EvalReq(
+            mode="compare",
+            items=[item],
+            evaluation_profile=V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID,
+        )
+    )
+    assert thinking_exposure_response["evaluation_profile"] == V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID
+    manifest = created[-1].protocol_manifest
+    assert manifest["standard_version"] == "0.2-simplified-thinking-exposure"
+    assert manifest["bundle_revision"] == "0.2.3"
+    assert manifest["score_range"] == [1, 5]
+    assert manifest["status"] == "experimental"
+    public = server_module.api_config()["evaluation_profiles"]
+    assert [p["id"] for p in public] == [
+        DEFAULT_COMPARE_PROTOCOL_ID, V03_COMPARE_PROTOCOL_ID,
+        V02_CALIBRATED_COMPARE_PROTOCOL_ID,
+        V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID,
+    ]
+    assert [p["id"] for p in public if p["status"] == "stable"] == [DEFAULT_COMPARE_PROTOCOL_ID]
+
     with pytest.raises(HTTPException) as exc_info:
         await server_module.api_eval(
             server_module.EvalReq(
@@ -132,3 +181,57 @@ async def test_eval_api_freezes_selected_protocol_on_new_task(monkeypatch):
             )
         )
     assert exc_info.value.status_code == 422
+
+
+@pytest.mark.parametrize("protocol_id,standard_version,revision", [
+    (V02_CALIBRATED_COMPARE_PROTOCOL_ID, "0.2-simplified-calibrated", "0.2.2"),
+    (V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID, "0.2-simplified-thinking-exposure", "0.2.3"),
+])
+@pytest.mark.parametrize("response_gate", ["pass", "fail", "unclear"])
+def test_experimental_v02_preserves_gates_and_separate_version(
+    protocol_id, standard_version, revision, response_gate
+):
+    protocol = resolve_compare_protocol(protocol_id, revision)
+    data = _observation_data(5, response_gate)
+    result = visual_compare_result_fields(protocol.observation_model.model_validate(data), protocol)
+    assert result["answer1_understanding_score"] == (5 if response_gate == "pass" else None)
+    assert result["answer2_understanding_score"] == 3
+    assert result["evaluation_profile"] == protocol_id
+    assert result["standard_version"] == standard_version
+    assert result["bundle_revision"] == revision
+    assert result["overall_winner"] is None
+    for score in (0, 6):
+        with pytest.raises(ValidationError):
+            protocol.observation_model.model_validate(_observation_data(score))
+
+
+@pytest.mark.parametrize("revision", ["0.2.0", "0.2.1", "0.2.3", "0.3.0", "0.3.1", "unknown"])
+def test_calibrated_cannot_restore_another_protocols_revision(revision):
+    with pytest.raises(ValueError, match="无法恢复任务冻结的实现版本"):
+        resolve_compare_protocol(V02_CALIBRATED_COMPARE_PROTOCOL_ID, revision)
+
+
+@pytest.mark.parametrize("revision", ["0.2.0", "0.2.1", "0.2.2", "0.3.0", "0.3.1", "unknown"])
+def test_thinking_exposure_cannot_restore_another_protocols_revision(revision):
+    with pytest.raises(ValueError, match="无法恢复任务冻结的实现版本"):
+        resolve_compare_protocol(V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID, revision)
+
+
+@pytest.mark.parametrize("protocol_id", [DEFAULT_COMPARE_PROTOCOL_ID, V03_COMPARE_PROTOCOL_ID])
+def test_existing_protocols_cannot_restore_thinking_exposure_revision(protocol_id):
+    with pytest.raises(ValueError, match="无法恢复任务冻结的实现版本"):
+        resolve_compare_protocol(protocol_id, "0.2.3")
+
+
+@pytest.mark.parametrize("protocol_id,revision", [
+    (DEFAULT_COMPARE_PROTOCOL_ID, "0.2.0"),
+    (DEFAULT_COMPARE_PROTOCOL_ID, "0.2.1"),
+    (V03_COMPARE_PROTOCOL_ID, "0.3.0"),
+    (V03_COMPARE_PROTOCOL_ID, "0.3.1"),
+    (V02_CALIBRATED_COMPARE_PROTOCOL_ID, "0.2.2"),
+    (V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID, "0.2.3"),
+])
+def test_existing_protocol_revisions_still_restore(protocol_id, revision):
+    restored = resolve_compare_protocol(protocol_id, revision)
+    assert restored.id == protocol_id
+    assert restored.bundle_revision == revision

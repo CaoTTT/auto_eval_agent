@@ -12,6 +12,9 @@ import httpx
 from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimitError
 
 from .observability import current_context, error_details, log_event
+from .request_throttle import RequestThrottle, estimate_input_tokens, wait_for_active
+from .request_transport import HeaderAdmission, header_admission, paced_http_client
+from .timing import record_model_attempt, timing_span
 
 
 class StreamProtocolError(RuntimeError):
@@ -86,12 +89,15 @@ def build_openai_client(
         write=read_timeout_s,
         pool=connect_timeout_s,
     )
-    return AsyncOpenAI(
+    client = AsyncOpenAI(
         base_url=base_url,
         api_key=api_key,
         timeout=timeout,
         max_retries=0,
+        http_client=paced_http_client(timeout),
     )
+    client._auto_eval_header_pacing = True
+    return client
 
 
 def _status_code(exc: BaseException) -> int | None:
@@ -156,6 +162,9 @@ def _provider_stream_error(error: Any) -> ProviderStreamError:
                 "aborted",
                 "timeout",
                 "rate_limit",
+                "throttling",
+                "limit_requests",
+                "limit_burst_rate",
                 "rate limit",
                 "too many requests",
                 "overloaded",
@@ -348,6 +357,7 @@ async def stream_chat_completion(
     max_attempts: int = 4,
     retry_base_s: float = 1.0,
     retry_max_s: float = 20.0,
+    throttle: RequestThrottle | None = None,
 ):
     """始终使用流式接口，成功后返回与完整响应等价的聚合对象。
 
@@ -355,6 +365,65 @@ async def stream_chat_completion(
     """
     if max_attempts < 1:
         raise ValueError("max_attempts 必须大于等于 1")
+    if throttle is not None and not getattr(client, "_auto_eval_header_pacing", False):
+        from openai import AsyncOpenAI
+
+        if isinstance(client, AsyncOpenAI):
+            raise ValueError("百炼限流调用必须使用 build_openai_client 创建的传输客户端")
+
+    input_tokens = await asyncio.to_thread(estimate_input_tokens, kwargs) if throttle else 0
+    request_kind = "vision" if any(
+        isinstance(message.get("content"), list) and any(
+            part.get("type") == "image_url" for part in message["content"]
+        ) for message in kwargs.get("messages", [])
+    ) else "text"
+
+    async def send(include_usage: bool):
+        reservation = None
+        admission = None
+        response = None
+        failure = None
+        request = kwargs
+        if throttle is not None:
+            log_event("请求调度", "等待发送额度", progress=30,
+                      progress_message="等待模型请求额度（请求数 / Token / 在途上限）")
+            if getattr(client, "_auto_eval_header_pacing", False):
+                admission = HeaderAdmission(throttle, input_tokens, request_kind)
+            else:
+                # Compatibility for synthetic/test clients. Production clients
+                # constructed above always gate after pool/connect waits.
+                reservation = await throttle.acquire(
+                    throttle.estimate(input_tokens, request_kind),
+                    input_proxy=input_tokens, kind=request_kind,
+                )
+                record_model_attempt()
+            request = {**kwargs, "extra_headers": {
+                "X-DashScope-Wait-Timeout": "30", **(kwargs.get("extra_headers") or {}),
+            }}
+        try:
+            if admission is not None:
+                with header_admission(admission), timing_span("model"):
+                    response, chunks, stats = await wait_for_active(
+                        _collect_stream(client, request, include_usage=include_usage),
+                        timeout=total_timeout_s,
+                    )
+            else:
+                if reservation is None:
+                    record_model_attempt()
+                with timing_span("model"):
+                    response, chunks, stats = await asyncio.wait_for(
+                        _collect_stream(client, request, include_usage=include_usage),
+                        timeout=total_timeout_s,
+                    )
+            return response, chunks, stats
+        except BaseException as exc:
+            failure = exc
+            raise
+        finally:
+            if reservation is not None:
+                throttle.finish(reservation, getattr(response, "usage", None), failure)
+            if admission is not None:
+                admission.finish(getattr(response, "usage", None), failure)
 
     last_exc: BaseException | None = None
     use_usage = include_usage
@@ -378,10 +447,7 @@ async def stream_chat_completion(
         )
         try:
             try:
-                response, chunks, stats = await asyncio.wait_for(
-                    _collect_stream(client, kwargs, include_usage=use_usage),
-                    timeout=total_timeout_s,
-                )
+                response, chunks, stats = await send(use_usage)
             except APIStatusError as exc:
                 # 一些内部 OpenAI 兼容网关支持 stream，但不接受 stream_options。
                 if use_usage and _rejects_stream_usage(exc):
@@ -392,10 +458,7 @@ async def stream_chat_completion(
                         level=logging.WARNING,
                         details={"HTTP状态": _status_code(exc)},
                     )
-                    response, chunks, stats = await asyncio.wait_for(
-                        _collect_stream(client, kwargs, include_usage=False),
-                        timeout=total_timeout_s,
-                    )
+                    response, chunks, stats = await send(False)
                 else:
                     raise
             if callback is not None:
@@ -482,7 +545,8 @@ async def stream_chat_completion(
                 progress=40,
                 progress_message=f"{module}：调用失败，准备第{attempt + 2}次重试",
             )
-            await asyncio.sleep(wait)
+            with timing_span("retry_wait"):
+                await asyncio.sleep(wait)
 
     assert last_exc is not None
     raise last_exc

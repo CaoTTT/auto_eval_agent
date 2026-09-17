@@ -1,4 +1,4 @@
-import { createApp, ref, computed, onMounted, onUnmounted, nextTick } from "./compare-data.js?v=20260911_dataset_reuse";
+import { createApp, ref, computed, onMounted, onUnmounted, nextTick, selectEvidenceMode } from "./compare-data.js?v=20260916_video_cache";
 
 createApp({
   setup() {
@@ -22,6 +22,7 @@ createApp({
     const opJumpPage = ref("");
     const opPreparing = ref(false);
     const errors = ref([]);
+    const importReport = ref(null);
     const judges = ref([]);
     const selectedJudges = ref([]);
     const visibleJudges = computed(() => judges.value);
@@ -31,7 +32,37 @@ createApp({
       evaluationProfiles.value.filter((profile) => (profile.modes || []).includes("compare"))
     );
     const concurrency = ref(4);
-    const evalTimeout = ref(300);
+    const mediaConcurrency = ref(4);
+    const requestPacing = computed(() => {
+      const selected = judges.value.filter((j) => selectedJudges.value.includes(j.name));
+      return selected.length > 0 && selected.every((j) => j.request_pacing);
+    });
+    const pacingStatus = ref(null);
+    const pacingError = ref("");
+    let pacingLoading = false;
+
+    function pacingNumber(value, digits = 0) {
+      return typeof value === "number" && Number.isFinite(value)
+        ? value.toLocaleString("zh-CN", { maximumFractionDigits: digits }) : "—";
+    }
+
+    function pacingWaitLabel(reason) {
+      return ({
+        cooldown: "限流冷却", second_window: "连续 1 秒请求额度",
+        request_window: "连续 60 秒请求额度", minute_window: "连续 60 秒请求额度",
+        token_budget: "Token 预算", pacing: "平滑发送间隔", warmup: "逐步升速",
+        inflight: "等待响应槽位", inflight_limit: "等待响应槽位",
+      })[reason] || (reason ? "等待发送额度" : "额度可用");
+    }
+
+    function pacingLimitLabel(kind) {
+      return ({
+        requests: "请求频率", request: "请求频率", tokens: "Token 额度",
+        token: "Token 额度", burst: "增速", overload: "服务拥塞",
+        congestion: "服务拥塞", unknown: "未分类限流",
+      })[kind] || (kind ? "未分类限流" : "无");
+    }
+    const evalTimeout = ref(900);
     const submitting = ref(false);
     const running = ref(false);
     const progress = ref(0);
@@ -107,15 +138,25 @@ createApp({
     const exportError = ref("");
     const exportDownloadUrl = ref("");
     let historyLoadVersion = 0;
+    let historyListVersion = 0;
     let historyLoadController = null;
     let disposed = false;
     const queueState = ref({ running: null, queued: [] });
     const selectedTaskStatus = ref("");
+    const selectedTaskTiming = ref(null);
     const queueNotice = ref("");
     const repairStatus = ref("idle");
     const retrySubmitting = ref(false);
     const selectedRetryIndexes = ref([]);
     const activeRetry = ref(null);
+    const executionControl = ref({});
+    const selectedActiveRuns = ref(0);
+    const controlSubmitting = ref(false);
+    const resumeConcurrency = ref(4);
+    const resumeFailed = ref(false);
+    const isPausing = computed(() => executionControl.value.state === "pausing");
+    const canPauseTask = computed(() => !!taskId.value && (running.value || selectedActiveRuns.value > 0 || ["queued", "running"].includes(repairStatus.value) || executionControl.value.save_error));
+    const canResumeTask = computed(() => !!taskId.value && !running.value && !selectedActiveRuns.value && !isPausing.value && !executionControl.value.save_error && !["queued", "running"].includes(repairStatus.value) && ["paused", "error", "cancelled", "done"].includes(selectedTaskStatus.value));
     const clockNow = ref(Date.now());
     let tooltipHideTimer = null;
     let progressClockTimer = null;
@@ -136,8 +177,36 @@ createApp({
         .map((result) => Number(result.index))
     );
 
+    function receiveTaskTiming(timing) {
+      return timing && typeof timing === "object" ? { ...timing, _received_at: Date.now() } : null;
+    }
+
+    function updateTaskTiming(timing) {
+      if (!timing) return;
+      const previous = selectedTaskTiming.value;
+      if (previous && Number(timing.measured_at) < Number(previous.measured_at)) return;
+      selectedTaskTiming.value = receiveTaskTiming(timing);
+    }
+
+    function taskElapsedSeconds(timing) {
+      if (!timing || typeof timing.elapsed_s !== "number" || !Number.isFinite(timing.elapsed_s)) return null;
+      const extra = timing.running && !timing.incomplete && timing.finished_at == null
+        ? Math.max(0, (clockNow.value - (timing._received_at ?? clockNow.value)) / 1000) : 0;
+      return Math.max(0, timing.elapsed_s + extra);
+    }
+
+    function formatTaskDuration(timing) {
+      const seconds = taskElapsedSeconds(timing);
+      if (seconds == null) return "未记录";
+      const whole = Math.floor(seconds);
+      const hours = Math.floor(whole / 3600), minutes = Math.floor(whole / 60) % 60, rest = whole % 60;
+      const label = hours ? `${hours} 小时 ${minutes} 分 ${rest} 秒`
+        : minutes ? `${minutes} 分 ${rest} 秒` : `${rest} 秒`;
+      return timing.incomplete ? `${label}（截至中断前）` : label;
+    }
+
     function retryStatusLabel(status) {
-      return ({ idle: "", queued: "补跑排队中", running: "补跑中", completed: "补跑完成", partial: "补跑后仍有失败", error: "补跑异常", cancelled: "补跑已取消" })[status] || status;
+      return ({ idle: "", queued: "补跑排队中", running: "补跑中", completed: "补跑完成", partial: "补跑后仍有失败", error: "补跑异常", cancelled: "补跑已取消", paused: "补跑已暂停" })[status] ?? status;
     }
 
     function retryIndexSelected(index) {
@@ -152,18 +221,18 @@ createApp({
     }
 
     function taskStatusLabel(status) {
-      return ({ queued: "排队中", running: "运行中", done: "已完成", error: "失败", cancelled: "已取消" })[status] || status;
+      return ({ queued: "排队中", running: "运行中", done: "已完成", error: "失败", cancelled: "已取消", paused: "已暂停", pausing: "正在暂停" })[status] || status;
     }
 
     function queueKindLabel(kind) {
-      return kind === "retry" ? "失败补跑" : "全量评测";
+      return kind === "resume" ? "恢复执行" : kind === "retry" ? "失败补跑" : "全量评测";
     }
 
     const formatHint = computed(
       () =>
         ({
-          compare: "支持文字题与图文题混合导入：query_images 可选填一张提问图片路径；product_count 为2或3；同题统一用 screenshot1/2/3 或 video1/2/3，不同题可以不同。整批使用同一标准。",
-          rich_content: "可逐题上传，也可导入 JSONL：query、context(可选)、video_path、category/answer_text/task_start_time/task_end_time(均可选)；普通图片不算挂卡，回答区域蓝色文字按 Superlink 统计。",
+          compare: "支持文字题与图文题混合导入：query_images 可选填一张提问图片路径；product_count 为2或3。每题优先使用全产品长截图，否则回退全产品录屏；无法统一证据的题目在导入时拒绝。",
+          rich_content: "可逐题上传，也可导入 JSON / JSONL / CSV：query、context(可选)、video_path、category/answer_text/task_start_time/task_end_time(均可选)；sessionid 等额外字段会保留到 Excel 导出。普通图片不算挂卡，回答区域蓝色文字按 Superlink 统计。",
         }[mode.value])
     );
 
@@ -178,6 +247,17 @@ createApp({
     });
 
     const progressResultByIndex = computed(() => new Map(results.value.map((entry) => [entry.index, entry])));
+    const timingReceipts = new WeakMap();
+    function receiveProgress(rows) {
+      return Object.fromEntries(Object.entries(rows || {}).map(([key, row]) => [key, {
+        ...row, ...(row.timings ? { timings: { ...row.timings, _received_at: Date.now() } } : {}),
+      }]));
+    }
+    function timingLiveExtra(timings, live) {
+      if (!timings || !live || timings.finished || !timings.active_stage) return 0;
+      if (!timingReceipts.has(timings)) timingReceipts.set(timings, timings._received_at ?? Date.now());
+      return Math.max(0, (clockNow.value - timingReceipts.get(timings)) / 1000);
+    }
     const progressPageCount = computed(() => Math.max(1, Math.ceil(items.value.length / pageSize)));
     const pagedProgressRows = computed(() => {
       const page = Math.min(progressPage.value, progressPageCount.value);
@@ -188,10 +268,13 @@ createApp({
         const result = progressResultByIndex.value.get(index);
         const events = progressEvents.value[index] || [];
         const startedAt = Number(current.started_at || 0);
-        const terminal = ["done", "error"].includes(current.status);
+        const terminal = ["done", "error", "paused"].includes(current.status) || selectedTaskStatus.value === "paused";
         const finishedAt = Number(current.finished_at || (terminal && Date.parse(current.updated_at || "")) || 0);
-        const resultElapsed = Number(result?.latency_s);
-        const elapsedSeconds = startedAt > 0
+        const resultElapsed = Number(result?.total_s ?? result?.latency_s);
+        const timings = terminal && result?.timings ? result.timings : current.timings || result?.timings;
+        const elapsedSeconds = timings && (timings.active_stage || timings.finished)
+          ? timings.total_s + timingLiveExtra(timings, !terminal)
+          : startedAt > 0
           ? Math.max(0, ((finishedAt || clockNow.value) - startedAt) / 1000)
           : (!current.status || terminal) && Number.isFinite(resultElapsed) ? resultElapsed : null;
         return {
@@ -207,6 +290,7 @@ createApp({
           round: Number(current.round || 0),
           stageRank: current.stage_rank ?? progressStageRank(current),
           elapsedSeconds,
+          timings,
           events,
           latestEvents: events.slice(-2),
         };
@@ -226,16 +310,17 @@ createApp({
       if (index == null) return;
       const existing = itemProgress.value[index] || {};
       if (incoming.sequence != null && existing.sequence != null && incoming.sequence <= existing.sequence) return;
-      appendProgressEvent(incoming);
+      if (!incoming.timing_update) appendProgressEvent(incoming);
       const newAttempt = incoming.request_id && incoming.request_id !== existing.request_id;
       const previous = newAttempt ? {} : existing;
       const previousRank = previous.stage_rank ?? progressStageRank(previous);
       const incomingRank = progressStageRank(incoming);
-      const terminal = incoming.status === "done" || incoming.status === "error";
+      const terminal = ["done", "error", "paused"].includes(incoming.status);
       const updatedAt = Date.parse(incoming.updated_at || "");
       itemProgress.value[index] = {
         ...previous,
         ...incoming,
+        ...(incoming.timings ? { timings: { ...incoming.timings, _received_at: Date.now() } } : {}),
         // 同一次请求的阶段只前进；补跑使用新的 request_id 重新计时。
         stage_rank: incoming.status === "done"
           ? 4
@@ -284,6 +369,7 @@ createApp({
     }
 
     function progressDisplay(row) {
+      if (selectedTaskStatus.value === "paused" && !["done", "error"].includes(row.status)) return "已暂停，等待继续执行";
       const message = row.message || "排队中";
       const parts = [];
       if (row.judge && !message.includes(row.judge)) parts.push(row.judge);
@@ -294,6 +380,7 @@ createApp({
     }
 
     function progressStageLabel(row) {
+      if (selectedTaskStatus.value === "paused" && !["done", "error"].includes(row.status)) return "暂停";
       if (row.status === "error") return "失败";
       if (row.status === "done") return "完成";
       return progressStages[Math.max(0, Math.min(4, row.stageRank))];
@@ -369,6 +456,20 @@ createApp({
       return `${Math.floor(whole / 60)}m ${String(whole % 60).padStart(2, "0")}s`;
     }
 
+    function timingStageLabel(stage) {
+      return ({ media: "图片 / 视频处理", media_queue: "等待媒体处理", request_wait: "等待调用额度",
+        model: "模型与网络传输", retry_wait: "重试等待", other: "其他处理" })[stage] || "";
+    }
+
+    function timingEntries(timings, live = false) {
+      if (!timings) return [];
+      const extra = timingLiveExtra(timings, live);
+      return ["media_queue", "media", "request_wait", "model", "retry_wait", "other"].map(stage => ({
+        key: stage, label: timingStageLabel(stage),
+        seconds: Number(timings[`${stage}_s`] || 0) + (stage === timings.active_stage ? extra : 0),
+      }));
+    }
+
     function shortRequestId(requestId) {
       if (!requestId) return "等待生成";
       return requestId.length > 12 ? `…${requestId.slice(-11)}` : requestId;
@@ -433,7 +534,7 @@ createApp({
           { key: "has_conflict", label: "内容冲突" },
           { key: "needs_human_review", label: "需人工复核" },
           { key: "rationale", label: "理由" },
-          { key: "latency_s", label: "耗时" },
+          { key: "latency_s", label: "总耗时" },
         ];
       // rich_content（默认）
       return [
@@ -460,11 +561,12 @@ createApp({
         { key: "problem_solved_reason", label: "评价原因" },
         { key: "answer_issues", label: "回答内容问题" },
         { key: "rationale", label: "识别结论" },
-        { key: "latency_s", label: "耗时" },
+        { key: "latency_s", label: "总耗时" },
       ];
     });
 
     function columnWidth(c) {
+      if (c.key === "latency_s") return 120;
       const compact = [
         "latency_s", "card_presence", "card_count", "superlink_presence",
         "superlink_count", "answer_coverage", "needs_review", "problem_solved",
@@ -591,6 +693,7 @@ createApp({
 
     function switchMode(k) {
       datasetImportVersion++;
+      importReport.value = null;
       opPreparing.value=false;
       datasetSourceTaskId.value = "";
       datasetBaseline = "";
@@ -636,6 +739,7 @@ createApp({
             [`video${n}Path`,item[`video${n}`] || ''], [`screenshot${n}Path`,item[`screenshot${n}`] || ''],
             [`answer${n}`,item[`answer${n}`] || ''], [`context${n}`,item[`context${n}`] || ''],
             [`screenshotMeta${n}`,item[`screenshot_meta${n}`] || {}],
+            [`videoSource${n}`,item[`video_source${n}`] || {}],
           ])), taskStartTime:item.task_start_time ?? null, taskEndTime:item.task_end_time ?? null,
           sourceLine:item.source_line ?? null, sourceData:raw.source_data || null,
           sessionGroup:item.session_group ?? null, turnIndex:item.turn_index ?? null};
@@ -643,6 +747,7 @@ createApp({
     }
     function detachResultView() {
       closeActiveStream();taskId.value='';results.value=[];summary.value=null;
+      selectedTaskTiming.value = null;
       itemProgress.value={};progressEvents.value={};running.value=false;selectedTaskStatus.value='';
       repairStatus.value='idle';activeRetry.value=null;selectedRetryIndexes.value=[];
       runError.value='';queueNotice.value='';progress.value=0;total.value=0;
@@ -653,7 +758,7 @@ createApp({
       items.value=JSON.parse(JSON.stringify(data.items));
       opItems.value=comparisonDraftRows(items.value);
       datasetName.value=data.dataset_name || '历史测评数据';datasetSourceTaskId.value=data.task_id;
-      opPage.value=1;errors.value=[];datasetBaseline=draftFingerprint();datasetRevision.value++;
+      opPage.value=1;errors.value=[];importReport.value=null;datasetBaseline=draftFingerprint();datasetRevision.value++;
     }
     async function onQueryImage(event, index) {
       const item = opItems.value[index];
@@ -724,6 +829,7 @@ createApp({
       const importMode = mode.value;
       opPreparing.value = true;
       errors.value = [];
+      importReport.value = null;
       try {
         const content = await file.text();
         const isCsv = /\.csv$/i.test(file.name || "");
@@ -739,15 +845,21 @@ createApp({
         const parsed = await parseResponse.json().catch(() => ({}));
         if (importVersion !== datasetImportVersion || importMode !== mode.value) return;
         console.log("[onOpManifestFile] response ok:", parseResponse.ok, "items:", (parsed.items || []).length, "errors:", (parsed.errors || []).length);
-        if (!parseResponse.ok) throw new Error(parsed.detail || (isCsv ? "CSV 解析请求失败" : "JSONL 解析请求失败"));
+        if (!parseResponse.ok) throw new Error(parsed.detail || (isCsv ? "CSV 解析请求失败" : "JSON / JSONL 解析请求失败"));
         const importErrors = [...(parsed.errors || [])];
+        const report = {filename: file.name || '', accepted: (parsed.items || []).length,
+          rejected: parsed.rejected_count ?? importErrors.length,
+          screenshots: parsed.evidence_counts?.long_screenshot ?? (parsed.items || []).filter(it => it.evidence_mode === 'long_screenshot').length,
+          videos: parsed.evidence_counts?.video_frames ?? (parsed.items || []).filter(it => it.evidence_mode === 'video_frames').length};
         if (!(parsed.items || []).length) {
-          errors.value = importErrors.length ? importErrors : ["JSONL 中没有可导入的数据"];
+          importReport.value = report;
+          errors.value = importErrors.length ? importErrors : ["文件中没有可导入的数据"];
           console.warn("[onOpManifestFile] no items parsed");
           return;
         }
 
         if (mode.value === 'compare' && !confirmDatasetReplacement()) return;
+        importReport.value = report;
         if (mode.value === 'compare') { cancelHistoryLoad();detachResultView(); }
         datasetName.value = file.name || '';
         datasetSourceTaskId.value = '';
@@ -804,19 +916,12 @@ createApp({
     function opItemReady(it) {
       if (!it.query.trim()) return false;
       if (mode.value !== "compare") return Boolean((it.frames || []).length || it.videoPath);
-      const productCount = Number(it.productCount) === 3 ? 3 : 2;
-      if (it.evidenceMode === "long_screenshot") {
-        return Boolean(it.screenshot1Path && it.screenshot2Path && (productCount === 2 || it.screenshot3Path));
-      }
-      return Boolean(
-        (it.video1Path || it.videoPath)
-        && it.video2Path
-        && (productCount === 2 || it.video3Path)
-      );
+      return Boolean(selectEvidenceMode(it));
     }
 
     const canSubmit = computed(() =>
-      !opPreparing.value && !opItems.value.some(it => it.queryUploading) && opItems.value.some(opItemReady)
+      !opPreparing.value && !opItems.value.some(it => it.queryUploading)
+      && (mode.value === 'compare' ? opItems.value.length > 0 && opItems.value.every(opItemReady) : opItems.value.some(opItemReady))
     );
 
     async function submit() {
@@ -844,15 +949,10 @@ createApp({
           item.query_images = [...(it.queryImages || [])];
           const productCount = Number(it.productCount) === 3 ? 3 : 2;
           item.product_count = productCount;
-          if (it.evidenceMode === "long_screenshot") {
-            item.evidence_mode = "long_screenshot";
-            item.screenshot1 = it.screenshot1Path;
-            item.screenshot2 = it.screenshot2Path;
-            if (productCount === 3) item.screenshot3 = it.screenshot3Path;
-          } else {
-            item.video1 = it.video1Path || it.videoPath || "";
-            item.video2 = it.video2Path || "";
-            if (productCount === 3) item.video3 = it.video3Path || "";
+          item.evidence_mode = selectEvidenceMode(it);
+          const evidencePrefix = item.evidence_mode === 'long_screenshot' ? 'screenshot' : 'video';
+          for (let n = 1; n <= productCount; n++) {
+            item[`${evidencePrefix}${n}`] = it[`${evidencePrefix}${n}Path`].trim();
           }
           item.context1 = (it.context1 || "").trim();
           item.context2 = (it.context2 || "").trim();
@@ -945,6 +1045,10 @@ createApp({
       );
       running.value = true;
       taskId.value = d.task_id;
+      executionControl.value = {};
+      selectedActiveRuns.value = 1;
+      resumeConcurrency.value = concurrency.value;
+      selectedTaskTiming.value = receiveTaskTiming(d.task_timing);
       repairStatus.value = "idle";
       activeRetry.value = null;
       selectedRetryIndexes.value = [];
@@ -1011,6 +1115,10 @@ createApp({
         if (response.ok) snapshot = await response.json();
       } catch (_) {}
       if (viewVersion !== historyLoadVersion || taskId.value !== errorTaskId) return false;
+      updateTaskTiming(snapshot?.task_timing);
+      executionControl.value = snapshot?.execution_control || {};
+      selectedActiveRuns.value = snapshot?.active_runs || 0;
+      if (snapshot?.status) selectedTaskStatus.value = snapshot.status;
       const snapshotResults = snapshot?.results || results.value;
       const resultByIndex = new Map(snapshotResults.map((entry) => [entry.index, entry]));
       const snapshotProgress = snapshot?.item_progress || {};
@@ -1044,7 +1152,7 @@ createApp({
       results.value = snapshotResults;
       refreshEvidence(snapshotResults);
       progress.value = snapshotResults.length;
-      itemProgress.value = reconciled;
+      itemProgress.value = receiveProgress(reconciled);
       if (snapshot?.summary) summary.value = snapshot.summary;
       return true;
     }
@@ -1052,6 +1160,33 @@ createApp({
     function closeActiveStream() {
       if (activeEventSource) activeEventSource.close();
       activeEventSource = null;
+    }
+
+    async function controlTask(action) {
+      const id = taskId.value, version = historyLoadVersion;
+      if (!id || controlSubmitting.value || loadingTaskId.value) return;
+      if (action === "resume" && (!Number.isInteger(resumeConcurrency.value) || resumeConcurrency.value < 1 || resumeConcurrency.value > 128)) {
+        runError.value = "恢复并发数必须为 1–128 的整数";
+        return;
+      }
+      controlSubmitting.value = true;
+      runError.value = "";
+      try {
+        const response = await fetch(`/api/eval/${encodeURIComponent(id)}/${action}`, {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          ...(action === "resume" ? {body: JSON.stringify({concurrency: resumeConcurrency.value, include_failed: resumeFailed.value, idempotency_key: `resume-${Date.now()}-${Math.random().toString(16).slice(2)}`})} : {}),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : "操作失败，请刷新后重试");
+        if (id !== taskId.value || version !== historyLoadVersion || disposed) return;
+        await loadHistoryTask(id);
+        await loadQueue();
+        await loadHistory();
+      } catch (error) {
+        if (id === taskId.value && version === historyLoadVersion) runError.value = error.message || "操作失败";
+      } finally {
+        controlSubmitting.value = false;
+      }
     }
 
     function connectSSE(streamTaskId = taskId.value) {
@@ -1063,9 +1198,17 @@ createApp({
         if (!isSelected()) return;
         const data = JSON.parse(e.data);
         // 一次恢复结果和当前进度，旧结果不能覆盖正在补跑的状态。
+        updateTaskTiming(data.task_timing);
+        executionControl.value = data.execution_control || {};
+        selectedActiveRuns.value = data.active_runs || 0;
+        if (data.status) {
+          selectedTaskStatus.value = data.status;
+          running.value = ["pending", "queued", "running"].includes(data.status);
+          if (data.status !== "queued") queueNotice.value = "";
+        }
         results.value = data.results || [];
         refreshEvidence(results.value);
-        itemProgress.value = data.item_progress || {};
+        itemProgress.value = receiveProgress(data.item_progress);
         progressEvents.value = {};
         progress.value = data.progress;
         repairStatus.value = data.repair_status || "idle";
@@ -1076,11 +1219,13 @@ createApp({
         const data = JSON.parse(e.data);
         progressEvents.value[data.item_index] = normalizeProgressEvents(data.events);
       });
-      es.addEventListener("start", () => {
+      es.addEventListener("start", (e) => {
         if (!isSelected()) return;
+        updateTaskTiming(JSON.parse(e.data || "{}").task_timing);
         selectedTaskStatus.value = "running";
         queueNotice.value = "";
         running.value = true;
+        selectedActiveRuns.value = 1;
         loadQueue();
       });
       es.addEventListener("item_progress", (e) => {
@@ -1145,6 +1290,9 @@ createApp({
       es.addEventListener("done", (e) => {
         if (!isSelected()) return;
         const doneData = JSON.parse(e.data);
+        executionControl.value = doneData.execution_control || {};
+        selectedActiveRuns.value = 0;
+        updateTaskTiming(doneData.task_timing);
         summary.value = doneData.summary;
         if (doneData.retry) {
           activeRetry.value = doneData.retry;
@@ -1168,10 +1316,12 @@ createApp({
         let message = "未知错误";
         try {
           const d = JSON.parse(e.data);
+          updateTaskTiming(d.task_timing);
           message = d.message || message;
         } catch (_) {}
         running.value = false;
         selectedTaskStatus.value = "error";
+        selectedActiveRuns.value = 0;
         queueNotice.value = "";
         es.close();
         if (activeEventSource === es) activeEventSource = null;
@@ -1184,9 +1334,13 @@ createApp({
         if (!isSelected()) return;
         let message = "排队任务已取消";
         try {
-          message = JSON.parse(e.data).message || message;
+          const data = JSON.parse(e.data);
+          updateTaskTiming(data.task_timing);
+          message = data.message || message;
         } catch (_) {}
         running.value = false;
+        selectedActiveRuns.value = 0;
+        executionControl.value = {};
         selectedTaskStatus.value = "cancelled";
         queueNotice.value = message;
         es.close();
@@ -1197,7 +1351,30 @@ createApp({
       es.addEventListener("retry_cancelled", () => {
         if (!isSelected()) return;
         repairStatus.value = "cancelled";
+        selectedActiveRuns.value = 0;
         queueNotice.value = "失败补跑已取消";
+        es.close();
+        if (activeEventSource === es) activeEventSource = null;
+        loadQueue();
+        loadHistory();
+      });
+      es.addEventListener("pausing", (e) => {
+        if (!isSelected()) return;
+        const data = JSON.parse(e.data);
+        executionControl.value = data.execution_control || {state: "pausing"};
+        updateTaskTiming(data.task_timing);
+      });
+      es.addEventListener("paused", (e) => {
+        if (!isSelected()) return;
+        const data = JSON.parse(e.data);
+        executionControl.value = data.execution_control || {state: "paused"};
+        selectedTaskStatus.value = "paused";
+        selectedActiveRuns.value = 0;
+        running.value = false;
+        if (["queued", "running"].includes(repairStatus.value)) repairStatus.value = "paused";
+        updateTaskTiming(data.task_timing);
+        summary.value = data.summary || summary.value;
+        queueNotice.value = "已暂停，已完成记录已保存。";
         es.close();
         if (activeEventSource === es) activeEventSource = null;
         loadQueue();
@@ -1208,7 +1385,7 @@ createApp({
     function cell(r, c) {
       const v = r[c.key];
       if (c.key === "category") return r.category_display || (!v || v === "default" ? "通用" : v);
-      if (c.key === "latency_s") return v != null ? v + "秒" : "";
+      if (c.key === "latency_s") return r.total_s != null ? r.total_s + "秒" : v != null ? v + "秒（旧记录）" : "";
       if (["input_status_summary", "response_gate_summary", "safety_gate_summary"].includes(c.key)) {
         const field = c.key.replace("_summary", "");
         const labels = { complete: "完整", partial: "不完整", failed: "失败", pass: "通过", fail: "失败", unclear: "不清楚" };
@@ -1310,17 +1487,24 @@ createApp({
     }
 
     async function loadHistory() {
+      const version = ++historyListVersion;
       loadingHistory.value = true;
       try {
         const r = await fetch("/api/history?limit=50");
+        if (!r.ok) return;
         const d = await r.json();
-        historyItems.value = d.items || [];
+        if (version !== historyListVersion) return;
+        historyItems.value = (d.items || []).map(item => ({ ...item, task_timing: receiveTaskTiming(item.task_timing) }));
+        const selected = historyItems.value.find(item => item.task_id === taskId.value);
+        if (selected) updateTaskTiming(selected.task_timing);
         historyNoteDrafts.value = Object.fromEntries(
-          historyItems.value.map((item) => [item.task_id, item.note || ""]),
+          historyItems.value.map((item) => [item.task_id,
+            historyNoteEditing.value[item.task_id] ? historyNoteDrafts.value[item.task_id] : item.note || ""]),
         );
-        historyNoteEditing.value = {};
+        historyNoteEditing.value = Object.fromEntries(historyItems.value
+          .filter(item => historyNoteEditing.value[item.task_id]).map(item => [item.task_id, true]));
       } finally {
-        loadingHistory.value = false;
+        if (version === historyListVersion) loadingHistory.value = false;
       }
     }
 
@@ -1329,11 +1513,61 @@ createApp({
         const response = await fetch("/api/queue");
         if (!response.ok) return;
         const data = await response.json();
+        const previousRunning = queueState.value.running;
+        const previousQueued = queueState.value.queued || [];
         queueState.value = {
           running: data.running || null,
           queued: data.queued || [],
         };
+        const selected = queueEntries.value.find(item => item.task_id === taskId.value);
+        if (selected) {
+          updateTaskTiming(selected.task_timing);
+          if (selected.kind !== "retry" && selectedTaskStatus.value !== "paused") {
+            selectedTaskStatus.value = selected.status;
+            running.value = ["pending", "queued", "running"].includes(selected.status);
+            if (selected.status !== "queued") queueNotice.value = "";
+          }
+        }
+        historyItems.value = historyItems.value.map(item => {
+          const active = queueEntries.value.find(entry => entry.task_id === item.task_id);
+          return active ? { ...item, task_timing: receiveTaskTiming(active.task_timing),
+            ...(active.kind === "retry" ? {} : { status: active.status }) } : item;
+        });
+        const jobKey = entry => entry?.job_id || entry?.task_id;
+        const currentKeys = new Set(queueEntries.value.map(jobKey));
+        if (jobKey(previousRunning) !== jobKey(queueState.value.running)
+            || previousQueued.some(entry => !currentKeys.has(jobKey(entry)))) {
+          await loadHistory().catch(() => {});
+        }
+        await loadRequestPacing();
       } catch (_) {}
+    }
+
+    async function loadRequestPacing() {
+      if (disposed) return;
+      if (!judges.value.some((judge) => judge.request_pacing)
+          || !(queueState.value.running || running.value || repairStatus.value === "running")) {
+        pacingStatus.value = null;
+        pacingError.value = "";
+        return;
+      }
+      if (pacingLoading || (typeof document !== "undefined" && document.hidden)) return;
+      pacingLoading = true;
+      try {
+        const response = await fetch("/api/request-pacing", { cache: "no-store" });
+        if (!response.ok) throw new Error("调度状态暂不可用");
+        const data = await response.json();
+        if (disposed || !(queueState.value.running || running.value || repairStatus.value === "running")) return;
+        pacingStatus.value = data.enabled && data.active ? data.controller : null;
+        pacingError.value = "";
+      } catch (_) {
+        if (!disposed && (queueState.value.running || running.value || repairStatus.value === "running")) {
+          pacingStatus.value = null;
+          pacingError.value = "调度状态暂不可用；任务继续执行。";
+        }
+      } finally {
+        pacingLoading = false;
+      }
     }
 
     async function cancelQueuedTask(entry) {
@@ -1414,6 +1648,7 @@ createApp({
       }
       if (taskId.value === id) {
         taskId.value = "";
+        selectedTaskTiming.value = null;
         results.value = [];
         summary.value = null;
       }
@@ -1451,6 +1686,7 @@ createApp({
         loaded = true;
         closeActiveStream();
         taskId.value = d.task_id || id;
+        selectedTaskTiming.value = receiveTaskTiming(d.task_timing);
         mode.value = d.mode;
         if (d.mode === "compare") {
           selectedEvaluationProfile.value = d.evaluation_profile || defaultEvaluationProfile();
@@ -1481,11 +1717,15 @@ createApp({
         modalityFilter.value = "";
         results.value = d.results || [];
         refreshEvidence(results.value);
-        itemProgress.value = d.item_progress || {};
+        itemProgress.value = receiveProgress(d.item_progress);
         restoreProgressEvents(d.progress_events);
         expandedProgressLogs.value = {};
         summary.value = d.summary || null;
         repairStatus.value = d.repair_status || "idle";
+        executionControl.value = d.execution_control || {};
+        selectedActiveRuns.value = d.active_runs || 0;
+        resumeConcurrency.value = Number(executionControl.value.concurrency || d.options?.concurrency || 4);
+        resumeFailed.value = false;
         const retryRuns = Object.values(d.retry_runs || {});
         activeRetry.value = retryRuns.sort(
           (a, b) => Number(b.created_at || 0) - Number(a.created_at || 0)
@@ -1500,7 +1740,7 @@ createApp({
         resultPage.value = 1;
         progressPage.value = 1;
         if (mode.value !== "compare" && skillTabs.value.length) activeSkill.value = skillTabs.value[0].key;
-        if (running.value || ["queued", "running"].includes(repairStatus.value)) connectSSE(taskId.value);
+        if (running.value || selectedActiveRuns.value || ["queued", "running"].includes(repairStatus.value)) connectSSE(taskId.value);
         nextTick(() => resultBrowser.value && resultBrowser.value.scrollIntoView({ behavior: "smooth", block: "start" }));
       } catch (error) {
         if (version === historyLoadVersion && error?.name !== "AbortError") {
@@ -1587,9 +1827,12 @@ createApp({
       const r = await fetch("/api/config");
       const d = await r.json();
       judges.value = d.judges || [];
+      mediaConcurrency.value = d.media_concurrency || 4;
       evaluationProfiles.value = d.evaluation_profiles || [];
       selectedEvaluationProfile.value = defaultEvaluationProfile();
       selectedJudges.value = defaultJudgeSelection();
+      const selectedJudge = judges.value.find((j) => j.name === selectedJudges.value[0]);
+      concurrency.value = selectedJudge?.recommended_concurrency || 4;
       loadHistory();
       loadQueue();
       queueRefreshTimer = window.setInterval(loadQueue, 2000);
@@ -1605,11 +1848,14 @@ createApp({
     });
 
     return {
-      modes, mode, modeLabel, isVideoMode, items, errors, judges, visibleJudges, selectedJudges, datasetName,
+      modes, mode, modeLabel, isVideoMode, items, errors, importReport, judges, visibleJudges, selectedJudges, datasetName,
       datasetSourceTaskId, datasetRevision, useComparisonDataset,
       evaluationProfiles, compareProfiles, selectedEvaluationProfile, evaluationProfileLabel,
-      concurrency, evalTimeout, submitting, running, progress, total, results, summary, taskId, runError,
+      concurrency, mediaConcurrency, requestPacing, evalTimeout, submitting, running, progress, total, results, summary, taskId, runError,
+      pacingStatus, pacingError, pacingNumber, pacingWaitLabel, pacingLimitLabel,
       queueState, queueEntries, selectedTaskStatus, queueNotice, taskStatusLabel, queueKindLabel,
+      selectedTaskTiming, taskElapsedSeconds, formatTaskDuration,
+      executionControl, controlSubmitting, resumeConcurrency, resumeFailed, isPausing, canPauseTask, canResumeTask, controlTask,
       repairStatus, retryStatusLabel, retrySubmitting, selectedRetryIndexes, activeRetry,
       failedResultIndexes, retryIndexSelected, toggleRetryIndex, retryFailedCases,
       itemProgress, progressEvents, expandedProgressLogs, pagedProgressRows, progressStages,
@@ -1630,7 +1876,7 @@ createApp({
       changeProgressPage, changeOpPage, changeResultPageSize, paginationPages, setTablePage, jumpTablePage,
       progressStageClass, progressDisplay, progressStageLabel, progressStatusClass,
       progressMeta, formatProgressEventTime, progressEventMeta, progressEventMessage, scrollProgressLog,
-      formatProgressElapsed, shortRequestId, copyRequestId,
+      formatProgressElapsed, timingEntries, timingStageLabel, shortRequestId, copyRequestId,
       cellTooltip, showCellTooltip, scheduleHideCellTooltip, keepCellTooltip, hideCellTooltip,
     };
   },

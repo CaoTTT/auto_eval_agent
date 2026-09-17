@@ -21,6 +21,12 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 
+from ..judges.compare_protocols import (
+    DEFAULT_COMPARE_PROTOCOL_ID,
+    V02_CALIBRATED_COMPARE_PROTOCOL_ID,
+    V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID,
+    V03_COMPARE_PROTOCOL_ID,
+)
 from ..paths import PROJECT_ROOT, RUNS_DIR
 from .compare_statistics import SHEET_NAME as COMPARE_STATISTICS_SHEET, build_compare_statistics
 from .compare_statistics_xlsx import statistics_cell_styles, statistics_sheet_xml
@@ -95,6 +101,21 @@ def _task_path(task_id: str, session_name: str = "") -> Path:
     return _find_task_path(task_id)
 
 
+def snapshot_task_timing(data: dict, *, interrupted: bool = False) -> dict:
+    """Keep measured execution time separate from mutable history timestamps."""
+    timing = {
+        "started_at": None, "finished_at": None, "elapsed_s": None,
+        "running": False, "measured_at": None, "incomplete": False,
+        **(data.get("task_timing") or {}),
+    }
+    if interrupted and timing.get("running"):
+        # After a process loss only the last saved measurement is known.
+        timing["finished_at"] = timing.get("measured_at") or data.get("updated_at")
+        timing["running"] = False
+        timing["incomplete"] = True
+    return timing
+
+
 def task_to_snapshot(task) -> dict:
     return {
         "task_id": task.id,
@@ -112,11 +133,16 @@ def task_to_snapshot(task) -> dict:
         "progress_events": task.progress_events,
         "summary": task.summary,
         "created_at": task.created_at,
+        "task_timing": (
+            task.timing_snapshot() if callable(getattr(task, "timing_snapshot", None))
+            else snapshot_task_timing({"task_timing": getattr(task, "task_timing", {})})
+        ),
         "updated_at": time.time(),
         "done_total": task.done_total,
         "error": task.error,
         "repair_status": getattr(task, "repair_status", "idle"),
         "retry_runs": getattr(task, "retry_runs", {}),
+        "execution_control": getattr(task, "execution_control", {}),
     }
 
 
@@ -205,22 +231,39 @@ def _apply_interrupted_status(status, error):
 
 
 def _snapshot_evaluation_profile(data: dict) -> str:
+    """恢复任务冻结的协议；无版本旧记录沿用原有 V0.2/V0.3 回退。"""
     explicit = data.get("evaluation_profile") or (data.get("options") or {}).get(
         "evaluation_profile"
     )
     if explicit or data.get("mode") != "compare":
         return explicit or ""
+    manifest = data.get("protocol_manifest") or {}
+    if manifest.get("id"):
+        return manifest["id"]
+    results = data.get("results") or []
+    result_profiles = {
+        result["evaluation_profile"]
+        for result in results
+        if result.get("evaluation_profile")
+    }
+    if len(result_profiles) == 1:
+        return next(iter(result_profiles))
     versions = [
+        str(manifest.get("standard_version") or ""),
         str((data.get("summary") or {}).get("standard_version") or ""),
         *[
             str(result.get("standard_version") or "")
-            for result in (data.get("results") or [])
+            for result in results
         ],
     ]
+    if "0.2-simplified-thinking-exposure" in versions:
+        return V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID
+    if "0.2-simplified-calibrated" in versions:
+        return V02_CALIBRATED_COMPARE_PROTOCOL_ID
     return (
-        "qa_competitor_compare@0.3"
+        V03_COMPARE_PROTOCOL_ID
         if "0.3" in versions
-        else "qa_competitor_compare@0.2-simplified"
+        else DEFAULT_COMPARE_PROTOCOL_ID
     )
 
 
@@ -250,6 +293,7 @@ def _snapshot_meta_row(data: dict, path: Path) -> dict:
         "total": len(data.get("items") or []),
         "done": len([r for r in latest_results.values() if not r.get("error")]),
         "created_at": created_at,
+        "task_timing": snapshot_task_timing(data),
         "updated_at": data.get("updated_at") or data.get("created_at"),
         "error": data.get("error"),
         "repair_status": data.get("repair_status") or "idle",
@@ -301,6 +345,7 @@ def _load_meta_row(path: Path) -> dict | None:
     status, error = _apply_interrupted_status(row.get("status"), row.get("error"))
     row["status"] = status
     row["error"] = error
+    row["task_timing"] = snapshot_task_timing(row, interrupted=True)
     if row.get("repair_status") in {"queued", "running"}:
         row["repair_status"] = "error"
     return row
@@ -343,10 +388,13 @@ def snapshot_payload(data: dict) -> dict:
         "progress_events": data.get("progress_events") or {},
         "summary": data.get("summary") or {},
         "created_at": data.get("created_at"),
+        "task_timing": snapshot_task_timing(data),
         "updated_at": data.get("updated_at"),
         "error": data.get("error"),
         "repair_status": data.get("repair_status") or "idle",
         "retry_runs": data.get("retry_runs") or {},
+        "execution_control": data.get("execution_control") or {},
+        "active_runs": data.get("active_runs", 0),
     }
 
 
@@ -378,8 +426,9 @@ def export_rows(snapshot: dict) -> dict[str, list[dict]]:
         result_rows = _visual_compare_export_rows(aligned_results)
     else:
         result_rows = _result_rows(aligned_results)
+    dataset_rows = _dataset_rows(snapshot, include_extra=False)
     rows: dict[str, list[dict]] = {
-        "数据集明细": _dataset_rows(snapshot),
+        "数据集明细": dataset_rows,
         "逐题结果": result_rows,
     }
     frame_rows = _frame_manifest_rows(snapshot)
@@ -398,6 +447,10 @@ def export_rows(snapshot: dict) -> dict[str, list[dict]]:
     rows["运行信息"] = [_run_info(snapshot)]
     if summary:
         rows["汇总指标"] = [_flatten_dict(summary, skip_keys={"by_category"})]
+    extra_columns = _extra_input_columns(snapshot, dataset_rows=dataset_rows, result_rows=result_rows)
+    items = snapshot.get("items") or []
+    _append_extra_input_values(dataset_rows, items, extra_columns)
+    _append_extra_input_values(result_rows, items, extra_columns)
     return rows
 
 
@@ -576,10 +629,104 @@ def _source_data_for_item(item: dict) -> dict:
     }
 
 
+# Exact names consumed by input normalization. Do not exclude by prefix:
+# sessionid, video3_sessionid, metadata, etc. remain ordinary source fields.
+_COMMON_INPUT_FIELDS = {
+    "id", "query", "question", "context", "category",
+    "task_start_time", "task_end_time", "content_start_time", "content_end_time",
+}
+_CSV_INPUT_FIELDS = {
+    "index", "is_start", "is_end", "开始时间", "结束时间", "文件路径", "回复内容",
+    "开始时间节点", "位置信息",
+}
+_COMPARE_INPUT_FIELDS = {
+    "product_count", "evidence_mode", "query_images", "input_modality",
+    *(f"{prefix}{number}" for prefix in ("video", "screenshot", "answer", "context")
+      for number in (1, 2, 3)),
+}
+_RICH_CONTENT_INPUT_FIELDS = {"video_path", "answer_text"}
+_DERIVED_INPUT_FIELDS = {"source_line", "session_group", "turn_index"}
+_QUERY_EXPORT_FIELDS = {
+    "题型", "提问图片", "提问图片元数据", "输入指纹", "输入图片原图",
+    "query_image_meta", "input_manifest_sha256", "error",
+    "产品1原图", "产品2原图", "产品3原图",
+}
+
+
+def _consumed_input_fields(item: dict, mode: str | None) -> set[str]:
+    fields = _COMMON_INPUT_FIELDS | (
+        _COMPARE_INPUT_FIELDS if mode == "compare"
+        else _RICH_CONTENT_INPUT_FIELDS if mode == "rich_content"
+        else _COMPARE_INPUT_FIELDS | _RICH_CONTENT_INPUT_FIELDS
+    )
+    # Only CSV normalization generates this group. An uploaded JSON sessionid
+    # is unrelated, and JSON's arbitrary `index` is not a consumed input field.
+    if str(item.get("session_group", "")).startswith("csv-sess-"):
+        fields |= _CSV_INPUT_FIELDS
+    if not isinstance(item.get("source_data"), dict):
+        # Legacy normalized items contain parser bookkeeping, not original
+        # business fields. Explicit same-name source_data fields still export.
+        fields |= _DERIVED_INPUT_FIELDS
+    return fields
+
+
+def _extra_input_columns(snapshot: dict, *, dataset_rows: list[dict] | None = None,
+                         result_rows: list[dict] | None = None) -> dict[str, str]:
+    """One source-key -> column map shared by every row and export format."""
+    keys = dict.fromkeys(
+        key for item in snapshot.get("items") or []
+        for key in _source_data_for_item(item)
+        if key not in _consumed_input_fields(item, snapshot.get("mode"))
+    )
+    if not keys:
+        return {}
+    if dataset_rows is None:
+        dataset_rows = _dataset_rows(snapshot, include_extra=False)
+    mode = snapshot.get("mode")
+    template_rows = (
+        _visual_compare_export_rows([{}]) if mode == "compare"
+        else _rich_content_export_rows([{}]) if mode == "rich_content"
+        else _result_rows(_aligned_results(snapshot, _results_with_identity(snapshot)))
+    )
+    reserved = set(_headers(dataset_rows)) | set(_headers(template_rows)) | _QUERY_EXPORT_FIELDS
+    if result_rows is not None:
+        reserved.update(_headers(result_rows))
+    columns: dict[str, str] = {}
+    for key in keys:
+        column = key if key not in reserved else f"输入字段.{key}"
+        base, suffix = column, 2
+        while column in reserved or (column != key and column in keys):
+            column = f"{base}（{suffix}）"
+            suffix += 1
+        columns[key] = column
+        reserved.add(column)
+    return columns
+
+
+def _extra_input_value(value: Any) -> Any:
+    """Distinguish explicit null from a missing field and retain identifier precision."""
+    if value is None or isinstance(value, float) and not math.isfinite(value):
+        return "null"
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, int) and not isinstance(value, bool) and abs(value) >= 10 ** 15:
+        return str(value)  # Excel numeric cells retain only 15 significant digits.
+    return value
+
+
+def _append_extra_input_values(rows: list[dict], items: list[dict], columns: dict[str, str]) -> None:
+    for row, item in zip(rows, items):
+        source = _source_data_for_item(item)
+        for key, column in columns.items():
+            row[column] = _extra_input_value(source[key]) if key in source else ""
+
+
 def _item_visual_streams(item: dict) -> list[dict[str, Any]]:
     """统一返回 rich_content 单路或 compare 双/三路视频及关键帧。"""
     source = _source_data_for_item(item)
-    if item.get("evidence_mode") == "long_screenshot" or item.get("screenshot1") or source.get("screenshot1"):
+    if item.get("evidence_mode") == "long_screenshot" or (
+        not item.get("evidence_mode") and (item.get("screenshot1") or source.get("screenshot1"))
+    ):
         count = item.get("product_count") or (3 if item.get("screenshot3") or source.get("screenshot3") else 2)
         streams = []
         for product_no in range(1, count + 1):
@@ -604,6 +751,7 @@ def _item_visual_streams(item: dict) -> list[dict[str, Any]]:
             "product_no": None,
             "source_video": source.get("video_path") or item.get("video_path") or "",
             "runtime_video": item.get("video_path") or (media[0] if media else ""),
+            "video_source": item.get("video_source") or {},
             "frames": [Path(str(path)) for path in (item.get("frames") or [])],
             "duration": item.get("duration") or "",
         }]
@@ -621,6 +769,7 @@ def _item_visual_streams(item: dict) -> list[dict[str, Any]]:
             "evidence_mode": "video_frames",
             "product_no": product_no,
             "source_video": source.get(f"video{product_no}") or "",
+            "video_source": item.get(f"video_source{product_no}") or {},
             "runtime_video": item.get(f"video{product_no}_path") or (
                 media[product_no - 1] if len(media) >= product_no else ""
             ),
@@ -633,7 +782,7 @@ def _item_visual_streams(item: dict) -> list[dict[str, Any]]:
     return streams
 
 
-def _dataset_rows(snapshot: dict) -> list[dict]:
+def _dataset_rows(snapshot: dict, *, include_extra: bool = True) -> list[dict]:
     rows: list[dict] = []
     for index, item in enumerate(snapshot.get("items") or []):
         source = _source_data_for_item(item)
@@ -644,7 +793,7 @@ def _dataset_rows(snapshot: dict) -> list[dict]:
             "query": item.get("query") or item.get("question") or "",
         }
         for key, value in source.items():
-            if key not in row:
+            if key in _consumed_input_fields(item, snapshot.get("mode")) and key not in row:
                 row[key] = value
 
         streams = _item_visual_streams(item)
@@ -683,6 +832,9 @@ def _dataset_rows(snapshot: dict) -> list[dict]:
                        query_image_meta=item.get("query_image_meta", []),
                        input_manifest_sha256=item.get("input_manifest_sha256", ""))
         rows.append(row)
+    if include_extra:
+        columns = _extra_input_columns(snapshot, dataset_rows=rows)
+        _append_extra_input_values(rows, snapshot.get("items") or [], columns)
     return rows
 
 
@@ -747,6 +899,7 @@ def _frame_manifest_rows(snapshot: dict) -> list[dict]:
                 "产品序号": product_no or "",
                 "录屏项目相对路径": _project_relative_path(stream["runtime_video"]),
                 "原始video_path": stream["source_video"],
+                "录屏内容SHA256": stream.get("video_source", {}).get("sha256", ""),
             }
             if not frames:
                 rows.append({
@@ -950,7 +1103,8 @@ def result_export_row(mode: str, result: dict, index: int, items: list[dict]) ->
     """单条 result → 与 xlsx/CSV「逐题结果」同名列、同转换的行。
 
     供 GET /api/eval/item/result 使用：键名与导出列完全一致，
-    多余字段不返回；失败结果额外附加 error。item_id/query 缺失时
+    评测内部字段不返回；原始扩展字段按整个数据集的列映射追加。
+    失败结果额外附加 error。item_id/query 缺失时
     按 index 从 items 回填，与导出的对齐逻辑保持一致。
     """
     row = dict(result)
@@ -966,6 +1120,8 @@ def result_export_row(mode: str, result: dict, index: int, items: list[dict]) ->
     )[0]
     if result.get("error"):
         export["error"] = result["error"]
+    columns = _extra_input_columns({"mode": mode, "items": items})
+    _append_extra_input_values([export], [item], columns)
     return export
 
 
@@ -1072,6 +1228,7 @@ def write_frames_zip(
                     "query": item.get("query") or item.get("question") or "",
                     "product_no": product_no,
                     "source_video_path": stream["source_video"],
+                    "source_video_sha256": stream.get("video_source", {}).get("sha256", ""),
                     "video_project_path": _project_relative_path(
                         stream["runtime_video"],
                         project_root,
@@ -1261,35 +1418,34 @@ def _compare_snapshot_uses_product3(snapshot: dict) -> bool:
 
 
 def _original_screenshot_rows(snapshot: dict, images: WpsCellImages) -> list[dict]:
-    """一条输入一行、每个产品一列；原图缺失时不以切片或其他产品代替。"""
+    """导出所有提供的长截图原图，独立于实际评测使用的证据层。"""
     items = snapshot.get("items") or []
-    streams_by_item = [_item_visual_streams(item) for item in items]
-    screenshot_streams = [
-        stream for streams in streams_by_item for stream in streams
-        if stream["evidence_mode"] == "long_screenshot"
-    ]
-    if not screenshot_streams:
+    originals_by_item = []
+    for item in items:
+        source = _source_data_for_item(item)
+        originals = {}
+        for product_no in (1, 2, 3):
+            meta = item.get(f"screenshot_meta{product_no}") or {}
+            original = (meta.get("original_path") or item.get(f"screenshot{product_no}")
+                        or source.get(f"screenshot{product_no}"))
+            if isinstance(original, (str, Path)) and str(original).strip():
+                originals[product_no] = (str(PROJECT_ROOT / str(original).strip()), meta.get("original_sha256"))
+        originals_by_item.append(originals)
+    if not any(originals_by_item):
         return []
-    count = max(stream["product_no"] for stream in screenshot_streams)
+    count = 3 if (_compare_snapshot_uses_product3(snapshot)
+                  or any(3 in originals for originals in originals_by_item)) else 2
     rows = []
-    for index, (item, streams) in enumerate(zip(items, streams_by_item)):
+    for index, (item, originals) in enumerate(zip(items, originals_by_item)):
         row = {
             "数据集序号": index + 1, "id": item.get("id") or f"q{index}",
             "query": item.get("query") or item.get("question") or "",
             **{f"产品{n}原图": "" for n in range(1, count + 1)},
         }
-        for stream in streams:
-            product_no = stream["product_no"]
-            if product_no not in range(1, count + 1):
-                continue
+        for product_no, (path, expected_sha256) in originals.items():
             key = f"产品{product_no}原图"
-            if stream["evidence_mode"] != "long_screenshot":
-                row[key] = "录屏模式，无原始长截图"
-                continue
             try:
-                row[key] = images.add(
-                    stream["original_path"], stream["screenshot_meta"].get("original_sha256"),
-                )
+                row[key] = images.add(path, expected_sha256)
             except OriginalImageError as exc:
                 row[key] = str(exc)
         rows.append(row)
@@ -1297,7 +1453,7 @@ def _original_screenshot_rows(snapshot: dict, images: WpsCellImages) -> list[dic
 
 
 def build_xlsx(snapshot: dict) -> bytes:
-    """生成评分数据及 WPS 原始长截图页；图片按原字节嵌入，不影响正式评分列。"""
+    """原图只嵌入逐题结果，保留 WPS 单元格图片和原始字节。"""
     buf = BytesIO()
     write_xlsx(snapshot, buf)
     return buf.getvalue()
@@ -1316,13 +1472,14 @@ def _write_xlsx(snapshot: dict, destination) -> None:
         if snapshot.get("mode") == "compare" else []
     )
     if snapshot.get("mode") == "compare" and not _compare_snapshot_uses_product3(snapshot):
+        extra_headers = set(_extra_input_columns(snapshot).values())
         for sheet_name in ("数据集明细", "逐题结果"):
             if sheet_name in sheets:
                 sheets[sheet_name] = [
                     {
                         key: value
                         for key, value in row.items()
-                        if not str(key).startswith(_PRODUCT3_XLSX_COLUMN_PREFIXES)
+                        if key in extra_headers or not str(key).startswith(_PRODUCT3_XLSX_COLUMN_PREFIXES)
                     }
                     for row in sheets[sheet_name]
                 ]
@@ -1335,22 +1492,16 @@ def _write_xlsx(snapshot: dict, destination) -> None:
         query_rows = _query_image_rows(snapshot)
         query_cells: list[CellImage | str] = [""] * len(snapshot.get("items", []))
         if query_rows:
-            embedded = []
             for row in query_rows:
-                entry = {"数据集序号": row["数据集序号"], "id": row["id"], "query": row["query"]}
                 try:
-                    entry["提问原图"] = images.add(row.get("original_path", ""), row.get("original_sha256"))
+                    original = images.add(row.get("original_path", ""), row.get("original_sha256"))
                 except OriginalImageError as exc:
-                    entry["提问原图"] = str(exc)
-                query_cells[row["数据集序号"] - 1] = entry["提问原图"]
-                embedded.append(entry)
-            sheets["提问图片"] = embedded
+                    original = str(exc)
+                query_cells[row["数据集序号"] - 1] = original
         if screenshot_rows:
-            sheets["原始长截图"] = screenshot_rows
-        if query_rows:
-            for sheet_name, query_header in (("数据集明细", "query"), ("逐题结果", "题目"), ("原始长截图", "query")):
-                if sheet_name in sheets:
-                    sheets[sheet_name] = _insert_query_image_column(sheets[sheet_name], query_cells, query_header)
+            sheets["逐题结果"] = _insert_screenshot_columns(sheets["逐题结果"], screenshot_rows)
+        if query_rows and "逐题结果" in sheets:
+            sheets["逐题结果"] = _insert_query_image_column(sheets["逐题结果"], query_cells, "题目")
         if statistics:
             sheets[COMPARE_STATISTICS_SHEET] = []
         images.write_parts()
@@ -1364,7 +1515,7 @@ def _write_xlsx(snapshot: dict, destination) -> None:
             xml = statistics_sheet_xml(
                 statistics, style_start=3 if picture_styles else 2,
                 escape_text=_xlsx_text, column_name=_col,
-            ) if name == COMPARE_STATISTICS_SHEET else _sheet_xml(rows, picture_sheet=name in {"原始长截图", "提问图片"})
+            ) if name == COMPARE_STATISTICS_SHEET else _sheet_xml(rows)
             zf.writestr(f"xl/worksheets/sheet{i}.xml", xml)
 
 
@@ -1379,6 +1530,22 @@ def _insert_query_image_column(rows: list[dict], images: list[CellImage | str], 
             enriched[key] = value
             if key == query_header:
                 enriched["输入图片原图"] = images[index]
+        output.append(enriched)
+    return output
+
+
+def _insert_screenshot_columns(rows: list[dict], originals: list[dict]) -> list[dict]:
+    """Attach each product's original after its answer, aligned by dataset index."""
+    output = []
+    for row, original in zip(rows, originals):
+        images = {key: value for key, value in original.items() if re.fullmatch(r"产品[123]原图", key)}
+        enriched = {}
+        for key, value in row.items():
+            enriched[key] = value
+            match = re.fullmatch(r"产品([123])回答", key)
+            if match and (header := f"产品{match[1]}原图") in images:
+                enriched[header] = images.pop(header)
+        enriched.update(images)
         output.append(enriched)
     return output
 
@@ -1521,7 +1688,9 @@ def _sheet_xml(rows: list[dict], *, picture_sheet: bool = False) -> str:
                 cells.append(f'<c r="{ref}" t="inlineStr"{style}><is><t xml:space="preserve">{_xlsx_text(value)}</t></is></c>')
         height = ' ht="240" customHeight="1"' if picture_sheet and r_idx > 1 else ""
         if not picture_sheet and r_idx > 1 and any(isinstance(value, CellImage) for value in row):
-            height = ' ht="96" customHeight="1"'
+            has_screenshot = any(re.fullmatch(r"产品[123]原图", header) and isinstance(value, CellImage)
+                                 for header, value in zip(headers, row))
+            height = ' ht="240" customHeight="1"' if has_screenshot else ' ht="96" customHeight="1"'
         rows_xml.append(f'<row r="{r_idx}"{height}>{"".join(cells)}</row>')
     cols = "".join(
         f'<col min="{i}" max="{i}" width="{36 if picture_sheet and h.startswith("产品") else _width(h)}" customWidth="1"/>'
@@ -1561,6 +1730,8 @@ def _col(idx: int) -> str:
 
 
 def _width(header: str) -> int:
+    if re.fullmatch(r"产品[123]原图", header):
+        return 36
     if header == "输入图片原图":
         return 24
     if header in {"query", "answer", "generated_answer", "rationale", "理由", "options"}:

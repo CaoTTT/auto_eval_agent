@@ -9,11 +9,17 @@ import os
 import time
 import traceback
 from collections.abc import Awaitable, Callable
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
 from ..paths import RUNS_DIR
-from ..preparation import run_preparation
+from ..preparation import PreparationLimiter, run_preparation, preparation_limit, preparation_concurrency
+from ..timing import StageTimings, collect_timings, timing_span
+from ..request_throttle import (
+    recommended_concurrency, supports_bailian_pacing,
+    wait_for_active, SECOND_REQUEST_LIMIT,
+)
 from ..config import AppConfig, VisualModeProfile
 from ..query_images import prepare_query_images, QueryImageError, PREPARED_FIELDS
 from ..judges import (
@@ -72,6 +78,28 @@ _PERSIST_DEBOUNCE_S = float(os.environ.get("AUTO_EVAL_PERSIST_DEBOUNCE_S", "2.0"
 _PERSIST_FORCE_EVERY_N = 20
 _pending_flush: dict[str, asyncio.TimerHandle] = {}
 _unpersisted: dict[str, int] = {}
+_live_timings: dict[tuple[str, int], tuple[str, StageTimings]] = {}
+
+
+@contextmanager
+def _track_live_timings(task_id: str, item_index: int, request_id: str, timings: StageTimings):
+    key, entry = (task_id, item_index), (request_id, timings)
+    _live_timings[key] = entry
+    try:
+        yield
+    finally:
+        if _live_timings.get(key) is entry:
+            del _live_timings[key]
+
+
+def snapshot_item_progress(task: Task) -> dict[str, dict]:
+    """Refresh live durations on reconnect/read, without timers or history writes."""
+    progress = dict(task.item_progress)
+    for key, row in progress.items():
+        active = _live_timings.get((task.id, int(key)))
+        if active is not None and active[0] == row.get("request_id"):
+            progress[key] = {**row, "timings": active[1].snapshot()}
+    return progress
 
 
 def _flush_now(task: Task) -> asyncio.Future | None:
@@ -113,26 +141,75 @@ def _persist_task(task: Task, *, force: bool = False) -> asyncio.Future | None:
     )
 
 
-async def _persist_task_and_wait(task: Task) -> None:
+async def _persist_task_and_wait(task: Task) -> bool:
     pending = _persist_task(task, force=True)
     if pending is not None:
-        await asyncio.shield(pending)
+        return bool(await asyncio.shield(pending))
+    return False
+
+
+async def finish_pause(task: Task) -> bool:
+    """Publish a paused terminal only after the last worker and snapshot finish."""
+    if not task.pause_requested:
+        return False
+    if task.active_runs > 0:
+        return True
+    task.finish_timing()
+    task.status = "paused"
+    task.error = None
+    task.execution_control.update(state="paused", paused_at=time.time())
+    latest = latest_results_by_index(task)
+    unfinished = set(task.execution_control.get("pending_indexes", []))
+    for batch in task.execution_control.get("update_batches", {}).values():
+        unfinished.update(batch.get("remaining", []))
+    for key, progress in list(task.item_progress.items()):
+        if progress.get("status") not in {"done", "error"}:
+            result = latest.get(int(key))
+            completed = result is not None and int(key) not in unfinished
+            status = ("error" if result.get("error") else "done") if completed else "paused"
+            _record_progress(task, int(key), {
+                **progress, "status": status,
+                "message": ("评测失败" if status == "error" else "评测完成") if completed else "已暂停，等待继续执行",
+                "finished_at": int(time.time() * 1000), "item_index": int(key),
+            })
+    for attempt in task.execution_control.get("resumes", []):
+        if attempt.get("status") in {"queued", "running"}:
+            attempt.update(status="paused", finished_at=time.time())
+    task.execution_control.pop("save_error", None)
+    task.active_runs += 1  # Pin and reject resume/delete until the terminal is durable.
+    try:
+        saved = await _persist_task_and_wait(task)
+    finally:
+        task.active_runs -= 1
+    if not saved:
+        task.execution_control["save_error"] = True
+        task.error = "任务已停止，但保存失败；请勿关闭服务，重试暂停以保存记录"
+        task._fanout("error", {"message": task.error})
+        return True
+    task.execution_control.pop("save_error", None)
+    task._fanout("paused", {
+        "status": "paused", "summary": task.summary, "total": len(task.items),
+        "execution_control": task.execution_control,
+    })
+    retire_task(task)
+    return True
 
 
 def _record_progress(task: Task, item_index: int, payload: dict) -> dict:
     """Store one bounded Web projection of the same structured log event."""
     key = str(item_index)
     events = task.progress_events.setdefault(key, [])
-    sequence = int(events[-1].get("sequence", 0)) + 1 if events else 1
-    event_payload = {**payload, "sequence": sequence}
     previous = task.item_progress.get(key) or {}
+    sequence = max(int(previous.get("sequence", 0)), int(events[-1].get("sequence", 0)) if events else 0) + 1
+    event_payload = {**payload, "sequence": sequence}
     if (
         "started_at" not in event_payload
         and previous.get("started_at") is not None
         and event_payload.get("request_id") == previous.get("request_id")
     ):
         event_payload["started_at"] = previous["started_at"]
-    events.append(event_payload)
+    if not event_payload.get("timing_update"):
+        events.append(event_payload)
     if len(events) > MAX_PROGRESS_EVENTS_PER_ITEM:
         del events[:-MAX_PROGRESS_EVENTS_PER_ITEM]
     task.item_progress[key] = event_payload
@@ -181,6 +258,7 @@ def _mark_interrupted_if_stuck(task: Task) -> bool:
         return False
     task.status = "error"
     task.error = task.error or "服务中断，已保留中断前完成的评估结果"
+    task.finish_timing()
     task._fanout("error", {"message": task.error})
     return True
 
@@ -190,25 +268,32 @@ async def run_eval(task: Task, cfg: AppConfig) -> None:
     （endpoint 在 spawn_background 之前），本函数只负责结束时解除——否则
     spawn 延迟窗口内任务可被 DELETE/LRU 淘汰，引发快照复活或双对象覆盖。"""
     try:
-        await task.publish("start", {"total": len(task.items), "mode": task.mode})
+        task.start_timing()
         task.status = "running"
+        await task.publish("start", {"total": len(task.items), "mode": task.mode})
         await _persist_task_and_wait(task)
         try:
             await _run(task, cfg)
+            if task.pause_requested:
+                return
             task.summary = _summarize(task)
             task.status = "done"
+            task.finish_timing()
             await task.publish("done", {"summary": task.summary, "total": len(task.items)})
             await _persist_task_and_wait(task)
         except Exception as e:
             task.status = "error"
             task.error = f"{type(e).__name__}: {e}"
+            task.finish_timing()
             await task.publish("error", {"message": task.error})
             await _persist_task_and_wait(task)
     finally:
         task.active_runs -= 1
-        _mark_interrupted_if_stuck(task)
-        await _persist_task_and_wait(task)  # 退休前最后一次落盘，磁盘先于内存下线
-        retire_task(task)
+        task.finish_timing()
+        if not await finish_pause(task):
+            _mark_interrupted_if_stuck(task)
+            await _persist_task_and_wait(task)  # 退休前最后一次落盘，磁盘先于内存下线
+            retire_task(task)
 
 
 def _make_item_evaluator(
@@ -273,8 +358,17 @@ def _make_item_evaluator(
     )
     # 垂域→中文显示名映射（rich_content.yaml 的 category_display）
     category_display = rich_profile.category_display if rich_profile else {}
-    sem = asyncio.Semaphore(int(runtime_options.get("concurrency", 4)))
-    eval_timeout = float(runtime_options.get("eval_timeout_s") or runtime_options.get("eval_timeout") or 300.0)
+    capacity = max(1, min(128, int(runtime_options.get("concurrency", recommended_concurrency(judges_cfg)))))
+    sem = asyncio.Semaphore(capacity)
+    media_capacity = preparation_concurrency()
+    media_sem = PreparationLimiter(media_capacity) if any(supports_bailian_pacing(j) for j in judges_cfg) else None
+    if media_sem is not None:
+        log_event("请求调度", "启用百炼平滑调度", details={
+            "Case容量": capacity, "媒体并发": media_capacity,
+            "连续1秒请求上限": SECOND_REQUEST_LIMIT,
+            "RPM目标": 480, "TPM目标": 800_000,
+        })
+    eval_timeout = float(runtime_options.get("eval_timeout_s") or runtime_options.get("eval_timeout") or 900.0)
     loop = asyncio.get_running_loop()
 
     async def _default_on_result(idx: int, res: dict, started: float) -> None:
@@ -310,6 +404,7 @@ def _make_item_evaluator(
         pending_judge_traces: list[tuple[str, dict]] = []
 
         def publish_progress(payload: dict) -> None:
+            payload = {**payload, "timings": timings.snapshot()}
             def apply() -> None:
                 _record_progress(task, idx, payload)
             try:
@@ -325,6 +420,23 @@ def _make_item_evaluator(
         def collect_judge_trace(trace_path: str, record: dict) -> None:
             pending_judge_traces.append((trace_path, record))
 
+        def publish_timings(snapshot: dict) -> None:
+            def apply() -> None:
+                previous = task.item_progress.get(str(idx)) or {}
+                if previous.get("request_id") != request_id:
+                    return
+                _record_progress(task, idx, {
+                    **previous, "timings": snapshot, "timing_update": True,
+                })
+            try:
+                if asyncio.get_running_loop() is loop:
+                    apply()
+                else:
+                    loop.call_soon_threadsafe(apply)
+            except RuntimeError:
+                loop.call_soon_threadsafe(apply)
+
+        timings = StageTimings(started=False, on_change=publish_timings)
         with bind_chain_context(
             task_id=task.id,
             session_name=task.session_name,
@@ -333,7 +445,7 @@ def _make_item_evaluator(
             item_index=idx,
             progress_callback=publish_progress,
             judge_trace_callback=collect_judge_trace,
-        ):
+        ), collect_timings(timings), _track_live_timings(task.id, idx, request_id, timings):
             log_event(
                 "任务",
                 "开始",
@@ -346,8 +458,11 @@ def _make_item_evaluator(
                 progress_message="排队等待评测",
             )
             async with sem:
+                if task.pause_requested:
+                    return {"_paused": True}
                 # 排队时间不计入单题耗时；取得并发槽后才启动计时。
                 started = time.perf_counter()
+                timings.start()
                 log_event(
                     "任务",
                     "开始评测",
@@ -359,9 +474,15 @@ def _make_item_evaluator(
                 res = None
                 item_dict.pop("input_manifest_sha256", None)
                 is_screenshot = task.mode == "compare" and (
-                    item_dict.get("evidence_mode") == "long_screenshot" or bool(item_dict.get("screenshot1"))
+                    item_dict.get("evidence_mode") == "long_screenshot"
+                    or (not item_dict.get("evidence_mode") and bool(item_dict.get("screenshot1")))
                 )
-                needs_visual_prepare = is_screenshot or (
+                has_source_video = (
+                    any(item_dict.get(f"video{n}") for n in (1, 2, 3))
+                    if task.mode == "compare"
+                    else bool(item_dict.get("video_path") or item_dict.get("media"))
+                )
+                needs_visual_prepare = is_screenshot or has_source_video or (
                     not _compare_frames_ready(item_dict)
                     if task.mode == "compare"
                     else not item_dict.get("frames")
@@ -462,7 +583,7 @@ def _make_item_evaluator(
                                     progress=15,
                                     progress_message="正在重新执行单题评测",
                                 )
-                            res = await asyncio.wait_for(
+                            res = await wait_for_active(
                                 _eval_one(
                                     task.mode, idx, item_dict,
                                     rich_judges=rich_judges,
@@ -496,7 +617,8 @@ def _make_item_evaluator(
                                 },
                             )
                             if will_retry:
-                                await asyncio.sleep(1.0)
+                                with timing_span("retry_wait"):
+                                    await asyncio.sleep(1.0)
                                 continue
                             break
                 if res is None:
@@ -544,10 +666,16 @@ def _make_item_evaluator(
                     pending_judge_traces,
                     res,
                 )
+            res["timings"] = timings.finish()
+            res["total_s"] = res["timings"]["total_s"]
             await finish(idx, res, started)
             return res
 
-    return one, clients
+    async def limited_one(idx: int, item_dict: dict) -> dict:
+        with preparation_limit(media_sem, priority=idx):
+            return await one(idx, item_dict)
+
+    return limited_one, clients
 
 
 async def _aclose_judge_clients(clients: list[JudgeClient]) -> None:
@@ -589,6 +717,8 @@ async def _run(task: Task, cfg: AppConfig) -> None:
                     else f"历史对话总结：\n{prior_summary}"
                 )
             res = await one(idx, it)
+            if res.get("_paused"):
+                break
             if turn_no == len(idxs):
                 continue  # 最后一轮总结无人消费，跳过
             if res and not res.get("error"):
@@ -614,13 +744,132 @@ _PREPARED_ITEM_FIELDS = {
     "evidence_mode", "screenshot_meta1", "screenshot_meta2", "screenshot_meta3",
     "frames", "frames1", "frames2", "frames3", "frame_count", "media",
     "video_name", "video1_path", "video2_path", "video3_path",
+    "video_source", "video_source1", "video_source2", "video_source3",
     "duration", "duration1", "duration2", "duration3",
 }
 
 
 def _base_context(item: dict) -> str:
     """移除旧运行注入的会话总结，防止补跑时重复叠加。"""
-    return str(item.get("context") or "").split("\n\n历史对话总结：\n", 1)[0].strip()
+    context = str(item.get("context") or "")
+    if context.startswith("历史对话总结：\n"):
+        return ""
+    return context.split("\n\n历史对话总结：\n", 1)[0].strip()
+
+
+async def run_resume(task: Task, cfg: AppConfig) -> None:
+    """Resume selected indexes under a fresh semaphore, retaining prior outputs."""
+    attempt = task.execution_control["resumes"][-1]
+    attempt.update(status="running", started_at=time.time())
+    if not task.pause_requested:
+        task.execution_control["state"] = "running"
+    task.status = "running"
+    task.resume_timing()
+    clients: list[JudgeClient] = []
+    targets = set(attempt["indexes"])
+    pending = task.execution_control.setdefault("pending_indexes", sorted(targets))
+    options = {**task.options, "concurrency": attempt["concurrency"], "_retry_id": attempt["id"]}
+    working_items: dict[int, dict] = {}
+
+    async def on_result(index: int, result: dict, started: float) -> None:
+        result["resume_id"] = attempt["id"]
+        upsert_result_by_index(task, result)
+        for field in _PREPARED_ITEM_FIELDS:
+            if field in working_items.get(index, {}):
+                task.items[index][field] = working_items[index][field]
+        if index in pending:
+            pending.remove(index)
+        task.done_total = len(latest_results_by_index(task))
+        attempt["completed"] = attempt.get("completed", 0) + 1
+        attempt["failed"] = attempt.get("failed", 0) + int(bool(result.get("error")))
+        log_event(
+            "任务", "恢复评测完成", progress=100,
+            progress_status="error" if result.get("error") else "done",
+            progress_message="评测失败" if result.get("error") else "评测完成",
+            details={"恢复批次": attempt["id"], "错误": result.get("error")},
+        )
+        await task.publish("result", {"progress": task.done_total, "total": len(task.items), "result": result})
+        _persist_task(task)
+
+    try:
+        await _persist_task_and_wait(task)
+        await task.publish("start", {"total": len(task.items), "mode": task.mode, "resume_id": attempt["id"]})
+        one, clients = _make_item_evaluator(task, cfg, options=options, on_result=on_result)
+        update_batches = task.execution_control.get("update_batches", {})
+        batch_indexes = {i for batch in update_batches.values() for i in batch.get("remaining", [])}
+        groups: dict[str, list[int]] = {}
+        for index, item in enumerate(task.items):
+            if index in batch_indexes:
+                continue
+            group = item.get("session_group") if task.mode == "rich_content" else None
+            key = f"session:{group}" if group else f"item:{index}"
+            groups.setdefault(key, []).append(index)
+        latest = latest_results_by_index(task)
+
+        async def run_group(indexes: list[int]) -> None:
+            prior = ""
+            for turn, index in enumerate(indexes, 1):
+                result = latest.get(index) or {}
+                if index in targets:
+                    if task.pause_requested:
+                        break
+                    item = copy.deepcopy(task.items[index])
+                    base = _base_context(item)
+                    item["context"] = (f"{base}\n\n" if base else "") + f"历史对话总结：\n{prior}" if prior else base
+                    working_items[index] = item
+                    result = await one(index, item)
+                    if result.get("_paused"):
+                        break
+                summary = result.get("turn_summary") or ("（评测未产出结果）" if result.get("error") else "（未生成总结）")
+                if task.mode == "rich_content":
+                    prior += f"【第{turn}轮】{summary}\n"
+
+        for indexes in groups.values():
+            indexes.sort(key=lambda i: task.items[i].get("turn_index", 0))
+        outcomes = await asyncio.gather(
+            *(run_group(indexes) for indexes in groups.values() if targets.intersection(indexes)),
+            return_exceptions=True,
+        )
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException):
+                raise outcome
+        # Incremental API batches have their own ordered context and options.
+        for batch_id, batch in list(update_batches.items()):
+            if task.pause_requested:
+                break
+            await _run_update_batch_body(
+                task, cfg, [(i, task.items[i]) for i in list(batch["remaining"])],
+                options={**batch["options"], "concurrency": attempt["concurrency"], "_retry_id": attempt["id"]},
+                batch_id=batch_id,
+            )
+            if batch.get("remaining") and not task.pause_requested:
+                raise RuntimeError("增量更新批次未完成，请恢复后继续")
+        if not task.pause_requested:
+            attempt.update(status="completed", finished_at=time.time())
+            task.execution_control["state"] = "completed"
+            task.status = "done"
+            task.error = None
+    except BaseException as exc:
+        attempt.update(status="error", finished_at=time.time(), error=f"{type(exc).__name__}: {exc}")
+        task.status = "error"
+        task.error = "恢复执行中断，已保留已完成记录：" + str(exc)
+        task.execution_control["state"] = "interrupted"
+        if isinstance(exc, asyncio.CancelledError):
+            raise
+    finally:
+        await _aclose_judge_clients(clients)
+        task.active_runs = max(0, task.active_runs - 1)
+        task.finish_timing()
+        if not await finish_pause(task):
+            if not await _persist_task_and_wait(task):
+                task.execution_control["save_error"] = True
+                task.status = "error"
+                task.error = "执行已停止，但保存失败；请勿关闭服务，重试保存暂停记录"
+            task._fanout("done" if task.status == "done" else "error", {
+                "summary": task.summary, "total": len(task.items), "message": task.error,
+                "execution_control": task.execution_control,
+            })
+            retire_task(task)
 
 
 async def run_retry(task: Task, cfg: AppConfig, retry_id: str) -> None:
@@ -644,6 +893,9 @@ async def run_retry(task: Task, cfg: AppConfig, retry_id: str) -> None:
     clients: list[JudgeClient] = []
 
     async def on_result(idx: int, res: dict, started: float) -> None:
+        pending = task.execution_control.get("pending_indexes", [])
+        if idx in pending:
+            pending.remove(idx)
         item_state = retry["items"].setdefault(str(idx), {})
         retry["completed"] = int(retry.get("completed", 0)) + 1
         item_state["finished_at"] = time.time()
@@ -739,6 +991,8 @@ async def run_retry(task: Task, cfg: AppConfig, retry_id: str) -> None:
                 if idx not in target_set:
                     continue
                 res = await run_one(idx, prior_summary)
+                if res.get("_paused"):
+                    break
                 if res.get("error"):
                     remaining = [
                         other for other in group_indexes[first_selected + position + 1:]
@@ -757,7 +1011,7 @@ async def run_retry(task: Task, cfg: AppConfig, retry_id: str) -> None:
         )
         if coros:
             await asyncio.gather(*coros)
-        retry["status"] = "completed" if not retry.get("failed") else "partial"
+        retry["status"] = "paused" if task.pause_requested else ("completed" if not retry.get("failed") else "partial")
         task.repair_status = retry["status"]
     except asyncio.CancelledError:
         retry["status"] = "error"
@@ -774,12 +1028,13 @@ async def run_retry(task: Task, cfg: AppConfig, retry_id: str) -> None:
             await _aclose_judge_clients(clients)
         retry["finished_at"] = time.time()
         task.active_runs = max(0, task.active_runs - 1)
-        await _persist_task_and_wait(task)
-        task._fanout(
-            "done",
-            {"summary": task.summary, "total": len(task.items), "retry": retry},
-        )
-        retire_task(task)
+        if not await finish_pause(task):
+            await _persist_task_and_wait(task)
+            task._fanout(
+                "done",
+                {"summary": task.summary, "total": len(task.items), "retry": retry},
+            )
+            retire_task(task)
 
 
 # 登记后台更新批任务引用：避免协程被 GC，也便于测试等待完成。
@@ -801,6 +1056,7 @@ async def _run_update_batch_body(
     *,
     options: dict,
     manage_status: bool = False,
+    batch_id: str = "",
 ) -> None:
     """后台更新批：batch 内全部条目按提交顺序作为一个串行会话评测；
     每题结果按 index 原地覆盖/追加（后完成者赢），全量重算 summary 并落快照。
@@ -811,6 +1067,19 @@ async def _run_update_batch_body(
     """
     async def _merge_on_result(idx: int, res: dict, started: float) -> None:
         action = upsert_result_by_index(task, res)
+        attempts = task.execution_control.get("resumes", [])
+        if attempts and attempts[-1].get("status") == "running":
+            attempts[-1]["completed"] += 1
+            attempts[-1]["failed"] += int(bool(res.get("error")))
+        record = task.execution_control.get("update_batches", {}).get(batch_id)
+        if record is not None:
+            record["remaining"] = [i for i in record["remaining"] if i != idx]
+            if task.mode != "compare":
+                text = res.get("turn_summary") or ("（评测未产出结果）" if res.get("error") else "（未生成总结）")
+                record["prior_summary"] = record.get("prior_summary", "") + f"【前序轮次】{text}\n"
+        pending = task.execution_control.get("pending_indexes", [])
+        if idx in pending:
+            pending.remove(idx)
         # summary 全量重算移入 _flush_now（随节流后的落盘一起做），
         # 不再每题重算 O(n)
         failed = bool(res.get("error"))
@@ -840,15 +1109,18 @@ async def _run_update_batch_body(
     current: tuple[int, dict] | None = None
     try:
         if manage_status:
+            task.start_timing()
             task.status = "running"
             await _persist_task_and_wait(task)
         # 整批一个串行会话：前轮总结在批次内本地链式注入，
         # 不从 task.results 读回，不受并行批次覆盖影响。
-        prior_summary = ""
+        prior_summary = task.execution_control.get("update_batches", {}).get(batch_id, {}).get("prior_summary", "")
         for turn_no, (idx, item_dict) in enumerate(batch, 1):
+            if task.pause_requested:
+                break
             current = (idx, item_dict)
             if prior_summary and task.mode != "compare":
-                base_ctx = (item_dict.get("context") or "").strip()
+                base_ctx = _base_context(item_dict)
                 item_dict["context"] = (
                     f"{base_ctx}\n\n历史对话总结：\n{prior_summary}"
                     if base_ctx
@@ -859,6 +1131,8 @@ async def _run_update_batch_body(
                 res = await one(idx, item_dict)
             finally:
                 task.in_flight_indexes.discard(idx)
+            if res.get("_paused"):
+                break
             if turn_no == len(batch):
                 continue  # 最后一轮总结无人消费，跳过
             if res and not res.get("error"):
@@ -870,8 +1144,12 @@ async def _run_update_batch_body(
                 )
             else:
                 prior_summary += f"【第{turn_no}轮】（评测未产出结果）\n"
-        if manage_status:
+        record = task.execution_control.get("update_batches", {}).get(batch_id)
+        if record is not None and not record["remaining"]:
+            del task.execution_control["update_batches"][batch_id]
+        if manage_status and not task.pause_requested:
             task.status = "done"
+            task.finish_timing()
             task.summary = _summarize(task)  # publish 前重算（节流后不再每题重算）
             await task.publish(
                 "done", {"summary": task.summary, "total": len(task.items)}
@@ -886,6 +1164,7 @@ async def _run_update_batch_body(
         if manage_status:
             task.status = "error"
             task.error = f"{type(e).__name__}: {e}"
+            task.finish_timing()
             await task.publish("error", {"message": task.error})
         await _persist_task_and_wait(task)
     finally:
@@ -899,6 +1178,7 @@ async def run_update_batch(
     *,
     options: dict,
     manage_status: bool = False,
+    batch_id: str = "",
 ) -> None:
     """后台更新批公共入口（实现见 _run_update_batch_body）。
 
@@ -907,27 +1187,26 @@ async def run_update_batch(
     对象（计数 pin），全部结束（idle）时才退休。
     """
     try:
+        if manage_status:
+            task.start_timing()
         await _run_update_batch_body(
-            task, cfg, batch, options=options, manage_status=manage_status
+            task, cfg, batch, options=options, manage_status=manage_status, batch_id=batch_id
         )
     finally:
         task.active_runs -= 1
+        if manage_status:
+            task.finish_timing()
         idle = task.active_runs <= 0
-        interrupted = _mark_interrupted_if_stuck(task) if idle else False
-        await _persist_task_and_wait(task)  # 退休前最后一次落盘，磁盘先于内存下线
-        if idle and not manage_status and not interrupted and task.status in {"done", "error"}:
-            # R4：manage_status=False 的批不发 start/done 终态事件，SSE 订阅者
-            # 会一直等；最后一个批结束时补发一次终态（先 persist 再发，summary
-            # 已在 _flush_now 重算）。manage_status=True 的终态由 body 发过。
-            task._fanout(
-                "done" if task.status == "done" else "error",
-                (
-                    {"summary": task.summary, "total": len(task.items)}
-                    if task.status == "done"
-                    else {"message": task.error}
-                ),
-            )
-        retire_task(task)
+        if not await finish_pause(task):
+            interrupted = _mark_interrupted_if_stuck(task) if idle else False
+            await _persist_task_and_wait(task)
+            if idle and not manage_status and not interrupted and task.status in {"done", "error"}:
+                task._fanout(
+                    "done" if task.status == "done" else "error",
+                    ({"summary": task.summary, "total": len(task.items)}
+                     if task.status == "done" else {"message": task.error}),
+                )
+            retire_task(task)
 
 
 def _write_eval_error(
@@ -1094,7 +1373,7 @@ async def _eval_one(
     out["category_display"] = (category_display or {}).get(item.category) or (
         item.category if item.category != "default" else "通用"
     )
-    out["latency_s"] = round(time.perf_counter() - t0, 1)  # 该题评测总耗时（秒）
+    out["latency_s"] = round(time.perf_counter() - t0, 1)  # 保留旧口径；含前置媒体准备的总耗时见 total_s。
     return out
 
 
@@ -1261,7 +1540,8 @@ def _summarize_rich_content(task: Task) -> dict:
     return {
         "total": len(task.items),
         "done": len(ok),
-        "failed": len(task.items) - len(ok),
+        "failed": len(results) - len(ok),
+        "unfinished": max(0, len(task.items) - len(results)),
         "mode": task.mode,
         "card_case_count": len(card_cases),
         "card_presence_rate": (

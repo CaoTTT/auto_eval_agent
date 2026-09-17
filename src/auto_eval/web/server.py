@@ -31,7 +31,7 @@ from ..media import probe_duration
 from ..paths import RUNS_DIR
 from ..query_images import normalize_query_input, PREPARED_FIELDS, prepare_query_images, QueryImageError
 from ..preparation import run_preparation
-from .parse_input import Mode, compare_evidence_mode, parse_csv, parse_jsonl, parse_text
+from .parse_input import Mode, normalize_compare_evidence, parse_csv, parse_jsonl, parse_text
 from .history import (
     write_xlsx,
     delete_snapshot,
@@ -51,10 +51,14 @@ from .video_prepare import (
     operation_video_roots,
     resolve_operation_video_path,
 )
-from .runner import run_eval, run_retry, run_update_batch, spawn_background
+from .runner import run_eval, run_retry, run_resume, finish_pause, run_update_batch, spawn_background, snapshot_item_progress
+from .execution_control import resume_indexes
 from .scheduler import EvalScheduler
 from .exports import XlsxExports, xlsx_download_name
-from .dataset_media import DatasetMedia
+from .dataset_media import DatasetMedia, file_hash
+from .human_baselines import HumanStore
+from .human_compare import HumanComparisons
+from .human_routes import install_human_routes
 from .persistence import queue_task_save, wait_task_save, task_save_pending
 from .tasks import (
     TASKS,
@@ -79,11 +83,14 @@ _state: dict = {}
 EVAL_SCHEDULER = EvalScheduler()
 XLSX_EXPORTS = XlsxExports(RUNS_DIR / "exports")
 DATASET_MEDIA = DatasetMedia()
+HUMAN_COMPARISONS = HumanComparisons(HumanStore(RUNS_DIR))
+install_human_routes(app, lambda: HUMAN_COMPARISONS, lambda task_id: peek_task_async(task_id))
 
 
 @app.on_event("startup")
 async def _load():
     _state["cfg"] = load_config(CONFIG_DIR)
+    await asyncio.to_thread(HUMAN_COMPARISONS.recover)
     EVAL_SCHEDULER.start()
 
 
@@ -91,6 +98,7 @@ async def _load():
 async def _shutdown():
     await EVAL_SCHEDULER.stop()
     await XLSX_EXPORTS.close()
+    await HUMAN_COMPARISONS.close()
 
 
 def cfg():
@@ -138,6 +146,14 @@ class RetryReq(BaseModel):
 
 class QueuePositionReq(BaseModel):
     action: Literal["move_up", "move_down", "move_to_front"]
+
+
+class ResumeReq(BaseModel):
+    concurrency: int = Field(ge=1, le=128, strict=True)
+    include_failed: bool = False
+    idempotency_key: str = Field(default="", max_length=128)
+
+    model_config = {"extra": "forbid"}
 
 
 _VIDEO_EXTENSIONS = VIDEO_EXTENSIONS
@@ -197,8 +213,17 @@ def _validate_eval_request(req: EvalReq, app_cfg) -> None:
             item.update(normalize_query_input(item))
             for field in PREPARED_FIELDS:
                 item.pop(field, None)
-            product_count, evidence_mode = compare_evidence_mode(item)
-            item.update(product_count=product_count, evidence_mode=evidence_mode)
+            for field in ("media", "frame_count", "video_source", *(f"{prefix}{n}" for n in (1, 2, 3)
+                          for prefix in ("frames", "duration", "screenshot_meta", "video_source"))):
+                item.pop(field, None)
+            for n in (1, 2, 3):
+                item.pop(f"video{n}_path", None)
+            normalized = normalize_compare_evidence(item)
+            # Preserve unused input paths for provenance, never prepared evidence.
+            normalized.setdefault("source_data", {key: value for key, value in item.items()
+                                                   if key != "source_data"})
+            item.clear()
+            item.update(normalized)
         except ValueError as exc:
             invalid.append(f"第{index}条 {exc}")
     if invalid:
@@ -245,10 +270,16 @@ def _validate_batch_item_ids(items: list[dict]) -> None:
 
 @app.get("/api/config")
 def api_config():
+    from ..request_throttle import recommended_concurrency, supports_bailian_pacing
+    from ..preparation import preparation_concurrency
+
     c = cfg()
     return {
+        "media_concurrency": preparation_concurrency(),
         "judges": [
-            {"name": j.name, "display": j.display or j.name}
+            {"name": j.name, "display": j.display or j.name,
+             "recommended_concurrency": recommended_concurrency([j]),
+             "request_pacing": supports_bailian_pacing(j)}
             for j in c.judges
         ],
         "evaluation_profiles": [
@@ -267,7 +298,25 @@ def api_parse(req: ParseReq):
         items, errs = parse_text(req.text, req.mode)
     else:
         raise HTTPException(400, "需提供 text、jsonl 或 csv")
-    return {"items": items, "errors": errs, "count": len(items)}
+    return {"items": items, "errors": errs, "count": len(items),
+            "rejected_count": len(errs),
+            "evidence_counts": {mode: sum(item.get("evidence_mode") == mode for item in items)
+                                for mode in ("long_screenshot", "video_frames")}}
+
+
+@app.get("/api/request-pacing")
+async def api_request_pacing() -> dict:
+    """Read local request pacing without creating a controller or exposing keys."""
+    from ..request_throttle import MODEL, supports_bailian_pacing
+
+    controllers = getattr(asyncio.get_running_loop(), "_auto_eval_request_throttles", {})
+    controller = controllers.get(MODEL)
+    return {
+        "enabled": any(supports_bailian_pacing(judge) for judge in cfg().judges),
+        "active": controller is not None,
+        "scope": "process_event_loop",
+        "controller": controller.snapshot() if controller is not None else None,
+    }
 
 
 @app.post("/api/eval")
@@ -276,6 +325,17 @@ async def api_eval(req: EvalReq):
         raise HTTPException(400, "items 为空")
     app_cfg = cfg()
     _validate_eval_request(req, app_cfg)
+    from ..request_throttle import recommended_concurrency
+
+    selected = req.options.get("judges") or [app_cfg.judges[0].name]
+    judges = [j for j in app_cfg.judges if j.name in selected] or app_cfg.judges[:1]
+    req.options.setdefault("concurrency", recommended_concurrency(judges))
+    try:
+        capacity = int(req.options["concurrency"])
+    except (ValueError, TypeError):
+        raise HTTPException(422, "并发容量须为 1–128 的整数")
+    if isinstance(req.options["concurrency"], bool) or capacity != req.options["concurrency"] or not 1 <= capacity <= 128:
+        raise HTTPException(422, "并发容量须为 1–128 的整数")
     protocol = (
         _compare_protocol_or_422(req.evaluation_profile)
         if req.mode == "compare"
@@ -330,6 +390,59 @@ async def api_queue_position(job_id: str, req: QueuePositionReq):
     if running and running.get("job_id") == job_id:
         raise HTTPException(409, "运行中的任务不能调整优先级")
     raise HTTPException(404, "等待任务不存在")
+
+
+@app.post("/api/eval/{task_id}/pause", status_code=202)
+async def api_pause(task_id: str):
+    task = await get_task_async(_validate_param_id(task_id, "task_id"))
+    if not task:
+        raise HTTPException(404, "task not found")
+    if task.status == "paused" and not task.execution_control.get("save_error"):
+        return {"task_id": task.id, "status": "pausing" if task.active_runs else "paused"}
+    if not task.active_runs and not task.execution_control.get("save_error"):
+        raise HTTPException(409, "任务当前未在执行或排队")
+    if not task.pause_requested:
+        task.execution_control.update(state="pausing", requested_at=time.time())
+    EVAL_SCHEDULER.pause(task)
+    if not task.active_runs:
+        await finish_pause(task)
+    else:
+        if not await wait_task_save(task, save=save_task):
+            raise HTTPException(503, "暂停已请求，但保存失败；请保持服务运行并重试暂停")
+        if task.pause_requested:
+            task._fanout("pausing", {"message": "正在暂停，等待已开始的题目完成并保存", "execution_control": task.execution_control})
+    if task.execution_control.get("save_error"):
+        raise HTTPException(503, task.error)
+    return {"task_id": task.id, "status": task.execution_control["state"]}
+
+
+@app.post("/api/eval/{task_id}/resume", status_code=202)
+async def api_resume(task_id: str, req: ResumeReq):
+    task = await get_task_async(_validate_param_id(task_id, "task_id"))
+    if not task:
+        raise HTTPException(404, "task not found")
+    attempts = task.execution_control.setdefault("resumes", [])
+    idem = req.idempotency_key.strip()
+    for attempt in attempts:
+        if idem and attempt.get("idempotency_key") == idem:
+            return {"task_id": task.id, "resume_id": attempt["id"], "status": attempt["status"], "idempotent_replay": True}
+    if task.active_runs or task.pause_requested or task.execution_control.get("save_error"):
+        raise HTTPException(409, "任务仍在执行或保存，请等待暂停完成")
+    if task.status not in {"paused", "error", "cancelled", "done"}:
+        raise HTTPException(409, "当前任务状态不能恢复")
+    indexes = resume_indexes(task, req.include_failed)
+    if not indexes:
+        raise HTTPException(409, "没有待执行的题目；如需重试失败项，请勾选同时重试失败项")
+    app_cfg = cfg()
+    attempt = {"id": f"resume_{uuid.uuid4().hex[:10]}", "idempotency_key": idem,
+               "status": "queued", "created_at": time.time(), "indexes": indexes,
+               "concurrency": req.concurrency, "include_failed": req.include_failed,
+               "completed": 0, "failed": 0}
+    attempts.append(attempt)
+    task.execution_control.update(state="queued", concurrency=req.concurrency, pending_indexes=indexes.copy())
+    position = EVAL_SCHEDULER.enqueue(task, app_cfg, run_resume)
+    await wait_task_save(task, save=save_task)
+    return {"task_id": task.id, "resume_id": attempt["id"], "status": "queued", "selected": len(indexes), "queue_position": position}
 
 
 @app.post("/api/eval/{task_id}/retries", status_code=202)
@@ -427,6 +540,7 @@ async def api_retry_failed(task_id: str, req: RetryReq):
         },
     }
     task.retry_runs[retry_id] = retry
+    task.execution_control["pending_indexes"] = accepted_indexes.copy()
 
     async def _retry_runner(parent, app_cfg):
         await run_retry(parent, app_cfg, retry_id)
@@ -475,6 +589,13 @@ async def api_eval_items(req: EvalItemsReq):
     app_cfg = cfg()
     task = get_task(task_id)
     created = task is None
+    if task is not None and (task.pause_requested or task.status == "paused" or task.execution_control.get("state") in {"queued", "running"}):
+        raise HTTPException(409, "任务正在暂停或恢复；请先完成该任务再更新 items")
+    if task is not None:
+        pending_updates = {i for batch in task.execution_control.get("update_batches", {}).values() for i in batch.get("remaining", [])}
+        pending_ids = {task.items[i].get("id") for i in pending_updates if 0 <= i < len(task.items)}
+        if any(item.get("id") in pending_ids for item in req.items):
+            raise HTTPException(409, "这些题目仍有未完成的更新；请先完成或恢复原批次")
     if task is not None and task.repair_status in {"queued", "running"}:
         raise HTTPException(409, "任务正在失败补跑，暂不能同时更新 items")
     if task is not None and any(it.get("query_images") for it in [*task.items, *req.items]):
@@ -533,6 +654,11 @@ async def api_eval_items(req: EvalItemsReq):
         )
     batch, replaced_ids, added_ids = merge_items_by_id(task, req.items)
     effective_options = {**task.options, **req.options}
+    batch_id = uuid.uuid4().hex[:12]
+    task.execution_control.setdefault("update_batches", {})[batch_id] = {
+        "remaining": [index for index, _ in batch], "options": effective_options,
+        "prior_summary": "", "created_at": time.time(),
+    }
     task.active_runs += 1  # R1：提交时同步 pin（同 api_eval；run_update_batch 的 finally 负责解除）
     pending_save = queue_task_save(task, save=save_task)
 
@@ -545,6 +671,7 @@ async def api_eval_items(req: EvalItemsReq):
             batch,
             options=effective_options,
             manage_status=created,
+            batch_id=batch_id,
         )
 
     spawn_background(_start_later())
@@ -710,11 +837,15 @@ async def api_stream(task_id: str, compact: bool = False):
                 # 首次 yield 前固定全部快照；回放期间的新事件由 q 按序补齐。
                 histories = [(key, list(events)) for key, events in task.progress_events.items()]
                 yield _sse("replay_state", {
+                    "status": task.status,
                     "results": list(task.results),
-                    "item_progress": dict(task.item_progress),
+                    "item_progress": snapshot_item_progress(task),
                     "progress": task.done_total,
                     "total": len(task.items),
                     "repair_status": task.repair_status,
+                    "execution_control": task.execution_control,
+                    "active_runs": task.active_runs,
+                    "task_timing": task.timing_snapshot(),
                     "retry": max(task.retry_runs.values(), key=lambda row: float(row.get("created_at") or 0), default=None),
                 })
                 for key, events in histories:
@@ -726,7 +857,7 @@ async def api_stream(task_id: str, compact: bool = False):
                 for progress_event in list(item_events):
                     yield _sse("progress_event", progress_event)
             # 回放每题最新进度，断线重连后能立即恢复当前阶段。
-            for progress_item in ([] if compact else list(task.item_progress.values())):
+            for progress_item in ([] if compact else list(snapshot_item_progress(task).values())):
                 yield _sse("item_progress", progress_item)
             # 先回放已有结果（断线重连不丢已完成的）
             for r in ([] if compact else list(task.results)):
@@ -735,7 +866,7 @@ async def api_stream(task_id: str, compact: bool = False):
             # status=done，仅看 status 会在批运行中立即下发伪 done；批结束时
             # 由 run_update_batch 补发终态事件驱动下方实时循环退出。
             if task.status == "done" and task.active_runs <= 0:
-                payload = {"summary": task.summary, "total": len(task.items)}
+                payload = {"summary": task.summary, "total": len(task.items), "task_timing": task.timing_snapshot()}
                 if task.retry_runs and task.repair_status != "idle":
                     payload["retry"] = max(
                         task.retry_runs.values(),
@@ -744,16 +875,19 @@ async def api_stream(task_id: str, compact: bool = False):
                 yield _sse("done", payload)
                 return
             if task.status == "error" and task.active_runs <= 0:
-                yield _sse("error", {"message": task.error})
+                yield _sse("error", {"message": task.error, "task_timing": task.timing_snapshot()})
                 return
             if task.status == "cancelled" and task.active_runs <= 0:
-                yield _sse("cancelled", {"message": "排队任务已取消"})
+                yield _sse("cancelled", {"message": "排队任务已取消", "task_timing": task.timing_snapshot()})
+                return
+            if task.status == "paused" and task.active_runs <= 0:
+                yield _sse("paused", {"status": "paused", "summary": task.summary, "execution_control": task.execution_control, "task_timing": task.timing_snapshot()})
                 return
             # 实时跟进
             while True:
                 msg = await q.get()
                 yield _sse(msg["event"], msg["data"])
-                if msg["event"] in ("done", "error", "cancelled", "retry_cancelled"):
+                if msg["event"] in ("done", "error", "cancelled", "retry_cancelled", "paused"):
                     break
         finally:
             task.unsubscribe(q)
@@ -798,7 +932,7 @@ async def api_dataset(task_id: str):
     fields = {"id", "query", "question", "context", "category", "product_count", "evidence_mode",
               "query_images", "query_image_meta", "source_data", "source_line", "session_group", "turn_index",
               "task_start_time", "task_end_time"}
-    fields.update(f"{name}{n}" for name in ("video", "screenshot", "answer", "context", "screenshot_meta")
+    fields.update(f"{name}{n}" for name in ("video", "screenshot", "answer", "context", "screenshot_meta", "video_source")
                   for n in range(1, 4))
     return {"task_id": task.id, "dataset_name": task.dataset_name, "created_at": task.created_at,
             "note": task.note, "items": copy.deepcopy([
@@ -843,6 +977,8 @@ async def api_history(limit: int = 50):
     # 对象需覆盖回来，避免历史列表把正在排队或运行的任务误显示为 error。
     for row in rows:
         task = TASKS.get(row.get("task_id"))
+        if task is not None:
+            row["task_timing"] = task.timing_snapshot()
         if task is None or task.active_runs <= 0:
             continue
         row["status"] = task.status
@@ -862,7 +998,10 @@ def api_history_detail(task_id: str):
     task = peek_task(task_id, touch=False)
     if not task:
         raise HTTPException(404, "task not found")
-    return snapshot_payload(task_to_snapshot(task))
+    snapshot = task_to_snapshot(task)
+    snapshot["item_progress"] = snapshot_item_progress(task)
+    snapshot["active_runs"] = task.active_runs
+    return snapshot_payload(snapshot)
 
 
 @app.delete("/api/history/{task_id}")
@@ -1015,6 +1154,9 @@ def api_export_item(task_id: str, item_index: int, format: str):
             video_path = _resolve_operation_video_path(raw_path)
         except ValueError as exc:
             raise HTTPException(404, str(exc)) from exc
+        source_identity = item.get("video_source") or item.get("video_source1") or {}
+        if source_identity.get("sha256") and file_hash(video_path) != source_identity["sha256"]:
+            raise HTTPException(409, "原视频内容已变更，与评测时采样帧不一致，请恢复原视频或重新评测")
         return FileResponse(
             video_path,
             filename=f"{stem}{video_path.suffix.lower()}",

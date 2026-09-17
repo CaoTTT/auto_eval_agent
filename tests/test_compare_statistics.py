@@ -12,6 +12,8 @@ from auto_eval.web import compare_statistics as stats, history
 
 
 NS = {"s": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+V02_STANDARDS = ("0.2-simplified", "0.2-simplified-calibrated", "0.2-simplified-thinking-exposure")
+STANDARDS = (*V02_STANDARDS, "0.3")
 
 
 def make_snapshot(scores, standard="0.2-simplified", *, count=None):
@@ -49,18 +51,31 @@ def record(tables, prefix, **match):
     return next(row for values in selected.rows if all((row := dict(zip(selected.headers, values))).get(k) == v for k, v in match.items()))
 
 
-@pytest.mark.parametrize("standard", ["0.2-simplified", "0.3"])
+@pytest.mark.parametrize("standard", STANDARDS)
 @pytest.mark.parametrize("count", [2, 3])
 def test_all_product_directions_and_score_ranges(standard, count):
-    scores = ([4, 5, 2], [5, 3, 4]) if standard == "0.2-simplified" else ([3, 2, 1], [1, 2, 3])
+    scores = ([3, 2, 1], [1, 2, 3]) if standard == "0.3" else ([4, 5, 2], [5, 3, 4])
     data = make_snapshot([s[:count] for s in scores], standard)
     tables = report(data)
     directions = {row[1] for row in table(tables, "C1．").rows}
     assert directions == {f"产品{a} / 产品{b}" for a in range(1, count + 1) for b in range(1, count + 1) if a != b}
     assert len(table(tables, "C1．").rows) == 6 * count * (count - 1)
     assert len(table(tables, "C2．").rows) == 6 * count * (count - 1)
+    for a in range(count):
+        for b in range(count):
+            if a == b:
+                continue
+            direction = f"产品{a + 1} / 产品{b + 1}"
+            pair = record(tables, "C1．", 维度="理解需求", **{"方向 A/B": direction})
+            assert pair["分位值 A/B"] == pytest.approx(sum(s[a] for s in scores) / sum(s[b] for s in scores))
+            gsb = record(tables, "C2．", 维度="理解需求", **{"方向 A/B": direction})
+            assert [gsb[k] for k in ("G", "S", "B")] == [
+                sum(s[a] > s[b] for s in scores),
+                sum(s[a] == s[b] for s in scores),
+                sum(s[a] < s[b] for s in scores),
+            ]
     bins = {row[2] for row in table(tables, "B3．").rows}
-    assert bins == (set(range(1, 6)) if standard == "0.2-simplified" else set(range(4)))
+    assert bins == (set(range(4)) if standard == "0.3" else set(range(1, 6)))
     assert any(t.title.startswith("D．") for t in tables) == (count == 3)
     for t in tables:
         assert all(len(row) == len(t.headers) for row in t.rows)
@@ -68,8 +83,9 @@ def test_all_product_directions_and_score_ranges(standard, count):
     assert not any(row[0] == "内容准确性" for t in tables if t.title.startswith(("B2．", "B3．", "C1．", "C2．", "D．")) for row in t.rows)
 
 
-def test_known_pair_means_ratios_gsb_and_sample_alignment():
-    data = make_snapshot([[4, 5], [5, 3], [3, 3], [None, 1]])
+@pytest.mark.parametrize("standard", V02_STANDARDS)
+def test_known_pair_means_ratios_gsb_and_sample_alignment(standard):
+    data = make_snapshot([[4, 5], [5, 3], [3, 3], [None, 1]], standard)
     # Deliberately bogus cached summary, winner and ranking must not be used.
     data["summary"] = {"understanding_answer1_avg": 999, "failed": 99}
     data["results"][0]["understanding_rank_groups"] = [["product1"]]
@@ -114,7 +130,8 @@ def test_three_way_missing_c_does_not_discard_ab_and_ties_are_distinct():
     ("safety", "fail", 1, 0), ("safety", "unclear", 1, 1),
 ])
 def test_protocol_gate_rules(gate, status, expected_v02, expected_v03):
-    for standard, expected in (("0.2-simplified", expected_v02), ("0.3", expected_v03)):
+    for standard in STANDARDS:
+        expected = expected_v03 if standard == "0.3" else expected_v02
         data = make_snapshot([[2, 3]], standard)
         data["results"][0][f"answer1_{gate}_gate"] = status
         tables = report(data)
@@ -186,15 +203,48 @@ def test_live_summary_does_not_count_unfinished_as_failed():
 
 
 def test_protocol_and_product_cohorts_are_never_pooled():
-    data = make_snapshot([[4, 5], [4, 5], [3, 3, 3]], count=2)
+    data = make_snapshot([[4, 5], [2, 3], [3, 3, 3], [1, 4], [5, 1]], count=2)
     data["items"][2]["product_count"] = 3
     data["results"][2]["product_count"] = 3
+    data["results"][2].update(answer3_input_status="complete", answer3_response_gate="pass", answer3_safety_gate="pass")
     data["results"][1].update(standard_version="0.3", bundle_revision="0.3.1")
+    data["results"][3].update(standard_version="0.2-simplified-calibrated", bundle_revision="0.2.2")
+    data["results"][4].update(standard_version="0.2-simplified-thinking-exposure", bundle_revision="0.2.3")
     tables = report(data)
-    assert len([t for t in tables if t.title.startswith("标准 ")]) == 3
+    assert len([t for t in tables if t.title.startswith("标准 ")]) == 5
+    assert not any(t.title == "评分统计不可用" for t in tables)
+    cohort = None
+    pair_values = {}
+    for selected in tables:
+        if selected.title.startswith("标准 "):
+            cohort = selected.title
+        elif selected.title.startswith("C1．"):
+            row = record([selected], "C1．", 维度="理解需求", **{"方向 A/B": "产品1 / 产品2"})
+            assert row["配对有效题数"] == 1
+            pair_values[cohort] = (row["A均分"], row["B均分"])
+    assert pair_values == {
+        "标准 0.2-simplified / 实现 0.2.1 / 2产品": (4, 5),
+        "标准 0.2-simplified / 实现 0.2.1 / 3产品": (3, 3),
+        "标准 0.2-simplified-calibrated / 实现 0.2.2 / 2产品": (1, 4),
+        "标准 0.2-simplified-thinking-exposure / 实现 0.2.3 / 2产品": (5, 1),
+        "标准 0.3 / 实现 0.3.1 / 2产品": (2, 3),
+    }
     # An unknown revision must not silently adopt today's policy.
     data["results"][0]["bundle_revision"] = "9.9"
     assert any(t.title == "评分统计不可用" for t in report(data))
+
+
+@pytest.mark.parametrize("standard", V02_STANDARDS)
+def test_v02_thresholds_include_four_as_passing_and_two_as_low(standard):
+    tables = report(make_snapshot([[1, 3], [2, 3], [3, 3], [4, 3], [5, 3]], standard))
+    first = record(tables, "B2．", 维度="有理有据", 产品="产品1")
+    second = record(tables, "B2．", 维度="有理有据", 产品="产品2")
+    assert first["有效题数"] == 5
+    assert first["达标题数"] == first["低质题数"] == 2
+    assert first["达标率"] == first["低质率"] == pytest.approx(2 / 5)
+    assert second["达标题数"] == second["低质题数"] == 0
+    pair = record(tables, "C1．", 维度="有理有据", **{"方向 A/B": "产品1 / 产品2"})
+    assert pair["达标率差"] == pair["低质率差"] == pytest.approx(2 / 5)
 
 
 def test_subgroups_and_no_human_accuracy_fabrication():
@@ -219,7 +269,8 @@ def test_bootstrap_preserves_pairing_reproducibility_and_query_groups():
     assert row["分差95%下限"] is None and "不足2个独立题组" in row["说明"]
 
 
-@pytest.mark.parametrize("standard,count", [("0.2-simplified", 2), ("0.2-simplified", 3), ("0.3", 2), ("0.3", 3)])
+@pytest.mark.parametrize("standard", STANDARDS)
+@pytest.mark.parametrize("count", [2, 3])
 def test_final_xlsx_has_one_statistics_sheet_with_numeric_percentages(standard, count):
     data = make_snapshot([[2, 3, 1][:count], [3, 2, 3][:count]], standard)
     data["dataset_name"] = "数据<&>\x00.xlsx"

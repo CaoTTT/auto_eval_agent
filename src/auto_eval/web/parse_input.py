@@ -1,4 +1,4 @@
-"""输入解析：上传 jsonl / csv → 标准化题目列表。
+"""输入解析：上传 JSON / JSONL / CSV → 标准化题目列表。
 
 每题返回 dict：
   compare:      {query, context?, product_count?, video1, video2, video3?,
@@ -14,7 +14,7 @@ import io
 import json
 import math
 from numbers import Real
-from typing import Literal
+from typing import Iterator, Literal
 from ..query_images import normalize_query_input
 
 Mode = Literal[
@@ -86,27 +86,39 @@ def _compare_product_count(obj: dict) -> int:
 
 
 def compare_evidence_mode(obj: dict) -> tuple[int, str]:
-    """JSONL 与直接 API 共用校验，避免绕过互斥和产品数量约束。"""
+    """Choose one complete evidence layer for every product in the case."""
     count = _compare_product_count(obj)
-    modes = set()
-    for product_no in range(1, count + 1):
-        video = obj.get(f"video{product_no}")
-        screenshot = obj.get(f"screenshot{product_no}")
-        has_video = video not in (None, "")
-        has_screenshot = screenshot not in (None, "")
-        if has_video and has_screenshot:
-            raise ValueError(f"产品{product_no}不能同时提供 video 和 screenshot")
-        field = f"screenshot{product_no}" if has_screenshot else f"video{product_no}"
-        value = screenshot if has_screenshot else video
-        if not isinstance(value, str) or not value.strip():
-            raise ValueError(f"compare 模式缺少 {field} 或路径不是非空字符串")
-        modes.add("long_screenshot" if has_screenshot else "video_frames")
-    if len(modes) != 1:
-        raise ValueError("同一 Case 不能混用视频和长截图")
-    mode = modes.pop()
-    if obj.get("evidence_mode") not in (None, "", mode):
-        raise ValueError("evidence_mode 与输入证据类型不一致")
-    return count, mode
+    if obj.get("evidence_mode") not in (None, "", "long_screenshot", "video_frames"):
+        raise ValueError("evidence_mode 只能是 long_screenshot 或 video_frames")
+    missing = {}
+    for kind in ("screenshot", "video"):
+        missing[kind] = [f"{kind}{n}" for n in range(1, count + 1)
+                         if not isinstance(obj.get(f"{kind}{n}"), str) or not obj[f"{kind}{n}"].strip()]
+    if not missing["screenshot"]:
+        return count, "long_screenshot"
+    if not missing["video"]:
+        return count, "video_frames"
+    raise ValueError(
+        "拒绝测评：无法为所有产品统一证据层；长截图缺少或路径无效："
+        + "、".join(missing["screenshot"]) + "；回退录屏仍缺少或路径无效："
+        + "、".join(missing["video"]) + "。同一 Case 不能混用视频和长截图"
+    )
+
+
+def normalize_compare_evidence(obj: dict) -> dict:
+    """Keep only selected input paths; unused evidence remains in source_data."""
+    count, mode = compare_evidence_mode(obj)
+    normalized = dict(obj)
+    selected = "screenshot" if mode == "long_screenshot" else "video"
+    for number in range(1, 4):
+        for kind in ("screenshot", "video"):
+            field = f"{kind}{number}"
+            if kind == selected and number <= count:
+                normalized[field] = obj[field].strip()
+            else:
+                normalized.pop(field, None)
+    normalized.update(product_count=count, evidence_mode=mode)
+    return normalized
 
 
 def parse_text(text: str, mode: Mode) -> tuple[list[dict], list[str]]:
@@ -116,31 +128,70 @@ def parse_text(text: str, mode: Mode) -> tuple[list[dict], list[str]]:
     return [], [f"{label}评测请导入 JSONL（含视频路径），不支持文本粘贴解析"]
 
 
-def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
-    """解析 jsonl；视频任务起止时间为可选秒数，空值使用默认策略。"""
-    items: list[dict] = []
-    errors: list[str] = []
-    video_item_ids: set[str] = set()
-    for ln, raw in enumerate(content.splitlines(), 1):
+def _json_records(content: str) -> Iterator[tuple[int, str, object, str | None]]:
+    """识别完整 JSON 文档，否则按 JSONL 逐行解析。
+
+    数组错误使用条目序号，source_line 对应数组位置（从 1 起）；
+    单对象和 JSONL 保留实际起始行号。语法错误与内容校验按输入顺序报告。
+    """
+    content = content.removeprefix("\ufeff")
+    if not content.strip():
+        return
+    try:
+        document = json.loads(content)
+    except json.JSONDecodeError as exc:
+        # 多条 JSONL 的首行也可能是数组：Extra data 仍按逐行规则处理。
+        if content.lstrip().startswith("[") and exc.msg != "Extra data":
+            yield 1, "JSON 数组", None, (
+                f"JSON 数组解析错误：第 {exc.lineno} 行、第 {exc.colno} 列：{exc.msg}"
+            )
+            return
+    else:
+        if isinstance(document, list):
+            if not document:
+                yield 1, "JSON 数组", None, "JSON 数组中没有数据项"
+            for index, obj in enumerate(document, 1):
+                yield index, f"第 {index} 条（JSON 数组）", obj, None
+            return
+        first_line = next(
+            line for line, raw in enumerate(content.splitlines(), 1) if raw.strip()
+        )
+        yield first_line, f"第 {first_line} 行", document, None
+        return
+    for line, raw in enumerate(content.splitlines(), 1):
         raw = raw.strip()
         if not raw:
             continue
         try:
             obj = json.loads(raw)
-        except json.JSONDecodeError as e:
-            errors.append(f"第 {ln} 行 JSON 错误：{e}")
+        except json.JSONDecodeError as exc:
+            yield line, f"第 {line} 行", None, f"第 {line} 行 JSON 错误：{exc}"
+        else:
+            yield line, f"第 {line} 行", obj, None
+
+
+def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
+    """解析 JSON 数组、单对象或 JSONL；复用同一套评测输入校验。"""
+    items: list[dict] = []
+    errors: list[str] = []
+    video_item_ids: set[str] = set()
+    for ln, location, obj, error in _json_records(content):
+        if error:
+            errors.append(error)
             continue
         if not isinstance(obj, dict):
-            errors.append(f"第 {ln} 行必须是 JSON 对象")
+            errors.append(f"{location}必须是 JSON 对象")
             continue
+        if isinstance(obj.get("id"), str) and obj["id"].strip():
+            location += f"（Case {obj['id'].strip()}）"
         q = obj.get("question") or obj.get("query")
         if not isinstance(q, str) or not q.strip():
-            errors.append(f"第 {ln} 行缺少 question")
+            errors.append(f"{location}缺少 question")
             continue
         item: dict = {"query": q.strip()}
         context = obj.get("context")
         if context is not None and not isinstance(context, str):
-            errors.append(f"第 {ln} 行 context 必须是字符串")
+            errors.append(f"{location} context 必须是字符串")
             continue
         if context and context.strip():
             item["context"] = context.strip()
@@ -149,7 +200,7 @@ def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
                 item.update(normalize_query_input(obj))
                 product_count, evidence_mode = compare_evidence_mode(obj)
             except ValueError as exc:
-                errors.append(f"第 {ln} 行 {exc}")
+                errors.append(f"{location} {exc}")
                 continue
             item["product_count"] = product_count
             item["evidence_mode"] = evidence_mode
@@ -158,7 +209,7 @@ def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
                 field = f"{'screenshot' if evidence_mode == 'long_screenshot' else 'video'}{product_no}"
                 value = obj.get(field)
                 if not isinstance(value, str) or not value.strip():
-                    errors.append(f"第 {ln} 行 compare 模式缺少 {field}")
+                    errors.append(f"{location} compare 模式缺少 {field}")
                     invalid = True
                     break
                 item[field] = value.strip()
@@ -167,7 +218,7 @@ def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
             try:
                 ct = _rich_content_times(obj)
             except ValueError as exc:
-                errors.append(f"第 {ln} 行 {exc}")
+                errors.append(f"{location} {exc}")
                 continue
             item.update(ct)
             for ctx_field in (
@@ -177,7 +228,7 @@ def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
                 val = obj.get(ctx_field)
                 if val is not None:
                     if not isinstance(val, str):
-                        errors.append(f"第 {ln} 行 {ctx_field} 必须是字符串")
+                        errors.append(f"{location} {ctx_field} 必须是字符串")
                         invalid = True
                         break
                     if val.strip():
@@ -191,7 +242,7 @@ def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
                 val = obj.get(ans_field)
                 if val is not None:
                     if not isinstance(val, str):
-                        errors.append(f"第 {ln} 行 {ans_field} 必须是字符串")
+                        errors.append(f"{location} {ans_field} 必须是字符串")
                         invalid = True
                         break
                     if val.strip():
@@ -204,32 +255,32 @@ def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
             item_id = obj.get("id")
             if item_id is not None:
                 if not isinstance(item_id, str) or not item_id.strip():
-                    errors.append(f"第 {ln} 行 id 必须是非空字符串")
+                    errors.append(f"{location} id 必须是非空字符串")
                     continue
                 item_id = item_id.strip()
                 if item_id in video_item_ids:
-                    errors.append(f"第 {ln} 行 id 重复：{item_id}")
+                    errors.append(f"{location} id 重复：{item_id}")
                     continue
                 video_item_ids.add(item_id)
                 item["id"] = item_id
         else:  # rich_content
             video_path = obj.get("video_path")
             if not isinstance(video_path, str) or not video_path.strip():
-                errors.append(f"第 {ln} 行 {mode} 模式缺少 video_path")
+                errors.append(f"{location} {mode} 模式缺少 video_path")
                 continue
             try:
                 video_times = _rich_content_times(obj)
             except ValueError as exc:
-                errors.append(f"第 {ln} 行 {exc}")
+                errors.append(f"{location} {exc}")
                 continue
             item_id = obj.get("id")
             if item_id is not None:
                 if not isinstance(item_id, str) or not item_id.strip():
-                    errors.append(f"第 {ln} 行 id 必须是非空字符串")
+                    errors.append(f"{location} id 必须是非空字符串")
                     continue
                 item_id = item_id.strip()
                 if item_id in video_item_ids:
-                    errors.append(f"第 {ln} 行 id 重复：{item_id}")
+                    errors.append(f"{location} id 重复：{item_id}")
                     continue
                 video_item_ids.add(item_id)
                 item["id"] = item_id
@@ -238,7 +289,7 @@ def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
             item.update(video_times)
             answer_text = obj.get("answer_text")
             if answer_text is not None and not isinstance(answer_text, str):
-                errors.append(f"第 {ln} 行 answer_text 必须是字符串")
+                errors.append(f"{location} answer_text 必须是字符串")
                 continue
             item["category"] = obj.get("category") or "default"
             if answer_text and answer_text.strip():

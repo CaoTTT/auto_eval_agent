@@ -26,8 +26,13 @@ DIMENSION_NAMES = dict(zip(DIMENSIONS, (
     "理解需求", "内容准确性", "服务闭环", "场景化满足", "直观高效", "有理有据", "引导推荐",
 )))
 SCORE_DIMENSIONS = tuple(d for d in DIMENSIONS if d != "accuracy")
-# Reporting thresholds, not a conversion between the two scoring standards.
-THRESHOLDS = {"0.2-simplified": (4, 2), "0.3": (2, 1)}
+# Reporting thresholds, not a conversion between scoring standards.
+THRESHOLDS = {
+    "0.2-simplified": (4, 2),
+    "0.2-simplified-calibrated": (4, 2),
+    "0.2-simplified-thinking-exposure": (4, 2),
+    "0.3": (2, 1),
+}
 BOOTSTRAP_SAMPLES = 2000
 BOOTSTRAP_SEED = 20260911
 GATE_STATES = ("pass", "fail", "unclear")
@@ -426,8 +431,8 @@ def build_compare_statistics(snapshot: dict, aligned_results: list[dict]) -> lis
         ["GSB", "从方向A/B的A看：高于B为G，同分为S，低于B为B；净胜率=(G-B)/(G+S+B)。"],
         ["缺失值", "NA不补0或满分；不适用、无法核验、输入失败、Gate阻断、技术失败分别统计。—表示不可计算。"],
         ["准确性", "仅汇总适用性和核验状态；不汇总内容准确性分数、GSB或排名。"],
-        ["总分", "当前两个标准没有正式维度权重，不计算加权总分、综合胜负或总体排名。"],
-        ["阈值", "V0.2简化版：达标≥4、低质≤2；V0.3：达标≥2、低质≤1。统计阈值不代表跨版本等价。"],
+        ["总分", "当前各标准没有正式维度权重，不计算加权总分、综合胜负或总体排名。"],
+        ["阈值", "V0.2简化版及其评分校准版：达标≥4、低质≤2；V0.3：达标≥2、低质≤1。统计阈值不代表跨版本等价，校准版与旧版分别统计。"],
         ["受限证据", "有效评分中，相关产品输入partial、Gate unclear、维度部分核验或长截图风险切片的题数。"],
         ["置信区间", f"配对题组百分位Bootstrap，{BOOTSTRAP_SAMPLES}次，固定seed={BOOTSTRAP_SEED}；按会话或重复Query分组。仅反映本样本抽样不确定性，不代表裁判准确性。"],
         ["解释", "各产品均分使用各自有效样本；比较只用共同有效样本。结合Gate失败和覆盖率判断差距；无现网权重时结论仅适用于本测评集。"],
