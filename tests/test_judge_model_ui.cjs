@@ -35,7 +35,7 @@ async function main() {
         judges: [{name: 'judge_2', display: '终端用户', recommended_concurrency: 4}],
         judge_model_profiles: profiles, default_judge_model_profile: 'bailian_35',
       })};
-      if (url === '/api/history?limit=50') return {ok: true, json: async () => ({items: []})};
+      if (url.startsWith('/api/history?')) return {ok: true, json: async () => ({items: []})};
       if (url.startsWith('/api/history/')) return {ok: true, json: async () => snapshot};
       if (url === '/api/queue') return {ok: true, json: async () => queue};
       if (url === '/api/request-pacing') return {ok: true, json: async () => ({

@@ -185,7 +185,8 @@ async def test_compact_stream_restores_running_status_and_frozen_done_timing(mon
 
 
 @pytest.mark.asyncio
-async def test_history_api_uses_live_timing_and_keeps_legacy_duration_unknown(tmp_path, monkeypatch, clock):
+@pytest.mark.parametrize("page", [None, 1])
+async def test_history_api_uses_live_timing_and_keeps_legacy_duration_unknown(tmp_path, monkeypatch, clock, page):
     monkeypatch.setattr(history, "HISTORY_DIR", tmp_path)
     registry = tasks.OrderedDict()
     monkeypatch.setattr(tasks, "TASKS", registry)
@@ -206,7 +207,7 @@ async def test_history_api_uses_live_timing_and_keeps_legacy_duration_unknown(tm
     assert disk_row["task_timing"]["incomplete"] is True
 
     clock.update(wall=1020.0, mono=70.0)
-    rows = {row["task_id"]: row for row in (await server.api_history())["items"]}
+    rows = {row["task_id"]: row for row in (await server.api_history(page=page))["items"]}
     live = rows[value.id]
     assert live["status"] == "running"
     assert live["task_timing"]["elapsed_s"] == 20.0

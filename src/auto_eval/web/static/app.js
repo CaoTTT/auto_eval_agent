@@ -161,6 +161,11 @@ createApp({
     const progressJumpPage = ref("");
     const cellTooltip = ref({ visible: false, text: "", style: {} });
     const historyItems = ref([]);
+    const historyPage = ref(1);
+    const historyTotal = ref(0);
+    const historyPageSize = 10;
+    const historyPageCount = computed(() => Math.max(1, Math.ceil(historyTotal.value / historyPageSize)));
+    const historyError = ref("");
     const historyNoteDrafts = ref({});
     const historyNoteEditing = ref({});
     const loadingHistory = ref(false);
@@ -171,6 +176,7 @@ createApp({
     const exportDownloadUrl = ref("");
     let historyLoadVersion = 0;
     let historyListVersion = 0;
+    let historyRequestedPage = 1;
     let historyLoadController = null;
     let disposed = false;
     const queueState = ref({ running: null, queued: [] });
@@ -1534,27 +1540,39 @@ createApp({
       return d.toLocaleString();
     }
 
-    async function loadHistory() {
+    async function loadHistory(requestedPage = historyRequestedPage) {
+      requestedPage = Math.max(1, Math.trunc(Number(requestedPage)) || 1);
+      historyRequestedPage = requestedPage;
       const version = ++historyListVersion;
       loadingHistory.value = true;
+      historyError.value = "";
       try {
-        const r = await fetch("/api/history?limit=50");
-        if (!r.ok) return;
+        const r = await fetch(`/api/history?page=${requestedPage}`);
+        if (!r.ok) throw new Error("请稍后重试");
         const d = await r.json();
-        if (version !== historyListVersion) return;
+        if (version !== historyListVersion || disposed) return;
         historyItems.value = (d.items || []).map(item => ({ ...item, task_timing: receiveTaskTiming(item.task_timing) }));
+        historyTotal.value = d.total ?? historyItems.value.length;
+        historyPage.value = d.page || requestedPage;
+        historyRequestedPage = historyPage.value;
         const selected = historyItems.value.find(item => item.task_id === taskId.value);
         if (selected) {
           updateTaskTiming(selected.task_timing);
           if (selected.judge_runtime) taskJudgeRuntime.value = selected.judge_runtime;
           taskJudgeSummary.value = {judge_model: selected.judge_model, enable_thinking_label: selected.enable_thinking_label};
         }
-        historyNoteDrafts.value = Object.fromEntries(
-          historyItems.value.map((item) => [item.task_id,
+        historyNoteDrafts.value = Object.fromEntries([
+          // Keep unfinished note edits when their rows are on another page.
+          ...Object.entries(historyNoteDrafts.value).filter(([id]) => historyNoteEditing.value[id]),
+          ...historyItems.value.map((item) => [item.task_id,
             historyNoteEditing.value[item.task_id] ? historyNoteDrafts.value[item.task_id] : item.note || ""]),
-        );
-        historyNoteEditing.value = Object.fromEntries(historyItems.value
-          .filter(item => historyNoteEditing.value[item.task_id]).map(item => [item.task_id, true]));
+        ]);
+        historyNoteEditing.value = Object.fromEntries(Object.entries(historyNoteEditing.value)
+          .filter(([, editing]) => editing));
+      } catch (error) {
+        if (version !== historyListVersion || disposed) return;
+        historyRequestedPage = historyPage.value;
+        historyError.value = "历史记录加载失败：" + (error?.message || "网络错误");
       } finally {
         if (version === historyListVersion) loadingHistory.value = false;
       }
@@ -1714,6 +1732,8 @@ createApp({
         results.value = [];
         summary.value = null;
       }
+      delete historyNoteDrafts.value[id];
+      delete historyNoteEditing.value[id];
       await loadHistory();
     }
 
@@ -1909,6 +1929,7 @@ createApp({
 
     onUnmounted(() => {
       disposed = true;
+      historyListVersion++;
       datasetImportVersion++;
       cancelHistoryLoad();
       if (progressClockTimer != null) window.clearInterval(progressClockTimer);
@@ -1931,6 +1952,7 @@ createApp({
       failedResultIndexes, retryIndexSelected, toggleRetryIndex, retryFailedCases,
       itemProgress, progressEvents, expandedProgressLogs, pagedProgressRows, progressStages,
       historyItems, historyNoteDrafts, historyNoteEditing, loadingHistory, pageSize,
+      historyPage, historyTotal, historyPageSize, historyPageCount, historyError,
       loadingTaskId, exportingTaskId, exportMessage, exportError, exportDownloadUrl,
       opPage, opPageSize, opPageCount, opJumpPage,
       progressPage, progressPageCount, progressJumpPage,

@@ -32,7 +32,7 @@ async function main() {
     document: { hidden: false },
     createApp(options) { app = options.setup(); return { mount() {} }; }, EventSource: FakeStream,
     async fetch(url) { return { ok: true, json: async () => url === '/api/queue' ? { running: queueRunning }
-      : url === '/api/history?limit=50' ? { items: historyRows } : snapshots[url.replace('/api/history/', '')] || {} }; },
+      : url.startsWith('/api/history?') ? { items: historyRows } : snapshots[url.replace('/api/history/', '')] || {} }; },
   });
   await mounted();
   await app.loadHistoryTask('live');

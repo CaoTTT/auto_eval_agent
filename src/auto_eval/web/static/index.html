@@ -78,9 +78,11 @@
   </section>
 
   <details class="history-section">
-    <summary>历史记录（{{ historyItems.length }}）<button @click.stop="loadHistory" :disabled="loadingHistory" style="margin-left:8px">刷新</button></summary>
+    <summary>历史记录（{{ historyTotal }}）<button @click.stop="loadHistory()" :disabled="loadingHistory" style="margin-left:8px">刷新</button></summary>
     <p class="hint">历史结果保存在本地 runs/web_history，服务重启后仍可加载；运行中断时会保留已完成的题目。</p>
-    <div class="table-scroll" v-if="historyItems.length">
+    <p v-if="historyError" class="err" role="alert">{{ historyError }}</p>
+    <p v-if="loadingHistory" class="hint" role="status">正在读取历史记录…</p>
+    <div class="table-scroll" v-if="historyItems.length" :aria-busy="loadingHistory">
       <table class="grid history-table auto-table">
         <thead><tr><th>时间</th><th>数据集</th><th>模式</th><th>评测标准</th><th>裁判模型 / 思考</th><th>状态</th><th class="history-progress-cell">进度</th><th>任务总耗时</th><th>预览</th><th>操作</th><th>批跑备注</th></tr></thead>
         <tbody>
@@ -122,7 +124,17 @@
         </tbody>
       </table>
     </div>
-    <p v-else class="hint">暂无历史记录。</p>
+    <p v-else-if="!loadingHistory && !historyError" class="hint">暂无历史记录。</p>
+    <nav v-if="historyTotal > 0" class="pagination" aria-label="历史记录分页">
+      <span class="page-size page-size-fixed">共 {{ historyTotal }} 条 · 每页 {{ historyPageSize }} 条</span>
+      <button @click="loadHistory(historyPage - 1)" :disabled="historyPage <= 1 || loadingHistory">上一页</button>
+      <template v-for="page in paginationPages(historyPage, historyPageCount)" :key="page">
+        <button v-if="typeof page === 'number'" class="page-number" :class="{active: page === historyPage}" :aria-current="page === historyPage ? 'page' : undefined" :aria-label="'第 ' + page + ' 页'" @click="loadHistory(page)" :disabled="loadingHistory || page === historyPage">{{ page }}</button>
+        <span v-else class="page-ellipsis">…</span>
+      </template>
+      <button @click="loadHistory(historyPage + 1)" :disabled="historyPage >= historyPageCount || loadingHistory">下一页</button>
+      <span aria-live="polite">第 {{ historyPage }} / {{ historyPageCount }} 页</span>
+    </nav>
   </details>
   <section v-if="exportMessage || exportError" class="export-notice" role="status" aria-live="polite" aria-atomic="true" :aria-busy="!!exportingTaskId">
     <div class="export-notice-heading">
@@ -537,6 +549,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20260917_pause_dispatch"></script>
+  <script type="module" src="/static/app.js?v=20260917_history_pagination"></script>
 </body>
 </html>

@@ -26,7 +26,7 @@ async function main() {
         return {ok: true, json: async () => ({status: snapshot.status})};
       }
       return {ok: true, json: async () => url.startsWith('/api/history/') ? {...snapshot}
-        : url === '/api/history?limit=50' ? {items: []} : {}};
+        : url.startsWith('/api/history?') ? {items: []} : {}};
     },
   });
   await mounted();

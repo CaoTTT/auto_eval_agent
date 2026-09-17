@@ -1043,8 +1043,16 @@ def api_dataset_media_file(token: str, download: bool = False):
 
 
 @app.get("/api/history")
-async def api_history(limit: int = 50):
-    rows = await asyncio.to_thread(list_snapshots, limit=limit)
+async def api_history(limit: int = 50, page: int | None = None):
+    # Keep the legacy limit-only API; paginated callers can reach all history.
+    rows = await asyncio.to_thread(list_snapshots, limit=limit if page is None else None)
+    pagination = {}
+    if page is not None:
+        total = len(rows)
+        page_size = 10
+        page = min(max(1, page), max(1, (total + page_size - 1) // page_size))
+        rows = rows[(page - 1) * page_size:page * page_size]
+        pagination = {"total": total, "page": page, "page_size": page_size}
     # 磁盘历史会把 pending/running/queued 视为上次服务中断；当前进程中的活
     # 对象需覆盖回来，避免历史列表把正在排队或运行的任务误显示为 error。
     for row in rows:
@@ -1058,7 +1066,7 @@ async def api_history(limit: int = 50):
         row["repair_status"] = task.repair_status
         row["done"] = task.done_total
         row["total"] = len(task.items)
-    return {"items": rows}
+    return {"items": rows, **pagination}
 
 
 @app.get("/api/history/{task_id}")
