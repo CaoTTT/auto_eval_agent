@@ -48,7 +48,7 @@ def test_registry_defaults_to_stable_v02_and_exposes_experimental_versions():
     assert calibrated.observation_model is VisualCompareObservationV02
     thinking_exposure = resolve_compare_protocol(V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID)
     assert thinking_exposure.status == "experimental"
-    assert thinking_exposure.display == "V0.2 简化版·思考暴露优化（实验）"
+    assert thinking_exposure.display == "V0.2 简化版·思考暴露优化（可用）"
     assert thinking_exposure.public_metadata()["input_modalities"] == ["text", "text_image"]
     assert thinking_exposure.observation_model is VisualCompareObservationV02
     assert thinking_exposure.require_response_pass is True
