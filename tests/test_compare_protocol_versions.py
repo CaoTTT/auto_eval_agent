@@ -161,7 +161,7 @@ async def test_eval_api_freezes_selected_protocol_on_new_task(monkeypatch):
     assert thinking_exposure_response["evaluation_profile"] == V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID
     manifest = created[-1].protocol_manifest
     assert manifest["standard_version"] == "0.2-simplified-thinking-exposure"
-    assert manifest["bundle_revision"] == "0.2.4"
+    assert manifest["bundle_revision"] == "0.2.3"
     assert manifest["score_range"] == [1, 5]
     assert manifest["status"] == "experimental"
     public = server_module.api_config()["evaluation_profiles"]
@@ -243,15 +243,15 @@ def test_existing_protocol_revisions_still_restore(protocol_id, revision):
 @pytest.mark.parametrize("product_count", [2, 3])
 @pytest.mark.parametrize("evidence_mode", ["video_frames", "long_screenshot"])
 def test_thinking_exposure_restores_real_frozen_templates(product_count, evidence_mode):
-    from auto_eval.judges.visual_compare_prompt_v02_thinking_exposure_r023 import (
+    from auto_eval.judges.visual_compare_prompt_v02_thinking_exposure import (
         VISUAL_COMPARE_SYSTEM as frozen_system,
         VISUAL_COMPARE_USER as frozen_user,
     )
 
     latest = resolve_compare_protocol(V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID)
-    frozen = resolve_compare_protocol(V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID, "0.2.3")
-    assert latest.bundle_revision == "0.2.4"
-    assert frozen.bundle_revision == "0.2.3"
+    frozen = resolve_compare_protocol(V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID, "0.2.4")
+    assert latest.bundle_revision == "0.2.3"
+    assert frozen.bundle_revision == "0.2.4"
     assert frozen.system_template is frozen_system
     assert frozen.user_template is frozen_user
     assert frozen.observation_model is latest.observation_model
@@ -259,8 +259,23 @@ def test_thinking_exposure_restores_real_frozen_templates(product_count, evidenc
     assert frozen.public_metadata()["input_modalities"] == ["text", "text_image"]
     kwargs = dict(persona="test", product_count=product_count, evidence_mode=evidence_mode)
     marker = "定位候选→语义分类→最终保留取证→Gate决策"
-    assert marker in latest.system_template.render(**kwargs)
-    assert marker not in frozen.system_template.render(**kwargs)
-    assert marker in latest.user_template.render(**kwargs)
-    assert marker not in frozen.user_template.render(**kwargs)
+    assert marker not in latest.system_template.render(**kwargs)
+    assert marker in frozen.system_template.render(**kwargs)
+    assert marker not in latest.user_template.render(**kwargs)
+    assert marker in frozen.user_template.render(**kwargs)
     assert resolve_compare_protocol(V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID) is latest
+
+
+def test_thinking_exposure_ui_only_exposes_r023():
+    from auto_eval.judges.visual_compare_prompt_v02_thinking_exposure_r023 import (
+        VISUAL_COMPARE_SYSTEM, VISUAL_COMPARE_USER,
+    )
+    profiles = [p for p in list_compare_protocols() if p.id == V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID]
+    assert len(profiles) == 1
+    active = profiles[0]
+    assert active.public_metadata()["bundle_revision"] == "0.2.3"
+    assert active.system_template is VISUAL_COMPARE_SYSTEM
+    assert active.user_template is VISUAL_COMPARE_USER
+    assert resolve_compare_protocol(active.id, "0.2.3") is active
+    archived = resolve_compare_protocol(active.id, "0.2.4")
+    assert archived not in list_compare_protocols()
