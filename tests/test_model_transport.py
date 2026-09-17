@@ -198,10 +198,14 @@ async def test_explicit_quota_groups_share_and_restrict_conflicting_budgets():
 
 def test_flash_without_profile_does_not_inherit_legacy_env_budgets(monkeypatch):
     monkeypatch.setenv("AUTO_EVAL_BAILIAN_RPM", "400")
+    monkeypatch.setenv("AUTO_EVAL_BAILIAN_TPM", "800000")
     cfg = judge("qwen3.8-flash")
-    assert pacing_config(cfg)["rpm"] == 60
-    assert pacing_config(cfg)["rps"] == 1
-    assert recommended_concurrency([cfg]) == 4
+    assert pacing_config(cfg)["rpm"] == 30_000
+    assert pacing_config(cfg)["tpm"] == 20_000_000
+    assert pacing_config(cfg)["rps"] == 500
+    assert recommended_concurrency([cfg]) == 128
+    assert pacing_config(judge())["rpm"] == 400
+    assert pacing_config(judge())["tpm"] == 800_000
     configured = cfg.model_copy(update={"rate_limit": RateLimitConfig(rpm=1200, rps=20, max_inflight=32)})
     assert pacing_config(configured)["rpm"] == 1200
     assert recommended_concurrency([configured]) == 32

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
-from auto_eval.config import AppConfig, JudgeConfig, JudgeModelProfile, VisualModeProfile
+from auto_eval.config import AppConfig, JudgeConfig, JudgeModelProfile, RateLimitConfig, VisualModeProfile
 from auto_eval.judge_profiles import (
     check_frozen_options, default_profile_id, model_profiles, resolve_new_runtime, restore_runtime, legacy_runtime,
 )
@@ -53,6 +53,60 @@ def test_legacy_bailian_auto_discovers_models_and_retains_default():
     assert default_profile_id(app) == "bailian_qwen35_397b"
     app.judges[0].model = "qwen3.8-flash"
     assert default_profile_id(app) == "bailian_qwen38_flash"
+
+
+@pytest.mark.asyncio
+async def test_old_flash_runtime_uses_current_quota_without_restricting_new_tasks():
+    from auto_eval.request_throttle import shared_throttle
+
+    app = config()
+    runtime, _ = resolve_new_runtime(app, {"judge_model_profile": "bailian_qwen38_flash", "enable_thinking": False})
+    runtime["judges"][0]["rate_limit"] = RateLimitConfig(
+        rpm=60, tpm=100_000, rps=1, max_inflight=4,
+    ).model_dump()
+    before = copy.deepcopy(runtime)
+    restored = restore_runtime(app, runtime)[0]
+    fresh = resolve_new_runtime(app, {"judge_model_profile": "bailian_qwen38_flash"})[1][0]
+    throttle = shared_throttle(restored)
+    assert shared_throttle(fresh) is throttle
+    assert throttle.snapshot()["request_budget"] == 30_000
+    assert throttle.snapshot()["token_budget"] == 20_000_000
+    assert throttle.snapshot()["max_inflight"] == 128
+    assert restored.enable_thinking is False
+    assert runtime == before
+
+
+@pytest.mark.parametrize("explicit_rate", [None, RateLimitConfig(rpm=120, tpm=200_000, rps=2, max_inflight=16)])
+def test_restore_uses_current_admin_quota_even_after_profile_rename(explicit_rate):
+    from auto_eval.request_throttle import pacing_config
+
+    app = config()
+    runtime, _ = resolve_new_runtime(app, {"judge_model_profile": "bailian_qwen38_flash", "enable_thinking": False})
+    app.judge_model_profiles = [JudgeModelProfile(
+        id="renamed_flash", display="Flash", judge_name="judge_2", model="qwen3.8-flash",
+        supports_thinking=True, default_enable_thinking=True, rate_limit=explicit_rate,
+    )]
+    app.judges[0].temperature = .7
+    restored = restore_runtime(app, runtime)[0]
+    assert restored.rate_limit == explicit_rate
+    assert pacing_config(restored)["tpm"] == (explicit_rate.tpm if explicit_rate else 20_000_000)
+    assert restored.enable_thinking is False and restored.temperature == 0
+
+
+@pytest.mark.parametrize("change", ["model", "base_url", "api_key_env"])
+def test_restore_does_not_apply_an_unrelated_connection_or_model_quota(change):
+    app = config()
+    runtime, _ = resolve_new_runtime(app, {"judge_model_profile": "bailian_qwen38_flash"})
+    profiles = model_profiles(app)
+    app.judge_model_profiles = profiles
+    flash = profiles[1]
+    flash.rate_limit = RateLimitConfig(rpm=120, tpm=200_000, rps=2, max_inflight=16)
+    if change == "model":
+        flash.model = "another-model"
+    else:
+        setattr(app.judges[0], change, "changed")
+    restored = restore_runtime(app, runtime)[0]
+    assert restored.model_dump() == runtime["judges"][0]
 
 
 def test_admin_default_is_honored_by_legacy_judge_only_clients():

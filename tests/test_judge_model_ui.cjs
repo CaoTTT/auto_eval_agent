@@ -10,7 +10,7 @@ async function main() {
     {id: 'bailian_35', display: 'Qwen 3.5', model: 'qwen3.5-397b-a17b', supports_thinking: true,
       default_enable_thinking: true, recommended_concurrency: 128, request_pacing: true},
     {id: 'bailian_38', display: 'Qwen 3.8 Flash', model: 'qwen3.8-flash', supports_thinking: true,
-      default_enable_thinking: false, recommended_concurrency: 32, request_pacing: true},
+      default_enable_thinking: false, recommended_concurrency: 128, request_pacing: true},
     {id: 'other', display: 'Other provider', model: 'another-model', supports_thinking: false,
       default_enable_thinking: null, recommended_concurrency: 4, request_pacing: false},
   ];
@@ -56,6 +56,13 @@ async function main() {
   assert.equal(app.enableThinking.value, true);
   assert.equal(app.concurrency.value, 128);
   assert.equal(app.selectedJudges.value.join(), 'judge_2');
+  app.concurrency.value = 16;
+  app.selectedJudgeModelProfile.value = 'bailian_38';
+  app.changeJudgeModel({type: 'change'});
+  assert.equal(app.concurrency.value, 16, 'model changes preserve manually chosen concurrency');
+  app.selectedJudgeModelProfile.value = 'bailian_35';
+  app.changeJudgeModel();
+  assert.equal(app.concurrency.value, 16, 'switching back does not reset concurrency');
 
   for (const mode of ['rich_content', 'compare']) {
     app.mode.value = mode;
@@ -64,20 +71,33 @@ async function main() {
     for (const profile of profiles.slice(0, 2)) {
       app.selectedJudgeModelProfile.value = profile.id;
       app.changeJudgeModel();
-      assert.equal(app.concurrency.value, profile.recommended_concurrency);
-      for (const thinking of [true, false]) {
-        app.enableThinking.value = thinking;
-        await app.submit();
-        const {body} = requests.at(-1);
-        assert.equal(body.mode, mode);
-        assert.equal(body.options.judge_model_profile, profile.id);
-        assert.equal(body.options.enable_thinking, thinking, 'false must be sent explicitly');
-        assert.deepEqual(body.options.judges, ['judge_2']);
+      for (const concurrency of [1, 16, 128]) {
+        app.concurrency.value = concurrency;
+        for (const thinking of [true, false]) {
+          app.enableThinking.value = thinking;
+          assert.equal(app.concurrency.value, concurrency, 'thinking changes preserve manual concurrency');
+          await app.submit();
+          const {body} = requests.at(-1);
+          assert.equal(body.mode, mode);
+          assert.equal(body.options.judge_model_profile, profile.id);
+          assert.equal(body.options.enable_thinking, thinking, 'false must be sent explicitly');
+          assert.equal(body.options.concurrency, concurrency, 'new tasks submit the chosen concurrency');
+          assert.deepEqual(body.options.judges, ['judge_2']);
+        }
       }
     }
   }
+  for (const invalid of [0, 129, 1.5, '', NaN]) {
+    app.concurrency.value = invalid;
+    const before = requests.length;
+    await app.submit();
+    assert.equal(requests.length, before, 'invalid concurrency cannot be submitted');
+    assert.match(app.runError.value, /评估并发数必须为 1–128 的整数/);
+  }
+  app.concurrency.value = 128;
   app.selectedJudgeModelProfile.value = 'other';
   app.changeJudgeModel();
+  assert.equal(app.concurrency.value, 4, 'lower model capacity caps the previous concurrency');
   app.enableThinking.value = true;
   await app.submit();
   assert.equal(requests.at(-1).body.options.judge_model_profile, 'other');
@@ -98,7 +118,11 @@ async function main() {
   app.changeJudgeModel();
   assert.equal(app.judgeRuntimeLabel(app.taskJudgeRuntime.value), 'qwen3.8-flash · 思考关闭',
     'editing next task settings cannot relabel the loaded task');
+  assert.equal(app.concurrency.value, 4, 'moving back to a higher model capacity preserves the smaller value');
+  app.concurrency.value = 11;
+  app.resumeConcurrency.value = 67;
   await app.controlTask('resume');
+  assert.equal(requests.at(-1).body.concurrency, 67, 'resume uses its own concurrency rather than the new-task setting');
   assert.equal('judge_model_profile' in requests.at(-1).body, false);
   assert.equal('enable_thinking' in requests.at(-1).body, false);
   await app.retryFailedCases([0]);
@@ -126,8 +150,10 @@ async function main() {
   assert.match(html, /id="judge-model-profile"/);
   assert.match(html, /id="judge-enable-thinking"[^>]*role="switch"/);
   assert.match(html, /本任务实际配置/);
+  assert.match(html, /评估并发数/);
+  assert.match(html, /运行中调整请先暂停，再修改“恢复并发数”继续/);
   assert.doesNotMatch(html, /任意连续 1 秒最多启动 9 次请求/);
-  console.log('Judge model UI: both modes × four combinations, capabilities, frozen display, legacy records, resume/retry and per-model pacing passed');
+  console.log('Judge model UI: model/thinking combinations, manual concurrency, resume concurrency, capabilities, frozen display, legacy records and per-model pacing passed');
 }
 
 main().catch(error => { console.error(error); process.exitCode = 1; });

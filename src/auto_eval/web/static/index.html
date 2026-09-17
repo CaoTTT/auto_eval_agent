@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <title>auto_eval 评估台</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260917_judge_models">
+  <link rel="stylesheet" href="/static/style.css?v=20260917_model_quota">
   <style>
     .op-cards { display:flex; flex-direction:column; gap:12px; }
     .op-card { border:1px solid #e2e8f0; border-radius:8px; padding:12px; background:#fafbfc; }
@@ -229,21 +229,20 @@
       <span class="hint">任务创建后版本冻结；失败补跑沿用原版本。</span>
     </div>
     <div class="row">
-      <label class="lbl" for="case-concurrency">Case 容量：</label>
-      <input id="case-concurrency" type="number" min="1" max="128" v-model.number="concurrency" aria-describedby="case-capacity-help" style="width:70px">
-      <span id="case-capacity-help" class="hint">1–128 条同时处理，包含等待模型响应的 Case<template v-if="requestPacing">；媒体同时处理最多 {{ mediaConcurrency }} 条</template>。</span>
+      <label class="lbl" for="case-concurrency">评估并发数：</label>
+      <input id="case-concurrency" type="number" min="1" max="128" step="1" v-model.number="concurrency" :disabled="submitting" aria-describedby="case-capacity-help" style="width:70px">
+      <span id="case-capacity-help" class="hint">新任务同时处理 1–128 题；运行中调整请先暂停，再修改“恢复并发数”继续。</span>
     </div>
     <details class="hint request-pacing-hint" id="case-capacity-details">
-      <summary>并发容量与限速说明</summary>
-      <p>128 是平台预留的工程容量上限，用于重叠长响应的等待时间并控制资源占用；它不是官方并发配额，也不是压测得出的最优值。可按本机资源调低，提高容量不会提高发送额度。</p>
+      <summary>并发与流量控制说明</summary>
+      <p>并发数控制同时处理的题目数量，包含媒体准备、模型调用和等待响应。降低并发可减少同时处理的工作；128 是平台处理容量上限，可按服务器资源和实际吞吐调整。</p>
       <p v-if="requestPacing">媒体处理指视频抽帧、长截图切片、图片压缩与编码，会占用 CPU、内存和磁盘；当前同时处理上限为 {{ mediaConcurrency }}，由管理员按服务器资源调整。处理完成即可发送模型请求，不占用媒体槽位等待响应。</p>
-      <p v-if="requestPacing">百炼按所选模型的请求和 Token 预算平滑发送；提高 Case 容量不会提高发送额度。运行中的实际发送预算显示在任务队列下方。</p>
-      <p v-else>当前模型不适用百炼自动限流，请根据模型服务额度设置 Case 容量。</p>
-      <p><strong>容量估算：</strong>同时等待响应的请求数 ≈ 实际每秒发送数 × 平均响应秒数。例如每秒 1.5 次、30 秒返回，约 45 条请求同时等待。Case 还包含媒体准备、多轮和重试，128 为这些等待预留空间，实际容量可调低。</p>
+      <p v-if="requestPacing">实际发送仍受所选模型的 RPM（每分钟请求数）、TPM（每分钟 Token 数）预算及服务端限流约束。运行中的发送预算显示在任务队列下方。</p>
+      <p v-else>当前模型不适用百炼自动限流，请根据模型服务额度设置评估并发数。</p>
       <template v-if="requestPacing">
         <p><strong>模型额度：</strong>不同模型、地域及账号的配额可能不同，由管理员按百炼控制台配置；同一模型的思考开关共用额度。<a href="https://help.aliyun.com/zh/model-studio/rate-limit" target="_blank" rel="noopener noreferrer">查看官方限流说明</a>。</p>
         <p><strong>本平台设计：</strong>每次发送（含重试）都检查连续 1 秒和 60 秒窗口、Token 预算，平滑放行；同一配额组共享控制器。连接等待和模型响应可并行，遇到限流共享冷却并降速。</p>
-        <p><strong>适用范围：</strong>当前仅在同一服务进程内共享；多进程或其他程序须统一纳管。Token 用量与动态增速仍可能触发 429，容量 128 不代表每秒发送 128 次。</p>
+        <p><strong>适用范围：</strong>额度控制仅在同一服务进程内共享；多进程或其他程序同时调用时，须统筹账号用量。</p>
       </template>
     </details>
     <div class="row">
@@ -538,6 +537,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20260917_judge_models"></script>
+  <script type="module" src="/static/app.js?v=20260917_model_quota"></script>
 </body>
 </html>

@@ -45,11 +45,11 @@ async def test_second_hard_window_survives_disabled_pacing_and_huge_rpm_override
         sent.append(record.sent)
         throttle.finish(record, {"total_tokens": 0})
     for index, timestamp in enumerate(sent):
-        if index >= 9:
-            assert timestamp - sent[index - 9] > 1
+        if index >= 10:
+            assert timestamp - sent[index - 10] > 1
         if index >= MAX_RPM:
             assert timestamp - sent[index - MAX_RPM] > 60
-    assert throttle.snapshot()["peak_requests_last_second"] == 9
+    assert throttle.snapshot()["peak_requests_last_second"] == 10
 
 
 @pytest.mark.asyncio
@@ -60,7 +60,7 @@ async def test_strict_boundary_and_pause_do_not_accumulate_permits():
     clock.now = 100
     next_record = await throttle.acquire(1)
     last = await throttle.acquire(1)
-    assert last.sent - next_record.sent >= .125 + DISPATCH_GUARD_S - 1e-9
+    assert last.sent - next_record.sent >= .1 + DISPATCH_GUARD_S - 1e-9
     throttle.finish(next_record)
     throttle.finish(last)
 
@@ -75,13 +75,13 @@ async def test_large_request_pacing_does_not_restart_warmup_while_waiting():
     throttle.finish(second, {"total_tokens": 10})
     third = await throttle.acquire(500_000)
     assert first.sent == 0  # Warmup never adds a delay before the first send.
-    assert second.sent - first.sent == pytest.approx(37.5 + DISPATCH_GUARD_S)
-    assert third.sent - second.sent == pytest.approx(37.5 + DISPATCH_GUARD_S)
+    assert second.sent - first.sent == pytest.approx(30 + DISPATCH_GUARD_S)
+    assert third.sent - second.sent == pytest.approx(30 + DISPATCH_GUARD_S)
     throttle.finish(third)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("tokens,expected_gap", [(50_000, 3.75), (100_000, 7.5), (150_000, 11.25)])
+@pytest.mark.parametrize("tokens,expected_gap", [(50_000, 3), (100_000, 6), (150_000, 9)])
 async def test_startup_large_requests_use_token_pacing_without_extra_warmup(tokens, expected_gap):
     clock = Clock()
     throttle = RequestThrottle(clock=clock, sleep=clock.sleep, warmup_s=15)
@@ -106,7 +106,7 @@ async def test_idle_restart_does_not_multiply_large_request_token_interval():
     second = await throttle.acquire(100_000)
     assert second.sent == 31
     third = await throttle.acquire(100_000)
-    assert third.sent - second.sent == pytest.approx(7.5 + DISPATCH_GUARD_S)
+    assert third.sent - second.sent == pytest.approx(6 + DISPATCH_GUARD_S)
     throttle.finish(second)
     throttle.finish(third)
 
@@ -137,11 +137,11 @@ async def test_warmup_restarts_only_after_finished_work_is_truly_idle():
     clock.now = 90  # Long-running responses are active, not idle.
     throttle.finish(first, {"total_tokens": 10})
     second = await throttle.acquire(100)
-    assert second.interval == pytest.approx(.125 + DISPATCH_GUARD_S)
+    assert second.interval == pytest.approx(.1 + DISPATCH_GUARD_S)
     throttle.finish(second, {"total_tokens": 10})
     clock.now += 31  # No queued, preparing-to-send or in-flight work.
     third = await throttle.acquire(100)
-    assert third.interval == pytest.approx(.5 + DISPATCH_GUARD_S)
+    assert third.interval == pytest.approx(.4 + DISPATCH_GUARD_S)
     throttle.finish(third)
 
 
@@ -154,7 +154,7 @@ async def test_slow_connection_does_not_consume_startup_or_idle_warmup():
         await throttle.wait_until_ready(100)
         clock.now += connection_delay  # Pool/TCP/TLS setup before any HTTP send.
         record = await throttle.acquire(100)
-        assert record.interval == pytest.approx(.5 + DISPATCH_GUARD_S)
+        assert record.interval == pytest.approx(.4 + DISPATCH_GUARD_S)
         throttle.headers_sent(record)
         throttle.release_dispatch()
         throttle.finish(record, {"total_tokens": 10})
@@ -173,7 +173,7 @@ async def test_header_completion_fences_socket_yield_without_freeing_response_sl
     assert snapshot["inflight"] == snapshot["requests_last_second"] == 1
     assert snapshot["total_requests"] == 1
     second = await throttle.acquire(1)
-    assert second.sent >= 40.126
+    assert second.sent >= 40.101
     throttle.finish(first)
     throttle.finish(second)
 
@@ -264,11 +264,11 @@ async def test_many_cancelled_waiters_release_slots_and_events_without_dispatchi
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("message,status,kind,rpm,tpm,inflight", [
-    ("limit_requests", 429, "request", 240, 800_000, 128),
-    ("limit_tokens", 429, "token", 480, 400_000, 64),
-    ("limit_burst_rate", 429, "burst", 480, 800_000, 128),
-    ("busy", 503, "congestion", 240, 800_000, 64),
-    ("limited", 429, "unknown", 240, 400_000, 128),
+    ("limit_requests", 429, "request", 300, 1_000_000, 128),
+    ("limit_tokens", 429, "token", 600, 500_000, 64),
+    ("limit_burst_rate", 429, "burst", 600, 1_000_000, 128),
+    ("busy", 503, "congestion", 300, 1_000_000, 64),
+    ("limited", 429, "unknown", 300, 500_000, 128),
 ])
 async def test_feedback_distinguishes_limits_and_deduplicates_response_wave(message, status, kind, rpm, tpm, inflight):
     throttle, clock = limiter()
@@ -304,7 +304,7 @@ def test_provider_error_code_and_nested_body_classification(body, expected):
 
 @pytest.mark.asyncio
 async def test_adaptive_mode_requires_successes_time_and_backlog_and_stays_below_caps():
-    throttle, clock = limiter(adaptive=True)
+    throttle, clock = limiter(rpm=480, tpm=800_000, adaptive=True, max_rpm=540, max_tpm=900_000)
     clock.now = 120
     assert throttle.snapshot()["request_budget"] == 480  # Idle never upgrades.
     for _ in range(29):
@@ -331,18 +331,45 @@ async def test_recovery_after_request_limit_needs_full_healthy_interval_and_back
     throttle, clock = limiter()
     first = await throttle.acquire(1)
     throttle.finish(first, error=LimitError("limit_requests"))
-    assert throttle.snapshot()["target_rps"] == 4
+    assert throttle.snapshot()["target_rps"] == 5
     for _ in range(30):
         record = await throttle.acquire(1)
         throttle.finish(record, {"total_tokens": 1})
     assert clock.now < 60
-    assert throttle.snapshot()["target_rps"] == 4
+    assert throttle.snapshot()["target_rps"] == 5
     clock.now = 70
-    assert throttle.snapshot()["target_rps"] == 4  # No waiting work yet.
+    assert throttle.snapshot()["target_rps"] == 5  # No waiting work yet.
     record = await throttle.acquire(1)
-    assert throttle.snapshot()["target_rps"] == 4.25
-    assert throttle.snapshot()["token_budget"] == 800_000
+    assert throttle.snapshot()["target_rps"] == 5.25
+    assert throttle.snapshot()["token_budget"] == 1_000_000
     throttle.finish(record)
+
+
+@pytest.mark.asyncio
+async def test_flash_recovers_a_proportional_budget_after_rate_limiting():
+    throttle, clock = limiter(rpm=30_000, tpm=20_000_000, rps=500)
+    first = await throttle.acquire(1)
+    throttle.finish(first, error=LimitError("limited"))
+    assert throttle.snapshot()["request_budget"] == 15_000
+    assert throttle.snapshot()["token_budget"] == 10_000_000
+    for _ in range(30):
+        record = await throttle.acquire(1)
+        throttle.finish(record, {"total_tokens": 1})
+    assert clock.now < 60
+    assert throttle.snapshot()["token_budget"] == 10_000_000
+    clock.now = 70
+    assert throttle.snapshot()["token_budget"] == 10_000_000  # Idle cannot recover.
+    record = await throttle.acquire(1)
+    assert throttle.snapshot()["request_budget"] == 15_750
+    assert throttle.snapshot()["token_budget"] == 10_500_000
+    throttle.finish(record, {"total_tokens": 1})
+    for _ in range(20):
+        clock.now += 61
+        for _ in range(30):
+            record = await throttle.acquire(1)
+            throttle.finish(record, {"total_tokens": 1})
+    assert throttle.snapshot()["request_budget"] == 30_000
+    assert throttle.snapshot()["token_budget"] == 20_000_000
 
 
 @pytest.mark.asyncio
@@ -354,18 +381,18 @@ async def test_default_budget_cannot_auto_upgrade_and_text_calibration_does_not_
         throttle.finish(record, {"prompt_tokens": 10, "completion_tokens": 1})
     clock.now += 61
     record = await throttle.acquire(100)
-    assert throttle.snapshot()["request_budget"] == 480
+    assert throttle.snapshot()["request_budget"] == 600
     assert throttle.snapshot()["token_budget"] == DEFAULT_TPM
     assert throttle.estimate(100, "vision") == vision_before
     throttle.finish(record)
 
 
 @pytest.mark.parametrize("variable,value", [
-    ("AUTO_EVAL_BAILIAN_ADAPTIVE", "maybe"), ("AUTO_EVAL_BAILIAN_RPM", "541"),
-    ("AUTO_EVAL_BAILIAN_RPM", "0"), ("AUTO_EVAL_BAILIAN_TPM", "900001"),
-    ("AUTO_EVAL_BAILIAN_TPM", "nan"), ("AUTO_EVAL_BAILIAN_RPM", "540"),
+    ("AUTO_EVAL_BAILIAN_ADAPTIVE", "maybe"), ("AUTO_EVAL_BAILIAN_RPM", "601"),
+    ("AUTO_EVAL_BAILIAN_RPM", "0"), ("AUTO_EVAL_BAILIAN_TPM", "1000001"),
+    ("AUTO_EVAL_BAILIAN_TPM", "nan"), ("AUTO_EVAL_BAILIAN_TPM", "-1"),
 ])
-def test_environment_rejects_invalid_or_unapproved_high_budgets(monkeypatch, variable, value):
+def test_environment_rejects_invalid_or_over_limit_budgets(monkeypatch, variable, value):
     for name in ("AUTO_EVAL_BAILIAN_ADAPTIVE", "AUTO_EVAL_BAILIAN_RPM", "AUTO_EVAL_BAILIAN_TPM"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv(variable, value)
@@ -373,8 +400,25 @@ def test_environment_rejects_invalid_or_unapproved_high_budgets(monkeypatch, var
         _configured_throttle()
 
 
-def test_explicit_low_account_limits_are_never_increased_by_adaptive_mode(monkeypatch):
-    monkeypatch.setenv("AUTO_EVAL_BAILIAN_ADAPTIVE", "true")
+@pytest.mark.parametrize("explicit", [False, True])
+def test_full_35_budget_is_available_without_adaptive_mode(monkeypatch, explicit):
+    monkeypatch.delenv("AUTO_EVAL_BAILIAN_ADAPTIVE", raising=False)
+    for name, maximum in (("AUTO_EVAL_BAILIAN_RPM", "600"), ("AUTO_EVAL_BAILIAN_TPM", "1000000")):
+        if explicit:
+            monkeypatch.setenv(name, maximum)
+        else:
+            monkeypatch.delenv(name, raising=False)
+    throttle = _configured_throttle()
+    assert throttle.rpm == throttle._ceiling_rpm == 600
+    assert throttle.tpm == throttle._ceiling_tpm == 1_000_000
+    assert throttle.rps == 10
+    assert throttle.snapshot()["max_inflight"] == 128
+    assert throttle.snapshot()["high_utilization_enabled"] is False
+
+
+@pytest.mark.parametrize("adaptive", ["false", "true"])
+def test_explicit_low_account_limits_are_never_increased_by_adaptive_mode(monkeypatch, adaptive):
+    monkeypatch.setenv("AUTO_EVAL_BAILIAN_ADAPTIVE", adaptive)
     monkeypatch.setenv("AUTO_EVAL_BAILIAN_RPM", "120")
     monkeypatch.setenv("AUTO_EVAL_BAILIAN_TPM", "10000")
     throttle = _configured_throttle()

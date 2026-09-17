@@ -27,9 +27,9 @@ judge_model_profiles:
     default_enable_thinking: true
     rate_limit:
       group: bailian-qwen35
-      rpm: 480
-      tpm: 800000
-      rps: 9
+      rpm: 600
+      tpm: 1000000
+      rps: 10
       max_inflight: 128
   - id: bailian_qwen38_flash
     display: Qwen3.8-Flash
@@ -37,10 +37,12 @@ judge_model_profiles:
     model: qwen3.8-flash
     supports_thinking: true
     default_enable_thinking: true
-    # 首次启用的保守预算，请管理员按实际地域、账号配额调整。
+    # TPM 采用北京/新加坡动态配额最高档。30,000 RPM 是平台发送预算，
+    # 并非该地域官方公布的 RPM；服务端仍按账号实际额度限流。
+    # 实际流量可在页面通过 1–128 的评估并发数调整。
     rate_limit:
       group: bailian-qwen38
-      rpm: 60
-      tpm: 100000
-      rps: 1
-      max_inflight: 4
+      rpm: 30000
+      tpm: 20000000
+      rps: 500
+      max_inflight: 128

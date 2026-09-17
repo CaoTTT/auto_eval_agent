@@ -13,10 +13,21 @@ class RateLimitConfig(BaseModel):
     """Administrator supplied budgets for one shared provider quota."""
 
     group: str = ""
-    rpm: int = Field(default=480, gt=0)
-    tpm: int = Field(default=800_000, gt=0)
-    rps: int = Field(default=9, gt=0)
+    rpm: int = Field(default=600, gt=0)
+    tpm: int = Field(default=1_000_000, gt=0)
+    rps: int = Field(default=10, gt=0)
     max_inflight: int = Field(default=128, ge=1, le=128)
+
+
+def default_bailian_rate_limit(model: str) -> RateLimitConfig:
+    """Local sending budgets; the provider still enforces the account quota."""
+    if model.lower() == "qwen3.8-flash":
+        # Highest published dynamic TPM tier. Beijing/Singapore do not publish
+        # a numeric RPM quota; 30,000 RPM is our local request ceiling.
+        return RateLimitConfig(rpm=30_000, tpm=20_000_000, rps=500, max_inflight=128)
+    if model.lower() == "qwen3.5-397b-a17b":
+        return RateLimitConfig()
+    raise ValueError(f"未配置百炼模型的默认预算：{model}")
 
 
 class JudgeConfig(BaseModel):

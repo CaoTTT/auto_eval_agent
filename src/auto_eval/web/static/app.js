@@ -35,10 +35,12 @@ createApp({
     const selectedModelProfile = computed(() =>
       judgeModelProfiles.value.find(profile => profile.id === selectedJudgeModelProfile.value) || null
     );
-    function changeJudgeModel() {
+    function changeJudgeModel({ resetConcurrency = false } = {}) {
       const profile = selectedModelProfile.value;
       enableThinking.value = profile?.supports_thinking === true && profile.default_enable_thinking === true;
-      concurrency.value = profile?.recommended_concurrency || 4;
+      const recommended = Math.max(1, Math.min(128, profile?.recommended_concurrency || 4));
+      concurrency.value = resetConcurrency || !Number.isInteger(concurrency.value) || concurrency.value < 1
+        ? recommended : Math.min(concurrency.value, recommended);
     }
     function thinkingLabel(value) {
       return value === true ? "思考开启" : value === false ? "思考关闭" : "思考未记录";
@@ -963,6 +965,10 @@ createApp({
       runError.value = "";
       if (judgeModelProfiles.value.length && !selectedModelProfile.value) {
         runError.value = "请选择可用的裁判模型。";
+        return;
+      }
+      if (!Number.isInteger(concurrency.value) || concurrency.value < 1 || concurrency.value > 128) {
+        runError.value = "评估并发数必须为 1–128 的整数";
         return;
       }
       const valid = mode.value === 'compare' ? opItems.value : opItems.value.filter(opItemReady);
@@ -1895,7 +1901,7 @@ createApp({
       selectedJudges.value = defaultJudgeSelection();
       const selectedJudge = judges.value.find((j) => j.name === selectedJudges.value[0]);
       concurrency.value = selectedJudge?.recommended_concurrency || 4;
-      if (selectedModelProfile.value) changeJudgeModel();
+      if (selectedModelProfile.value) changeJudgeModel({ resetConcurrency: true });
       loadHistory();
       loadQueue();
       queueRefreshTimer = window.setInterval(loadQueue, 2000);

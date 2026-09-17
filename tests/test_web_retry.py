@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from auto_eval.config import AppConfig, JudgeConfig
 from auto_eval.web import runner as runner_module
 from auto_eval.web import server as server_module
 from auto_eval.web.tasks import Task, latest_results_by_index
@@ -113,7 +114,9 @@ async def test_retry_endpoint_selects_only_failed_rows(monkeypatch):
 
     monkeypatch.setattr(server_module, "get_task_async", fake_get)
     monkeypatch.setattr(server_module, "EVAL_SCHEDULER", FakeScheduler())
-    monkeypatch.setattr(server_module, "cfg", lambda: object())
+    monkeypatch.setattr(server_module, "cfg", lambda: AppConfig(judges=[
+        JudgeConfig(name="judge", model="fake", enable_thinking=False),
+    ]))
 
     response = await server_module.api_retry_failed(
         "parent",

@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlparse
 
+from .config import default_bailian_rate_limit
 from .observability import log_event
 from .token_estimation import estimate_input_tokens
 from .timing import timing_span
@@ -27,11 +28,11 @@ MODEL = "qwen3.5-397b-a17b"
 BAILIAN_MODELS = {MODEL, "qwen3.8-flash"}
 DEFAULT_CONCURRENCY = 128
 PREPARATION_CONCURRENCY = 4
-SECOND_REQUEST_LIMIT = 9
-DEFAULT_RPM = 480
-DEFAULT_TPM = 800_000
-MAX_RPM = 540
-MAX_TPM = 900_000
+SECOND_REQUEST_LIMIT = 10
+DEFAULT_RPM = 600
+DEFAULT_TPM = 1_000_000
+MAX_RPM = 600
+MAX_TPM = 1_000_000
 DISPATCH_GUARD_S = .001
 
 
@@ -295,8 +296,11 @@ class RequestThrottle:
                 return
         ceiling_rpm = self._ceiling_rpm if self._adaptive else self.rpm
         ceiling_tpm = self._ceiling_tpm if self._adaptive else self.tpm
-        self._target_rpm = min(ceiling_rpm, self._target_rpm + 15)
-        self._target_tpm = min(ceiling_tpm, self._target_tpm + 25_000)
+        # Recover 2.5% of the configured budget per healthy interval. Keep the
+        # existing small-budget steps while avoiding hours of recovery for
+        # Flash's larger token budget after a single congestion event.
+        self._target_rpm = min(ceiling_rpm, self._target_rpm + max(15, ceiling_rpm * .025))
+        self._target_tpm = min(ceiling_tpm, self._target_tpm + max(25_000, ceiling_tpm * .025))
         self._inflight_limit = min(self._max_inflight, self._inflight_limit + 8)
         self._healthy_started, self._healthy_successes = now, 0
         self._congestion_events = max(0, self._congestion_events - 1)
@@ -697,30 +701,26 @@ def _configured_throttle() -> RequestThrottle:
             raise ValueError(f"{name} must be an integer in 1..{maximum}")
         return result
 
-    ceiling_rpm = budget("AUTO_EVAL_BAILIAN_RPM", MAX_RPM if adaptive else DEFAULT_RPM, MAX_RPM)
-    ceiling_tpm = budget("AUTO_EVAL_BAILIAN_TPM", MAX_TPM if adaptive else DEFAULT_TPM, MAX_TPM)
-    if not adaptive and (ceiling_rpm > DEFAULT_RPM or ceiling_tpm > DEFAULT_TPM):
-        raise ValueError("Budgets above 480 RPM / 800000 TPM require AUTO_EVAL_BAILIAN_ADAPTIVE=true")
-    return RequestThrottle(rpm=min(DEFAULT_RPM, ceiling_rpm), tpm=min(DEFAULT_TPM, ceiling_tpm),
+    ceiling_rpm = budget("AUTO_EVAL_BAILIAN_RPM", DEFAULT_RPM, MAX_RPM)
+    ceiling_tpm = budget("AUTO_EVAL_BAILIAN_TPM", DEFAULT_TPM, MAX_TPM)
+    return RequestThrottle(rpm=ceiling_rpm, tpm=ceiling_tpm,
                            adaptive=adaptive, max_rpm=ceiling_rpm, max_tpm=ceiling_tpm)
 
 
 def _profile_throttle(cfg) -> RequestThrottle:
     rate = getattr(cfg, "rate_limit", None)
-    if rate is not None:
-        def value(name):
-            return rate[name] if isinstance(rate, dict) else getattr(rate, name)
-        return RequestThrottle(
-            rpm=value("rpm"), tpm=value("tpm"), rps=value("rps"),
-            max_inflight=value("max_inflight"),
-            max_rpm=value("rpm"), max_tpm=value("tpm"),
-        )
-    if (getattr(cfg, "model", "") or "").lower() == MODEL:
-        return _configured_throttle()
-    # New model quotas must be configured by the deployment. Do not inherit
-    # 3.5-specific env quotas or automatic high-utilization behavior.
-    return RequestThrottle(rpm=60, tpm=100_000, rps=1, max_inflight=4,
-                           max_rpm=60, max_tpm=100_000)
+    if rate is None:
+        if (getattr(cfg, "model", "") or "").lower() == MODEL:
+            return _configured_throttle()
+        # Flash uses its own model defaults, not the legacy 3.5 env budgets.
+        rate = default_bailian_rate_limit(getattr(cfg, "model", ""))
+    def value(name):
+        return rate[name] if isinstance(rate, dict) else getattr(rate, name)
+    return RequestThrottle(
+        rpm=value("rpm"), tpm=value("tpm"), rps=value("rps"),
+        max_inflight=value("max_inflight"),
+        max_rpm=value("rpm"), max_tpm=value("tpm"),
+    )
 
 
 def _quota_group(cfg) -> str:

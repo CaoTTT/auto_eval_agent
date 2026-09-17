@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from urllib.parse import urlparse
 
-from .config import AppConfig, JudgeConfig, JudgeModelProfile, RateLimitConfig
+from .config import AppConfig, JudgeConfig, JudgeModelProfile, default_bailian_rate_limit
 
 BAILIAN_MODELS = {
     "qwen3.5-397b-a17b": ("bailian_qwen35_397b", "Qwen3.5-397B-A17B"),
@@ -30,7 +30,7 @@ def model_profiles(config: AppConfig) -> list[JudgeModelProfile]:
                     thinking = judge.enable_thinking if judge.enable_thinking is not None else True
                     rate = judge.rate_limit if model_id == model.lower() else None
                     if model_id == "qwen3.8-flash" and rate is None:
-                        rate = RateLimitConfig(rpm=60, tpm=100_000, rps=1, max_inflight=4)
+                        rate = default_bailian_rate_limit(model_id)
                     profiles.append(JudgeModelProfile(
                         id=profile_id if len(config.judges) == 1 else f"{judge.name}_{profile_id}",
                         display=display, judge_name=judge.name, model=model_id,
@@ -114,7 +114,22 @@ def restore_runtime(config: AppConfig, runtime: dict) -> list[JudgeConfig]:
     if runtime.get("version") != 1 or len(runtime.get("judges") or []) != 1:
         raise ValueError("任务裁判配置快照不可用，请新建任务")
     # These records are server-authored snapshots, never request input.
-    return [JudgeConfig.model_validate(j) for j in runtime["judges"]]
+    judges = [JudgeConfig.model_validate(j) for j in runtime["judges"]]
+    profiles = model_profiles(config)
+    for index, judge in enumerate(judges):
+        base = next((j for j in config.judges if j.name == judge.name), None)
+        if base is None or (base.base_url, base.api_key_env) != (judge.base_url, judge.api_key_env):
+            continue
+        matches = [p for p in profiles if p.judge_name == judge.name and p.model == judge.model]
+        profile = next((p for p in matches if p.id == runtime.get("profile_id")), None)
+        if profile is None and len(matches) == 1:
+            profile = matches[0]
+        if profile is not None:
+            # Quotas are operational settings, not scoring parameters. Refresh
+            # only the current quota so an old task cannot pin the shared model
+            # controller to an obsolete budget after a deployment upgrade.
+            judges[index] = judge.model_copy(update={"rate_limit": profile.rate_limit})
+    return judges
 
 
 def check_frozen_options(task, options: dict) -> None:
