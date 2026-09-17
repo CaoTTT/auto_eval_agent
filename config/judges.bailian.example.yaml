@@ -1,0 +1,46 @@
+# 部署示例：合并到 config/judges.yaml。沿用现有地域地址和 api_key_env。
+# 密钥值只放 .env；这里的数值是平台发送预算，不是官方保证的账号配额。
+judges:
+  - name: judge_2
+    display: 终端用户
+    runner: openai_compat
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key_env: DASHSCOPE_API_KEY
+    model: qwen3.5-397b-a17b
+    persona: end_user
+    temperature: 0
+    seed: 42
+    enable_thinking: true
+    vl_high_resolution_images: true
+    concurrency: 128
+    # 单次模型请求总超时；题目级超时在页面单独设置。
+    total_timeout_s: 300
+    read_timeout_s: 90
+
+default_judge_model_profile: bailian_qwen35_397b
+judge_model_profiles:
+  - id: bailian_qwen35_397b
+    display: Qwen3.5-397B-A17B
+    judge_name: judge_2
+    model: qwen3.5-397b-a17b
+    supports_thinking: true
+    default_enable_thinking: true
+    rate_limit:
+      group: bailian-qwen35
+      rpm: 480
+      tpm: 800000
+      rps: 9
+      max_inflight: 128
+  - id: bailian_qwen38_flash
+    display: Qwen3.8-Flash
+    judge_name: judge_2
+    model: qwen3.8-flash
+    supports_thinking: true
+    default_enable_thinking: true
+    # 首次启用的保守预算，请管理员按实际地域、账号配额调整。
+    rate_limit:
+      group: bailian-qwen38
+      rpm: 60
+      tpm: 100000
+      rps: 1
+      max_inflight: 4

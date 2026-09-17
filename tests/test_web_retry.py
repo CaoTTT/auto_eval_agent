@@ -97,6 +97,9 @@ async def test_retry_endpoint_selects_only_failed_rows(monkeypatch):
         ],
     )
     captured = {}
+    task.judge_runtime = {"version": 1, "profile_id": "test", "judges": [
+        {"name": "judge", "model": "fake", "enable_thinking": False},
+    ]}
 
     async def fake_get(_task_id):
         return task

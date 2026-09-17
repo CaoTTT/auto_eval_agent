@@ -9,7 +9,9 @@
 | **垂域视觉评测**（`rich_content`） | 识别回答中的挂卡（天气/音乐等垂域卡片）与 Superlink，统计数量、判定适用性，标记需人工复核的条目 | 终端用户（`judge_2`） |
 | **垂域视觉对比评测**（`compare`） | 同一问题的两个或三个回答视频；任务级选择 V0.2 简化版或 V0.3 标准 | 终端用户（`judge_2`） |
 
-裁判「终端用户」为单轮直出的多模态模型：`Qwen/Qwen3.5-397B-A17B`（SiliconFlow），`temperature=0 + seed=42` 保证复跑一致；一次生成 `<analysis>` 思考链 + 结论 JSON，不联网、不调工具。
+裁判「终端用户」使用多模态模型，一次生成评审说明和结论 JSON，不联网、不调工具。仓库默认配置为 SiliconFlow；已有百炼部署可在页面选择 `qwen3.5-397b-a17b` / `qwen3.8-flash`，并独立开关原生思考。每个任务固定模型及思考设置，恢复和失败补跑沿用原配置。固定采样参数有助于控制波动，但不能保证跨模型或服务版本逐字复现。
+
+升级、配置示例、历史兼容和限流说明见 [裁判模型与思考模式](docs/judge-model-thinking.md)。
 
 ## 数据流
 
@@ -53,7 +55,7 @@ python -m uvicorn auto_eval.web.server:app --host 0.0.0.0 --port 8054
 
 看到 `Uvicorn running on http://0.0.0.0:8054` 后，浏览器打开 **http://localhost:8054** 。
 
-界面操作：选择评测模式 → 导入 JSONL（多轮会话可导入 CSV，按 `session_group` 串行、`turn_index` 排序）→ 选择裁判、评测标准与并发数 → 开始评测，SSE 实时出结果，完成后可导出。
+界面操作：选择评测模式 → 导入 JSONL（多轮会话可导入 CSV，按 `session_group` 串行、`turn_index` 排序）→ 选择裁判模型、思考模式、评测标准与并发数 → 开始评测，SSE 实时出结果，完成后可导出。
 
 垂域视觉对比提供两个可并存的评测协议：`qa_competitor_compare@0.2-simplified`（稳定默认，1–5 分）和 `qa_competitor_compare@0.3`（实验版，0–3 分）。协议不仅冻结 Prompt，还冻结输出 Schema、Gate 规则和分数范围。任务一旦创建就不能更换协议；失败补跑强制继承原任务协议。若要用另一标准重评同一数据，应新建任务，避免不同口径的结果写入同一任务。
 

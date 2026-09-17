@@ -26,6 +26,35 @@ createApp({
     const judges = ref([]);
     const selectedJudges = ref([]);
     const visibleJudges = computed(() => judges.value);
+    const judgeModelProfiles = ref([]);
+    const defaultJudgeModelProfile = ref("");
+    const selectedJudgeModelProfile = ref("");
+    const enableThinking = ref(false);
+    const taskJudgeRuntime = ref(null);
+    const taskJudgeSummary = ref({});
+    const selectedModelProfile = computed(() =>
+      judgeModelProfiles.value.find(profile => profile.id === selectedJudgeModelProfile.value) || null
+    );
+    function changeJudgeModel() {
+      const profile = selectedModelProfile.value;
+      enableThinking.value = profile?.supports_thinking === true && profile.default_enable_thinking === true;
+      concurrency.value = profile?.recommended_concurrency || 4;
+    }
+    function thinkingLabel(value) {
+      return value === true ? "思考开启" : value === false ? "思考关闭" : "思考未记录";
+    }
+    function judgeRuntimeLabel(runtime, fallback = {}) {
+      const judge = runtime?.judges?.[0];
+      const model = judge?.model || fallback.judge_model || "模型未记录";
+      return `${model} · ${judge ? thinkingLabel(judge.enable_thinking) : `思考${fallback.enable_thinking_label || "未记录"}`}`;
+    }
+    function restoreJudgeModel(runtime) {
+      const profile = judgeModelProfiles.value.find(candidate => candidate.id === runtime?.profile_id);
+      selectedJudgeModelProfile.value = profile?.id || defaultJudgeModelProfile.value;
+      changeJudgeModel();
+      const thinking = runtime?.judges?.[0]?.enable_thinking;
+      if (profile?.supports_thinking === true && typeof thinking === "boolean") enableThinking.value = thinking;
+    }
     const evaluationProfiles = ref([]);
     const selectedEvaluationProfile = ref("");
     const compareProfiles = computed(() =>
@@ -34,6 +63,7 @@ createApp({
     const concurrency = ref(4);
     const mediaConcurrency = ref(4);
     const requestPacing = computed(() => {
+      if (selectedModelProfile.value) return !!selectedModelProfile.value.request_pacing;
       const selected = judges.value.filter((j) => selectedJudges.value.includes(j.name));
       return selected.length > 0 && selected.every((j) => j.request_pacing);
     });
@@ -677,7 +707,8 @@ createApp({
     }
 
     function defaultJudgeSelection() {
-      return judges.value.length ? [judges.value[0].name] : [];
+      const judge = judges.value.find(candidate => candidate.name === "judge_2") || judges.value[0];
+      return judge ? [judge.name] : [];
     }
 
     function defaultEvaluationProfile() {
@@ -747,6 +778,7 @@ createApp({
     }
     function detachResultView() {
       closeActiveStream();taskId.value='';results.value=[];summary.value=null;
+      taskJudgeRuntime.value = null;taskJudgeSummary.value = {};
       selectedTaskTiming.value = null;
       itemProgress.value={};progressEvents.value={};running.value=false;selectedTaskStatus.value='';
       repairStatus.value='idle';activeRetry.value=null;selectedRetryIndexes.value=[];
@@ -929,6 +961,10 @@ createApp({
       cancelHistoryLoad();
       const submitViewVersion = historyLoadVersion;
       runError.value = "";
+      if (judgeModelProfiles.value.length && !selectedModelProfile.value) {
+        runError.value = "请选择可用的裁判模型。";
+        return;
+      }
       const valid = mode.value === 'compare' ? opItems.value : opItems.value.filter(opItemReady);
       if (mode.value === 'compare' && valid.some(item => !opItemReady(item))) {
         runError.value = '存在未填写问题或缺少产品证据的 Case，请展开检查；不会跳过这些条目提交。';
@@ -988,6 +1024,10 @@ createApp({
         options: {
           ...(mode.value === 'compare' && datasetSourceTaskId.value ? {dataset_source_task_id:datasetSourceTaskId.value} : {}),
           judges: selectedJudges.value,
+          ...(selectedModelProfile.value ? {
+            judge_model_profile: selectedModelProfile.value.id,
+            ...(selectedModelProfile.value.supports_thinking === true ? { enable_thinking: enableThinking.value } : {}),
+          } : {}),
           concurrency: concurrency.value,
           eval_timeout_s: evalTimeout.value,
         },
@@ -1045,6 +1085,8 @@ createApp({
       );
       running.value = true;
       taskId.value = d.task_id;
+      taskJudgeRuntime.value = d.judge_runtime || null;
+      taskJudgeSummary.value = {judge_model: d.judge_model, enable_thinking_label: d.enable_thinking_label};
       executionControl.value = {};
       selectedActiveRuns.value = 1;
       resumeConcurrency.value = concurrency.value;
@@ -1496,7 +1538,11 @@ createApp({
         if (version !== historyListVersion) return;
         historyItems.value = (d.items || []).map(item => ({ ...item, task_timing: receiveTaskTiming(item.task_timing) }));
         const selected = historyItems.value.find(item => item.task_id === taskId.value);
-        if (selected) updateTaskTiming(selected.task_timing);
+        if (selected) {
+          updateTaskTiming(selected.task_timing);
+          if (selected.judge_runtime) taskJudgeRuntime.value = selected.judge_runtime;
+          taskJudgeSummary.value = {judge_model: selected.judge_model, enable_thinking_label: selected.enable_thinking_label};
+        }
         historyNoteDrafts.value = Object.fromEntries(
           historyItems.value.map((item) => [item.task_id,
             historyNoteEditing.value[item.task_id] ? historyNoteDrafts.value[item.task_id] : item.note || ""]),
@@ -1522,6 +1568,7 @@ createApp({
         const selected = queueEntries.value.find(item => item.task_id === taskId.value);
         if (selected) {
           updateTaskTiming(selected.task_timing);
+          if (selected.judge_runtime) taskJudgeRuntime.value = selected.judge_runtime;
           if (selected.kind !== "retry" && selectedTaskStatus.value !== "paused") {
             selectedTaskStatus.value = selected.status;
             running.value = ["pending", "queued", "running"].includes(selected.status);
@@ -1545,7 +1592,7 @@ createApp({
 
     async function loadRequestPacing() {
       if (disposed) return;
-      if (!judges.value.some((judge) => judge.request_pacing)
+      if (!(judges.value.some((judge) => judge.request_pacing) || judgeModelProfiles.value.some(profile => profile.request_pacing))
           || !(queueState.value.running || running.value || repairStatus.value === "running")) {
         pacingStatus.value = null;
         pacingError.value = "";
@@ -1558,7 +1605,14 @@ createApp({
         if (!response.ok) throw new Error("调度状态暂不可用");
         const data = await response.json();
         if (disposed || !(queueState.value.running || running.value || repairStatus.value === "running")) return;
-        pacingStatus.value = data.enabled && data.active ? data.controller : null;
+        const activeTask = queueState.value.running;
+        const runtime = activeTask ? activeTask.judge_runtime : taskJudgeRuntime.value;
+        const model = runtime?.judges?.[0]?.model;
+        const controllers = data.controllers || [];
+        const controller = model && controllers.length
+          ? controllers.find(entry => entry.model === model || (entry.models || []).includes(model))
+          : controllers.length ? (controllers.length === 1 ? controllers[0] : null) : data.controller;
+        pacingStatus.value = data.enabled && data.active ? controller || null : null;
         pacingError.value = "";
       } catch (_) {
         if (!disposed && (queueState.value.running || running.value || repairStatus.value === "running")) {
@@ -1648,6 +1702,8 @@ createApp({
       }
       if (taskId.value === id) {
         taskId.value = "";
+        taskJudgeRuntime.value = null;
+        taskJudgeSummary.value = {};
         selectedTaskTiming.value = null;
         results.value = [];
         summary.value = null;
@@ -1686,6 +1742,9 @@ createApp({
         loaded = true;
         closeActiveStream();
         taskId.value = d.task_id || id;
+        taskJudgeRuntime.value = d.judge_runtime || null;
+        taskJudgeSummary.value = {judge_model: d.judge_model, enable_thinking_label: d.enable_thinking_label};
+        restoreJudgeModel(d.judge_runtime);
         selectedTaskTiming.value = receiveTaskTiming(d.task_timing);
         mode.value = d.mode;
         if (d.mode === "compare") {
@@ -1827,12 +1886,16 @@ createApp({
       const r = await fetch("/api/config");
       const d = await r.json();
       judges.value = d.judges || [];
+      judgeModelProfiles.value = d.judge_model_profiles || [];
+      defaultJudgeModelProfile.value = d.default_judge_model_profile || judgeModelProfiles.value[0]?.id || "";
+      selectedJudgeModelProfile.value = defaultJudgeModelProfile.value;
       mediaConcurrency.value = d.media_concurrency || 4;
       evaluationProfiles.value = d.evaluation_profiles || [];
       selectedEvaluationProfile.value = defaultEvaluationProfile();
       selectedJudges.value = defaultJudgeSelection();
       const selectedJudge = judges.value.find((j) => j.name === selectedJudges.value[0]);
       concurrency.value = selectedJudge?.recommended_concurrency || 4;
+      if (selectedModelProfile.value) changeJudgeModel();
       loadHistory();
       loadQueue();
       queueRefreshTimer = window.setInterval(loadQueue, 2000);
@@ -1851,6 +1914,8 @@ createApp({
       modes, mode, modeLabel, isVideoMode, items, errors, importReport, judges, visibleJudges, selectedJudges, datasetName,
       datasetSourceTaskId, datasetRevision, useComparisonDataset,
       evaluationProfiles, compareProfiles, selectedEvaluationProfile, evaluationProfileLabel,
+      judgeModelProfiles, selectedJudgeModelProfile, selectedModelProfile, enableThinking, changeJudgeModel,
+      taskJudgeRuntime, taskJudgeSummary, thinkingLabel, judgeRuntimeLabel,
       concurrency, mediaConcurrency, requestPacing, evalTimeout, submitting, running, progress, total, results, summary, taskId, runError,
       pacingStatus, pacingError, pacingNumber, pacingWaitLabel, pacingLimitLabel,
       queueState, queueEntries, selectedTaskStatus, queueNotice, taskStatusLabel, queueKindLabel,

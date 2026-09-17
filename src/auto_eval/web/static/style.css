@@ -392,6 +392,14 @@ tr.result-error td, tr.result-error-detail td { background: #fef2f2 !important; 
 .task-control-options input[type=number] { width: 80px; }
 .task-control-panel .hint { margin-bottom: 0; line-height: 1.7; }
 .task-duration-cell { font-variant-numeric: tabular-nums; min-width: 110px; }
+.judge-model-options { flex-wrap: wrap; gap: 12px; }
+.judge-model-options select { max-width: 100%; min-width: 230px; }
+.thinking-control { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; }
+.thinking-control input { width: 17px; height: 17px; accent-color: #2563eb; }
+.judge-model-summary { padding: 10px 14px; margin: 10px 0; border-left: 3px solid #93c5fd; background: #f8fbff; overflow-wrap: anywhere; }
+.judge-model-summary p { margin: 4px 0; }
+.judge-runtime-cell { min-width: 180px; max-width: 250px; overflow-wrap: anywhere; }
+.task-judge-summary { color: #1e3a5f; overflow-wrap: anywhere; }
 /* Human reference comparison: local post-processing, isolated from evaluation controls. */
 .human-comparison { margin: 12px 0; }
 .human-entry { color: #174d79; border-color: #87adc8; background: #edf5fa; font-weight: 600; }

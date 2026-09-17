@@ -98,17 +98,22 @@ def image_dimensions(url: str) -> tuple[int, int]:
 
 def estimate_input_tokens(kwargs: dict) -> int:
     """Preserve image budget guardrails while avoiding text byte overestimates."""
+    # The bundled vocabulary is Qwen3.5-specific. Until a 3.8 tokenizer is
+    # verified, use its conservative UTF-8 byte proxy and calibrate with usage.
+    # This is an admission estimate, never the billed provider token count.
+    is_flash = str(kwargs.get("model", "")).lower() == "qwen3.8-flash"
+    count_text = (lambda text: len(text.encode("utf-8"))) if is_flash else count_text_tokens
     text_tokens = 0
     image_tokens = 0
     messages = kwargs.get("messages") or []
     for message in messages:
         content = message.get("content") or ""
         if isinstance(content, str):
-            text_tokens += count_text_tokens(content)
+            text_tokens += count_text(content)
         else:
             for part in content:
                 if part.get("type") == "text":
-                    text_tokens += count_text_tokens(part.get("text", ""))
+                    text_tokens += count_text(part.get("text", ""))
                 elif part.get("type") == "image_url":
                     url = (part.get("image_url") or {}).get("url", "")
                     try:
@@ -119,8 +124,8 @@ def estimate_input_tokens(kwargs: dict) -> int:
         # Tool/schema traffic is not currently used by the judge, but accounting
         # must remain conservative if a future caller supplies those fields.
         if message.get("tool_calls"):
-            text_tokens += count_text_tokens(json.dumps(message["tool_calls"], ensure_ascii=False))
+            text_tokens += count_text(json.dumps(message["tool_calls"], ensure_ascii=False))
     for key in ("tools", "response_format"):
         if kwargs.get(key):
-            text_tokens += count_text_tokens(json.dumps(kwargs[key], ensure_ascii=False))
+            text_tokens += count_text(json.dumps(kwargs[key], ensure_ascii=False))
     return 256 + 8 * len(messages) + math.ceil(text_tokens * TEXT_MARGIN) + image_tokens

@@ -320,17 +320,21 @@ def _make_item_evaluator(
         if task.mode == "compare"
         else None
     )
+    from ..judge_profiles import restore_runtime
     selected = runtime_options.get("judges") or [cfg.judges[0].name]
     judges_cfg = [j for j in cfg.judges if j.name in selected] or cfg.judges[:1]
     frozen_judges = task.protocol_manifest.get("judges") or []
-    if task.protocol_manifest.get("input_schema_version") == "1.1" and frozen_judges:
+    if task.judge_runtime:
+        judges_cfg = restore_runtime(cfg, task.judge_runtime)
+    elif task.protocol_manifest.get("input_schema_version") == "1.1" and frozen_judges:
         configured = {j.name: j for j in cfg.judges}
         judges_cfg = []
         for frozen in frozen_judges:
             if frozen["name"] not in configured:
                 raise ValueError("冻结裁判配置不可用，请恢复配置或新建任务")
             judges_cfg.append(configured[frozen["name"]].model_copy(update={
-                key: value for key, value in frozen.items() if key != "name"
+                "enable_thinking": None,
+                **{key: value for key, value in frozen.items() if key != "name"}
             }))
     # R3：构造中途失败（如某个 judge 缺 base_url）时，已建客户端的连接池会
     # 无人关闭而泄漏——先登记再逐个构造，失败时交后台任务关闭后重抛。
@@ -361,12 +365,12 @@ def _make_item_evaluator(
     capacity = max(1, min(128, int(runtime_options.get("concurrency", recommended_concurrency(judges_cfg)))))
     sem = asyncio.Semaphore(capacity)
     media_capacity = preparation_concurrency()
-    media_sem = PreparationLimiter(media_capacity) if any(supports_bailian_pacing(j) for j in judges_cfg) else None
+    media_sem = PreparationLimiter(media_capacity)
     if media_sem is not None:
-        log_event("请求调度", "启用百炼平滑调度", details={
+        from ..request_throttle import pacing_config
+        log_event("请求调度", "配置请求与媒体调度", details={
             "Case容量": capacity, "媒体并发": media_capacity,
-            "连续1秒请求上限": SECOND_REQUEST_LIMIT,
-            "RPM目标": 480, "TPM目标": 800_000,
+            "模型调度": [pacing_config(j) for j in judges_cfg if supports_bailian_pacing(j)],
         })
     eval_timeout = float(runtime_options.get("eval_timeout_s") or runtime_options.get("eval_timeout") or 900.0)
     loop = asyncio.get_running_loop()
@@ -394,7 +398,12 @@ def _make_item_evaluator(
         )
         _persist_task(task)
 
-    finish = on_result or _default_on_result
+    result_callback = on_result or _default_on_result
+
+    async def finish(idx, res, started):
+        if task.judge_runtime:
+            res["judge_runtime"] = task.judge_runtime
+        await result_callback(idx, res, started)
 
     async def one(idx: int, item_dict: dict) -> dict:
         request_id = make_request_id(task.created_at, task.id, idx)

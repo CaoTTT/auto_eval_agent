@@ -24,6 +24,7 @@ from .timing import timing_span
 
 
 MODEL = "qwen3.5-397b-a17b"
+BAILIAN_MODELS = {MODEL, "qwen3.8-flash"}
 DEFAULT_CONCURRENCY = 128
 PREPARATION_CONCURRENCY = 4
 SECOND_REQUEST_LIMIT = 9
@@ -36,7 +37,7 @@ DISPATCH_GUARD_S = .001
 
 def supports_bailian_pacing(cfg) -> bool:
     host = (urlparse(getattr(cfg, "base_url", "") or "").hostname or "").lower()
-    return (getattr(cfg, "model", "") or "").lower() == MODEL and (
+    return (getattr(cfg, "model", "") or "").lower() in BAILIAN_MODELS and (
         host == "dashscope.aliyuncs.com"
         or host.endswith(".aliyuncs.com") and (
             host.startswith("dashscope-") or ".maas." in host
@@ -45,7 +46,9 @@ def supports_bailian_pacing(cfg) -> bool:
 
 
 def recommended_concurrency(judges) -> int:
-    return DEFAULT_CONCURRENCY if judges and all(supports_bailian_pacing(j) for j in judges) else 4
+    if not judges or not all(supports_bailian_pacing(j) for j in judges):
+        return 4
+    return min(pacing_config(j)["max_inflight"] for j in judges)
 
 
 class _ActiveClock:
@@ -144,11 +147,12 @@ class RequestThrottle:
     """
 
     def __init__(self, *, rpm: int = DEFAULT_RPM, tpm: int = DEFAULT_TPM,
+                 rps: int = SECOND_REQUEST_LIMIT,
                  max_inflight: int = DEFAULT_CONCURRENCY, warmup_s: float = 15.0,
                  clock=time.monotonic, sleep=asyncio.sleep, adaptive: bool = False,
                  max_rpm: int | None = None, max_tpm: int | None = None,
                  jitter=random.random):
-        for name, value in (("rpm", rpm), ("tpm", tpm), ("max_inflight", max_inflight)):
+        for name, value in (("rpm", rpm), ("tpm", tpm), ("rps", rps), ("max_inflight", max_inflight)):
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
         if max_inflight > DEFAULT_CONCURRENCY:
@@ -158,9 +162,10 @@ class RequestThrottle:
         for name, value in (("max_rpm", max_rpm), ("max_tpm", max_tpm)):
             if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value <= 0):
                 raise ValueError(f"{name} must be a positive integer")
-        self.rpm, self.tpm = min(rpm, MAX_RPM), tpm
+        self.rps = rps
+        self.rpm, self.tpm = min(rpm, rps * 60), tpm
         self._adaptive = adaptive
-        self._ceiling_rpm = min(MAX_RPM, max_rpm if max_rpm is not None else (
+        self._ceiling_rpm = min(rps * 60, max_rpm if max_rpm is not None else (
             MAX_RPM if adaptive and rpm == DEFAULT_RPM else self.rpm))
         self._ceiling_tpm = max_tpm if max_tpm is not None else (
             MAX_TPM if adaptive and tpm == DEFAULT_TPM else tpm)
@@ -201,6 +206,26 @@ class RequestThrottle:
         self._output_estimates = {"text": 8192.0, "vision": 8192.0}
         self._output_samples = {kind: deque(maxlen=20) for kind in ("text", "vision")}
         self._input_scale = {"text": 1.0, "vision": 1.0}
+        self.model = ""
+        self.quota_group = ""
+        self.models: set[str] = set()
+
+    def restrict_budget(self, other: RequestThrottle) -> None:
+        """One quota group cannot gain capacity through conflicting task configs.
+
+        Preserve in-flight reservations and congestion feedback. A smaller
+        task budget restricts the shared controller until process restart.
+        """
+        self.rps = min(self.rps, other.rps)
+        self.rpm = min(self.rpm, other.rpm)
+        self.tpm = min(self.tpm, other.tpm)
+        self._ceiling_rpm = min(self._ceiling_rpm, other._ceiling_rpm)
+        self._ceiling_tpm = min(self._ceiling_tpm, other._ceiling_tpm)
+        self._target_rpm = min(self._target_rpm, self._ceiling_rpm)
+        self._target_tpm = min(self._target_tpm, self._ceiling_tpm)
+        self._max_inflight = min(self._max_inflight, other._max_inflight)
+        self._inflight_limit = min(self._inflight_limit, self._max_inflight)
+        self._adaptive = self._adaptive and other._adaptive
 
     @property
     def _scale(self):
@@ -208,7 +233,14 @@ class RequestThrottle:
         return self._target_rpm / self.rpm
 
     def estimate(self, input_tokens: int, kind: str = "text") -> int:
-        return self.estimate_input(input_tokens, kind) + math.ceil(self._output_estimates[kind])
+        input_estimate = self.estimate_input(input_tokens, kind)
+        # A long thinking completion can make the learned output estimate exceed
+        # the account's entire minute budget. Reserve that full budget instead
+        # of making every later request fail before it can supply new samples.
+        # Input alone stays uncapped so genuinely oversized payloads still fail.
+        output_reserve = min(math.ceil(self._output_estimates[kind]),
+                             max(0, self._ceiling_tpm - input_estimate))
+        return input_estimate + output_reserve
 
     def estimate_input(self, input_tokens: int, kind: str = "text") -> int:
         if kind not in self._input_scale:
@@ -274,8 +306,9 @@ class RequestThrottle:
                   (max(0.0, self._cooldown_until - now), "cooldown")]
         if len(self._outstanding) >= self._inflight_limit:
             return None, "inflight"
-        if len(self._requests_second) >= SECOND_REQUEST_LIMIT:
-            delays.append((self._requests_second[0] + 1 + DISPATCH_GUARD_S - now, "second_window"))
+        if len(self._requests_second) >= self.rps:
+            index = len(self._requests_second) - self.rps
+            delays.append((self._requests_second[index] + 1 + DISPATCH_GUARD_S - now, "second_window"))
         if len(self._requests_minute) >= max(1, math.floor(self._target_rpm)):
             index = len(self._requests_minute) - max(1, math.floor(self._target_rpm))
             delays.append((self._requests_minute[index] + 60 + DISPATCH_GUARD_S - now, "minute_window"))
@@ -628,7 +661,8 @@ class RequestThrottle:
         if self._pending and now < self._cooldown_until:
             reason = "cooldown"
         return {
-            "scope": "process_event_loop", "hard_second_limit": SECOND_REQUEST_LIMIT,
+            "scope": "process_event_loop", "hard_second_limit": self.rps,
+            "model": self.model, "models": sorted(self.models), "quota_group": self.quota_group,
             "requests_last_second": len(self._requests_second),
             "requests_last_minute": len(self._requests_minute),
             "peak_requests_last_second": self._peak_second,
@@ -671,12 +705,49 @@ def _configured_throttle() -> RequestThrottle:
                            adaptive=adaptive, max_rpm=ceiling_rpm, max_tpm=ceiling_tpm)
 
 
+def _profile_throttle(cfg) -> RequestThrottle:
+    rate = getattr(cfg, "rate_limit", None)
+    if rate is not None:
+        def value(name):
+            return rate[name] if isinstance(rate, dict) else getattr(rate, name)
+        return RequestThrottle(
+            rpm=value("rpm"), tpm=value("tpm"), rps=value("rps"),
+            max_inflight=value("max_inflight"),
+            max_rpm=value("rpm"), max_tpm=value("tpm"),
+        )
+    if (getattr(cfg, "model", "") or "").lower() == MODEL:
+        return _configured_throttle()
+    # New model quotas must be configured by the deployment. Do not inherit
+    # 3.5-specific env quotas or automatic high-utilization behavior.
+    return RequestThrottle(rpm=60, tpm=100_000, rps=1, max_inflight=4,
+                           max_rpm=60, max_tpm=100_000)
+
+
+def _quota_group(cfg) -> str:
+    rate = getattr(cfg, "rate_limit", None)
+    group = (rate.get("group", "") if isinstance(rate, dict) else getattr(rate, "group", ""))
+    return str(group or "").strip() or (getattr(cfg, "model", "") or "").lower()
+
+
+def pacing_config(cfg) -> dict | None:
+    """Public configured budgets, usable before an event loop/controller exists."""
+    if not supports_bailian_pacing(cfg):
+        return None
+    throttle = _profile_throttle(cfg)
+    return {
+        "model": cfg.model, "quota_group": _quota_group(cfg),
+        "rpm": throttle.rpm, "tpm": throttle.tpm, "rps": throttle.rps,
+        "max_inflight": throttle._max_inflight,
+        "recommended_concurrency": throttle._max_inflight,
+    }
+
+
 def shared_throttle(cfg) -> RequestThrottle | None:
     if not supports_bailian_pacing(cfg):
         return None
-    # Share across keys, clients, repairs and consecutive tasks on this loop.
-    # Different accounts/regions also share conservatively, since credentials do
-    # not reliably identify an Alibaba primary account. No secrets are retained.
+    # Share across thinking modes, keys, clients, repairs and consecutive tasks.
+    # Explicit groups can share account quotas; otherwise each model has its own
+    # conservative cross-region bucket. Credentials never enter the cache key.
     loop = asyncio.get_running_loop()
     # Store on the loop, not a global weak-key dict whose value's asyncio locks
     # could strongly reference that same loop and retain closed test/service loops.
@@ -684,6 +755,13 @@ def shared_throttle(cfg) -> RequestThrottle | None:
     if controllers is None:
         controllers = {}
         setattr(loop, "_auto_eval_request_throttles", controllers)
-    if MODEL not in controllers:
-        controllers[MODEL] = _configured_throttle()
-    return controllers[MODEL]
+    key = _quota_group(cfg)
+    candidate = _profile_throttle(cfg)
+    if key not in controllers:
+        candidate.model = cfg.model
+        candidate.quota_group = key
+        controllers[key] = candidate
+    else:
+        controllers[key].restrict_budget(candidate)
+    controllers[key].models.add(cfg.model)
+    return controllers[key]

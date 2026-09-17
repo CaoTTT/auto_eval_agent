@@ -9,7 +9,7 @@ import zipfile
 
 from .compare_statistics import DIMENSION_NAMES, StatisticsTable
 from .compare_statistics_xlsx import statistics_sheet_xml
-from .history import _col, _sheet_xml, _styles_xml, _xlsx_text
+from .history import _col, _sheet_xml, _styles_xml, _xlsx_text, judge_runtime_summary
 
 
 def tables_workbook(sheets: dict[str,list[StatisticsTable]], *, plain: bool=False) -> bytes:
@@ -50,11 +50,20 @@ def tables_workbook(sheets: dict[str,list[StatisticsTable]], *, plain: bool=Fals
     return output.getvalue()
 
 
+def _report_runtime_metadata(report: dict) -> dict[str, dict]:
+    sources = {row["task_id"]: row for row in report.get("model_protocols", [])}
+    sources.update({row["task_id"]: row for row in report.get("model_runtimes", [])})
+    task_ids = report.get("task_ids") or list(dict.fromkeys(row["task_id"] for row in report["rows"]))
+    return {task_id: judge_runtime_summary(sources.get(task_id, {}), sources.get(task_id, {}))
+            for task_id in task_ids}
+
+
 def case_comparison_tables(report: dict) -> tuple[StatisticsTable, StatisticsTable]:
     """Pivot frozen label rows without merging tasks or changing statistical samples."""
     source=report["rows"]
     tasks=report.get("task_ids") or list(dict.fromkeys(row["task_id"] for row in source))
     dimensions=report["config"]["dimensions"]
+    runtime_metadata = _report_runtime_metadata(report)
     products=report["baseline"]["products"]
     cases={}
     by_key={}
@@ -68,7 +77,8 @@ def case_comparison_tables(report: dict) -> tuple[StatisticsTable, StatisticsTab
     if len(tasks)>1:
         score_fields.append(("纳入共同样本","common"))
     score_fields.append(("统计排除原因","exclusion"))
-    detail_fields=[("人工状态","human_status"),("模型状态","model_status"),("人工批注","human_reason"),
+    detail_fields=[("裁判模型","judge_model"),("思考模式","enable_thinking_label"),
+                   ("人工状态","human_status"),("模型状态","model_status"),("人工批注","human_reason"),
                    ("模型理由","model_reason"),("人工来源","human_source"),("身份状态","match_status"),
                    ("核验依据","match_reasons"),("结果绑定","result_input_binding"),("绑定依据","binding_reasons"),
                    ("排除原因","exclusion"),("匹配ID","match_id"),("证据引用","evidence"),
@@ -92,6 +102,8 @@ def case_comparison_tables(report: dict) -> tuple[StatisticsTable, StatisticsTab
                     score_values.append(row.get(field))
             for _,field in detail_fields:
                 value=row.get(field)
+                if field in ("judge_model", "enable_thinking_label") and not value:
+                    value=runtime_metadata.get(task, {}).get(field, "未记录")
                 if isinstance(value,(dict,list)):
                     value=json.dumps(value,ensure_ascii=False)
                 elif isinstance(value,bool):
@@ -113,6 +125,7 @@ def export_report(report: dict) -> bytes:
         ["人工标准",baseline["human_standard_version"]],["人工口径",baseline["human_policy_note"]],
         ["兼容模式",report["compatibility_mode"]],["用途",baseline["purpose"]],
         ["模型协议",json.dumps(report.get("model_protocols",[]),ensure_ascii=False)],
+        ["裁判模型与思考模式",json.dumps(_report_runtime_metadata(report),ensure_ascii=False)],
         ["内容准确性人工数字标签（仅留档）",report.get("accuracy_label_count",0)],
         ["任务与快照",json.dumps(report["frozen_at"],ensure_ascii=False)],["信息缺失", "；".join(report["warnings"])],
         ["范围外人工题号",json.dumps(report["out_of_scope"],ensure_ascii=False)]])

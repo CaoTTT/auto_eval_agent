@@ -11,7 +11,7 @@ from pydantic import Field
 
 from ..judges.compare_protocols import resolve_compare_protocol
 from .compare_statistics import Case, SCORE_DIMENSIONS, score_state
-from .history import task_to_snapshot
+from .history import judge_runtime_summary, task_to_snapshot
 from .tasks import latest_results_by_index
 from .human_baselines import HumanError, HumanStore, StrictModel, atomic_json, digest, read_json
 from .human_statistics import build_human_statistics
@@ -68,14 +68,14 @@ def freeze_run_snapshot(task) -> dict:
         raise HumanError("任务或补跑仍在执行，请结束后生成预览", 409)
     data = copy.deepcopy(task_to_snapshot(task))
     data["results"] = [dict(copy.deepcopy(row),index=index) for index,row in latest_results_by_index(task).items()]
-    # Only stable inputs and raw outputs determine the identity of a result snapshot.
+    # Inference settings distinguish repeated experiments even when scores match.
     def stable(value):
         if isinstance(value, dict):
             return {k: stable(v) for k,v in value.items() if k not in ("timings", "duration_s", "elapsed_s", "updated_at", "measured_at")}
         if isinstance(value, list):
             return [stable(v) for v in value]
         return value
-    data["snapshot_sha256"] = digest(stable({k: data[k] for k in ("items", "results", "evaluation_profile", "protocol_manifest")}))
+    data["snapshot_sha256"] = digest(stable({k: data[k] for k in ("items", "results", "evaluation_profile", "protocol_manifest", "judge_runtime")}))
     data["frozen_at"] = time.time()
     return data
 
@@ -178,6 +178,7 @@ def align_baseline_to_run(baseline: dict, snapshot: dict, mapping: TaskMapping, 
         if sid:
             indexes[mapping.case_map.get(sid,sid)].append(i)
     results = {int(r["index"]): r for r in snapshot["results"] if isinstance(r.get("index"),int)}
+    runtime_summary = judge_runtime_summary(snapshot)
     slots = {v:int(k[-1]) for k,v in mapping.product_map.items()}
     rows = []
     for cid in scope:
@@ -186,6 +187,8 @@ def align_baseline_to_run(baseline: dict, snapshot: dict, mapping: TaskMapping, 
         i = matched[0] if len(matched)==1 else None
         item = snapshot["items"][i] if i is not None else {}
         result = results.get(i,{})
+        result_runtime_summary = (judge_runtime_summary({}, result)
+                                  if result.get("judge_runtime") or result.get("judge_model") else runtime_summary)
         policy = _policy(snapshot,result)
         compatible = bool(policy and [policy.score_min,policy.score_max]==baseline["score_range"] and (
             policy.standard_version==baseline["human_standard_version"] or mode=="regression"))
@@ -231,7 +234,8 @@ def align_baseline_to_run(baseline: dict, snapshot: dict, mapping: TaskMapping, 
                            compatible=compatible, identity_accepted=identity_accepted,
                            prompt_sha256=result.get("prompt_sha256",""), evidence=response_identity(item,slot)["evidence"] if slot else "")
                 row.update(model_standard=policy.standard_version if policy else "unknown",
-                           bundle_revision=policy.bundle_revision if policy else "unknown")
+                           bundle_revision=policy.bundle_revision if policy else "unknown",
+                           **result_runtime_summary)
                 finalize_row(row)
                 rows.append(row)
     return rows
@@ -369,6 +373,8 @@ class HumanComparisons:
                         config=preview["config"],frozen_at=self.preview_summary(preview)["frozen_at"],
                         model_protocols=[dict(task_id=s["task_id"],protocol_manifest=s.get("protocol_manifest",{}),
                                               evaluation_profile=s.get("evaluation_profile","")) for s in preview["snapshots"]],
+                        model_runtimes=[dict(task_id=s["task_id"], **judge_runtime_summary(s))
+                                        for s in preview["snapshots"]],
                         accuracy_label_count=sum(r["dimension_id"]=="accuracy" and r["score_status"]=="scored" for r in baseline["labels"]),
                         warnings=self.preview_summary(preview)["warnings"],out_of_scope=preview["out_of_scope"])
             atomic_json(self.store.path("reports",report_id,"report.json"),report)

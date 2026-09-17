@@ -23,6 +23,10 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
 from ..config import load_config
+from ..judge_profiles import (
+    model_profiles, default_profile_id, configured_profile,
+    resolve_new_runtime, restore_runtime, check_frozen_options, legacy_runtime,
+)
 from ..judges.compare_protocols import (
     list_compare_protocols,
     resolve_compare_protocol,
@@ -166,7 +170,7 @@ def _compare_protocol_or_422(protocol_id: str | None):
         raise HTTPException(422, str(exc)) from exc
 
 
-def _protocol_manifest(protocol, app_cfg, options: dict) -> dict:
+def _protocol_manifest(protocol, app_cfg, options: dict, resolved_judges=None) -> dict:
     """Freeze non-secret runtime facts needed to interpret/reproduce a task."""
     manifest = protocol.public_metadata()
     visual_profile = app_cfg.visual_modes.get("rich_content")
@@ -185,11 +189,40 @@ def _protocol_manifest(protocol, app_cfg, options: dict) -> dict:
             "top_p": judge.top_p,
             "seed": judge.seed,
             "vl_high_resolution_images": judge.vl_high_resolution_images,
+            "enable_thinking": judge.enable_thinking,
         }
-        for judge in app_cfg.judges
-        if judge.name in selected
+        for judge in (resolved_judges if resolved_judges is not None else app_cfg.judges)
+        if resolved_judges is not None or judge.name in selected
     ]
     return manifest
+
+
+def _new_judge_runtime(app_cfg, options):
+    try:
+        runtime, judges = resolve_new_runtime(app_cfg, options)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    options["judges"] = [j.name for j in judges]
+    options["judge_model_profile"] = runtime["profile_id"]
+    if judges[0].enable_thinking is not None:
+        options["enable_thinking"] = judges[0].enable_thinking
+    return runtime, judges
+
+
+def _check_judge_options(task, options):
+    try:
+        check_frozen_options(task, options)
+        if task.judge_runtime:
+            restore_runtime(cfg(), task.judge_runtime)
+        else:
+            legacy_runtime(cfg(), task)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+def _freeze_legacy_judge(task, app_cfg):
+    if not task.judge_runtime:
+        task.judge_runtime = legacy_runtime(app_cfg, task)
 
 
 def _resolve_operation_video_path(raw_path: str) -> Path:
@@ -274,7 +307,20 @@ def api_config():
     from ..preparation import preparation_concurrency
 
     c = cfg()
+    profiles = model_profiles(c)
+    public_profiles = []
+    for profile in profiles:
+        judge = configured_profile(c, profile, profile.default_enable_thinking)
+        public_profiles.append({
+            "id": profile.id, "display": profile.display, "model": profile.model,
+            "judge_name": profile.judge_name, "supports_thinking": profile.supports_thinking,
+            "default_enable_thinking": profile.default_enable_thinking,
+            "recommended_concurrency": recommended_concurrency([judge]),
+            "request_pacing": supports_bailian_pacing(judge),
+        })
     return {
+        "judge_model_profiles": public_profiles,
+        "default_judge_model_profile": default_profile_id(c, profiles),
         "media_concurrency": preparation_concurrency(),
         "judges": [
             {"name": j.name, "display": j.display or j.name,
@@ -305,18 +351,33 @@ def api_parse(req: ParseReq):
 
 
 @app.get("/api/request-pacing")
-async def api_request_pacing() -> dict:
+async def api_request_pacing(model: str | None = None) -> dict:
     """Read local request pacing without creating a controller or exposing keys."""
     from ..request_throttle import MODEL, supports_bailian_pacing
 
     controllers = getattr(asyncio.get_running_loop(), "_auto_eval_request_throttles", {})
-    controller = controllers.get(MODEL)
-    return {
+    controller = controllers.get(model or MODEL)
+    result = {
         "enabled": any(supports_bailian_pacing(judge) for judge in cfg().judges),
         "active": controller is not None,
         "scope": "process_event_loop",
         "controller": controller.snapshot() if controller is not None else None,
     }
+    app_cfg = cfg()
+    if hasattr(app_cfg, "judge_model_profiles"):
+        from ..request_throttle import pacing_config
+        policies = []
+        for profile in model_profiles(app_cfg):
+            judge = configured_profile(app_cfg, profile, profile.default_enable_thinking)
+            policy = pacing_config(judge)
+            if policy:
+                policies.append({"profile_id": profile.id, **policy})
+        snapshots = [{"model": key, **value.snapshot()} for key, value in controllers.items()]
+        selected = next((row for row in snapshots if row.get("model") == model or model in row.get("models", [])), None) if model else (snapshots[0] if snapshots else None)
+        result.update(controllers=snapshots, policies=policies,
+                      enabled=any(p["model"] == model for p in policies) if model else bool(policies),
+                      active=selected is not None, controller=selected)
+    return result
 
 
 @app.post("/api/eval")
@@ -324,11 +385,10 @@ async def api_eval(req: EvalReq):
     if not req.items:
         raise HTTPException(400, "items 为空")
     app_cfg = cfg()
+    judge_runtime, judges = _new_judge_runtime(app_cfg, req.options)
     _validate_eval_request(req, app_cfg)
     from ..request_throttle import recommended_concurrency
 
-    selected = req.options.get("judges") or [app_cfg.judges[0].name]
-    judges = [j for j in app_cfg.judges if j.name in selected] or app_cfg.judges[:1]
     req.options.setdefault("concurrency", recommended_concurrency(judges))
     try:
         capacity = int(req.options["concurrency"])
@@ -348,8 +408,9 @@ async def api_eval(req: EvalReq):
         dataset_name=req.dataset_name.strip(),
         evaluation_profile=protocol.id if protocol else "",
         protocol_manifest=(
-            _protocol_manifest(protocol, app_cfg, req.options) if protocol else {}
+            _protocol_manifest(protocol, app_cfg, req.options, judges) if protocol else {}
         ),
+        judge_runtime=judge_runtime,
     )
     queue_position = EVAL_SCHEDULER.enqueue(task, app_cfg, run_eval)
     return {
@@ -357,6 +418,7 @@ async def api_eval(req: EvalReq):
         "status": "queued",
         "queue_position": queue_position,
         "evaluation_profile": task.evaluation_profile,
+        "judge_runtime": task.judge_runtime,
     }
 
 
@@ -430,6 +492,7 @@ async def api_resume(task_id: str, req: ResumeReq):
         raise HTTPException(409, "任务仍在执行或保存，请等待暂停完成")
     if task.status not in {"paused", "error", "cancelled", "done"}:
         raise HTTPException(409, "当前任务状态不能恢复")
+    _check_judge_options(task, {})
     indexes = resume_indexes(task, req.include_failed)
     if not indexes:
         raise HTTPException(409, "没有待执行的题目；如需重试失败项，请勾选同时重试失败项")
@@ -440,6 +503,7 @@ async def api_resume(task_id: str, req: ResumeReq):
                "completed": 0, "failed": 0}
     attempts.append(attempt)
     task.execution_control.update(state="queued", concurrency=req.concurrency, pending_indexes=indexes.copy())
+    _freeze_legacy_judge(task, app_cfg)
     position = EVAL_SCHEDULER.enqueue(task, app_cfg, run_resume)
     await wait_task_save(task, save=save_task)
     return {"task_id": task.id, "resume_id": attempt["id"], "status": "queued", "selected": len(indexes), "queue_position": position}
@@ -454,6 +518,7 @@ async def api_retry_failed(task_id: str, req: RetryReq):
         raise HTTPException(404, "task not found")
     if task.status != "done":
         raise HTTPException(409, "仅已完成任务可以发起失败补跑")
+    _check_judge_options(task, req.options)
     idem = req.idempotency_key.strip()
     if idem:
         for old in task.retry_runs.values():
@@ -540,6 +605,7 @@ async def api_retry_failed(task_id: str, req: RetryReq):
         },
     }
     task.retry_runs[retry_id] = retry
+    _freeze_legacy_judge(task, cfg())
     task.execution_control["pending_indexes"] = accepted_indexes.copy()
 
     async def _retry_runner(parent, app_cfg):
@@ -589,6 +655,8 @@ async def api_eval_items(req: EvalItemsReq):
     app_cfg = cfg()
     task = get_task(task_id)
     created = task is None
+    if created:
+        judge_runtime, judges = _new_judge_runtime(app_cfg, req.options)
     if task is not None and (task.pause_requested or task.status == "paused" or task.execution_control.get("state") in {"queued", "running"}):
         raise HTTPException(409, "任务正在暂停或恢复；请先完成该任务再更新 items")
     if task is not None:
@@ -625,6 +693,8 @@ async def api_eval_items(req: EvalItemsReq):
             422,
             "已有任务的评测协议不可变；请新建任务后使用另一版本评测",
         )
+    if not created:
+        _check_judge_options(task, req.options)
     protocol = (
         _compare_protocol_or_422(
             requested_profile if created else task.evaluation_profile
@@ -649,9 +719,11 @@ async def api_eval_items(req: EvalItemsReq):
             task_id=task_id,
             evaluation_profile=protocol.id if protocol else "",
             protocol_manifest=(
-                _protocol_manifest(protocol, app_cfg, req.options) if protocol else {}
+                _protocol_manifest(protocol, app_cfg, req.options, judges) if protocol else {}
             ),
+            judge_runtime=judge_runtime,
         )
+    _freeze_legacy_judge(task, app_cfg)
     batch, replaced_ids, added_ids = merge_items_by_id(task, req.items)
     effective_options = {**task.options, **req.options}
     batch_id = uuid.uuid4().hex[:12]

@@ -192,6 +192,9 @@ async def test_pause_queued_job_does_not_cancel_running_neighbor(storage, monkey
 @pytest.mark.asyncio
 async def test_resume_endpoint_idempotency_and_no_input_mutation(storage, monkeypatch):
     task = make_task(3)
+    task.judge_runtime = {"version": 1, "profile_id": "test", "judges": [
+        {"name": "judge", "model": "fake", "enable_thinking": False},
+    ]}
     task.status, task.active_runs = "paused", 0
     task.results = [{"index": 0}, {"index": 1, "error": "failed"}]
     original = copy.deepcopy(task.items)
