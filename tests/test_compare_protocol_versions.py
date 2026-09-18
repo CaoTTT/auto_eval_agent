@@ -48,7 +48,7 @@ def test_registry_defaults_to_stable_v02_and_exposes_experimental_versions():
     assert calibrated.observation_model is VisualCompareObservationV02
     thinking_exposure = resolve_compare_protocol(V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID)
     assert thinking_exposure.status == "experimental"
-    assert thinking_exposure.display == "V0.2 简化版·思考暴露优化（实验）"
+    assert thinking_exposure.display == "V0.2 简化版·思考暴露优化（可用）"
     assert thinking_exposure.public_metadata()["input_modalities"] == ["text", "text_image"]
     assert thinking_exposure.observation_model is VisualCompareObservationV02
     assert thinking_exposure.require_response_pass is True
@@ -186,6 +186,7 @@ async def test_eval_api_freezes_selected_protocol_on_new_task(monkeypatch):
 @pytest.mark.parametrize("protocol_id,standard_version,revision", [
     (V02_CALIBRATED_COMPARE_PROTOCOL_ID, "0.2-simplified-calibrated", "0.2.2"),
     (V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID, "0.2-simplified-thinking-exposure", "0.2.3"),
+    (V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID, "0.2-simplified-thinking-exposure", "0.2.4"),
 ])
 @pytest.mark.parametrize("response_gate", ["pass", "fail", "unclear"])
 def test_experimental_v02_preserves_gates_and_separate_version(
@@ -205,7 +206,7 @@ def test_experimental_v02_preserves_gates_and_separate_version(
             protocol.observation_model.model_validate(_observation_data(score))
 
 
-@pytest.mark.parametrize("revision", ["0.2.0", "0.2.1", "0.2.3", "0.3.0", "0.3.1", "unknown"])
+@pytest.mark.parametrize("revision", ["0.2.0", "0.2.1", "0.2.3", "0.2.4", "0.3.0", "0.3.1", "unknown"])
 def test_calibrated_cannot_restore_another_protocols_revision(revision):
     with pytest.raises(ValueError, match="无法恢复任务冻结的实现版本"):
         resolve_compare_protocol(V02_CALIBRATED_COMPARE_PROTOCOL_ID, revision)
@@ -218,9 +219,10 @@ def test_thinking_exposure_cannot_restore_another_protocols_revision(revision):
 
 
 @pytest.mark.parametrize("protocol_id", [DEFAULT_COMPARE_PROTOCOL_ID, V03_COMPARE_PROTOCOL_ID])
-def test_existing_protocols_cannot_restore_thinking_exposure_revision(protocol_id):
+@pytest.mark.parametrize("revision", ["0.2.3", "0.2.4"])
+def test_existing_protocols_cannot_restore_thinking_exposure_revision(protocol_id, revision):
     with pytest.raises(ValueError, match="无法恢复任务冻结的实现版本"):
-        resolve_compare_protocol(protocol_id, "0.2.3")
+        resolve_compare_protocol(protocol_id, revision)
 
 
 @pytest.mark.parametrize("protocol_id,revision", [
@@ -230,8 +232,50 @@ def test_existing_protocols_cannot_restore_thinking_exposure_revision(protocol_i
     (V03_COMPARE_PROTOCOL_ID, "0.3.1"),
     (V02_CALIBRATED_COMPARE_PROTOCOL_ID, "0.2.2"),
     (V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID, "0.2.3"),
+    (V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID, "0.2.4"),
 ])
 def test_existing_protocol_revisions_still_restore(protocol_id, revision):
     restored = resolve_compare_protocol(protocol_id, revision)
     assert restored.id == protocol_id
     assert restored.bundle_revision == revision
+
+
+@pytest.mark.parametrize("product_count", [2, 3])
+@pytest.mark.parametrize("evidence_mode", ["video_frames", "long_screenshot"])
+def test_thinking_exposure_restores_real_frozen_templates(product_count, evidence_mode):
+    from auto_eval.judges.visual_compare_prompt_v02_thinking_exposure import (
+        VISUAL_COMPARE_SYSTEM as frozen_system,
+        VISUAL_COMPARE_USER as frozen_user,
+    )
+
+    latest = resolve_compare_protocol(V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID)
+    frozen = resolve_compare_protocol(V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID, "0.2.4")
+    assert latest.bundle_revision == "0.2.3"
+    assert frozen.bundle_revision == "0.2.4"
+    assert frozen.system_template is frozen_system
+    assert frozen.user_template is frozen_user
+    assert frozen.observation_model is latest.observation_model
+    assert frozen.require_response_pass is latest.require_response_pass
+    assert frozen.public_metadata()["input_modalities"] == ["text", "text_image"]
+    kwargs = dict(persona="test", product_count=product_count, evidence_mode=evidence_mode)
+    marker = "定位候选→语义分类→最终保留取证→Gate决策"
+    assert marker not in latest.system_template.render(**kwargs)
+    assert marker in frozen.system_template.render(**kwargs)
+    assert marker not in latest.user_template.render(**kwargs)
+    assert marker in frozen.user_template.render(**kwargs)
+    assert resolve_compare_protocol(V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID) is latest
+
+
+def test_thinking_exposure_ui_only_exposes_r023():
+    from auto_eval.judges.visual_compare_prompt_v02_thinking_exposure_r023 import (
+        VISUAL_COMPARE_SYSTEM, VISUAL_COMPARE_USER,
+    )
+    profiles = [p for p in list_compare_protocols() if p.id == V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID]
+    assert len(profiles) == 1
+    active = profiles[0]
+    assert active.public_metadata()["bundle_revision"] == "0.2.3"
+    assert active.system_template is VISUAL_COMPARE_SYSTEM
+    assert active.user_template is VISUAL_COMPARE_USER
+    assert resolve_compare_protocol(active.id, "0.2.3") is active
+    archived = resolve_compare_protocol(active.id, "0.2.4")
+    assert archived not in list_compare_protocols()

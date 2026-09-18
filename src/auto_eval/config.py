@@ -6,7 +6,28 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
+
+
+class RateLimitConfig(BaseModel):
+    """Administrator supplied budgets for one shared provider quota."""
+
+    group: str = ""
+    rpm: int = Field(default=600, gt=0)
+    tpm: int = Field(default=1_000_000, gt=0)
+    rps: int = Field(default=10, gt=0)
+    max_inflight: int = Field(default=128, ge=1, le=128)
+
+
+def default_bailian_rate_limit(model: str) -> RateLimitConfig:
+    """Local sending budgets; the provider still enforces the account quota."""
+    if model.lower() == "qwen3.8-flash":
+        # Highest published dynamic TPM tier. Beijing/Singapore do not publish
+        # a numeric RPM quota; 30,000 RPM is our local request ceiling.
+        return RateLimitConfig(rpm=30_000, tpm=20_000_000, rps=500, max_inflight=128)
+    if model.lower() == "qwen3.5-397b-a17b":
+        return RateLimitConfig()
+    raise ValueError(f"未配置百炼模型的默认预算：{model}")
 
 
 class JudgeConfig(BaseModel):
@@ -31,6 +52,8 @@ class JudgeConfig(BaseModel):
     retry_max_s: float = 20.0
     stream_include_usage: bool = True
     vl_high_resolution_images: bool = False
+    enable_thinking: StrictBool | None = None
+    rate_limit: RateLimitConfig | None = None
 
     def api_key(self) -> str | None:
         return os.environ.get(self.api_key_env) if self.api_key_env else None
@@ -91,9 +114,24 @@ class VisualModeProfile(BaseModel):
     query_images: QueryImageConfig = Field(default_factory=QueryImageConfig)
 
 
+class JudgeModelProfile(BaseModel):
+    """Approved model choice; connection credentials remain on the server."""
+
+    id: str
+    display: str
+    judge_name: str = "judge_2"
+    model: str
+    supports_thinking: bool = False
+    default_enable_thinking: StrictBool | None = None
+    rate_limit: RateLimitConfig | None = None
+    total_timeout_s: float | None = Field(default=None, gt=0)
+
+
 class AppConfig(BaseModel):
     judges: list[JudgeConfig]
     visual_modes: dict[str, VisualModeProfile] = Field(default_factory=dict)
+    judge_model_profiles: list[JudgeModelProfile] = Field(default_factory=list)
+    default_judge_model_profile: str | None = None
 
 
 def _read_yaml(path: Path) -> Any:
@@ -120,4 +158,11 @@ def load_config(config_dir: str | Path) -> AppConfig:
 
     judges = [JudgeConfig(**j) for j in (judges_data.get("judges") or [])]
     visual_modes = _load_visual_modes(config_dir)
-    return AppConfig(judges=judges, visual_modes=visual_modes)
+    config = AppConfig(
+        judges=judges, visual_modes=visual_modes,
+        judge_model_profiles=judges_data.get("judge_model_profiles") or [],
+        default_judge_model_profile=judges_data.get("default_judge_model_profile"),
+    )
+    from .judge_profiles import model_profiles
+    model_profiles(config)  # Validate references and duplicate IDs at startup.
+    return config

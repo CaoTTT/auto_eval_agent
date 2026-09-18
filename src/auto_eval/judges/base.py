@@ -36,6 +36,7 @@ _TRACE_FIELDS = {
     "status",
     "judge",
     "model",
+    "enable_thinking",
     "system",
     "user",
     "rounds",
@@ -259,6 +260,23 @@ class JudgeClient:
                 progress=85,
                 progress_message=f"{judge_label} · JSON格式修复完成",
             )
+            if self.trace_path:
+                self._write_trace({
+                    "ts": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+                    "status": "success",
+                    "judge": self.cfg.name,
+                    "purpose": "json_repair",
+                    "rounds": 1,
+                    "llm_rounds": [{
+                        "round": max(1, round_no),
+                        "content": content,
+                        "tool_calls": [],
+                        "finish_reason": getattr(response.choices[0], "finish_reason", None),
+                        "usage": _usage_dict(getattr(response, "usage", None)),
+                        "stream_stats": getattr(response, "stream_stats", None),
+                    }],
+                    "messages": messages,
+                })
         return content
 
     async def complete(self, system: str, user: str,
@@ -316,6 +334,7 @@ class JudgeClient:
                     "tool_calls": [],
                     "finish_reason": getattr(resp.choices[0], "finish_reason", None),
                     "usage": _usage_dict(getattr(resp, "usage", None)),
+                    "stream_stats": getattr(resp, "stream_stats", None),
                 }],
                 # trace 不存 base64（每帧 ~30KB×N 会让 jsonl 膨胀），image_url 换成帧路径引用
                 "image_refs": user_image_refs,
@@ -336,6 +355,8 @@ class JudgeClient:
                 "item_id": ctx.item_id,
                 "item_index": ctx.item_index,
                 "item_sequence": ctx.item_index + 1 if ctx.item_index >= 0 else None,
+                "model": self.model,
+                "enable_thinking": getattr(self.cfg, "enable_thinking", None),
                 **detail,
             }
             record = _redact_data_urls(record)
@@ -359,6 +380,15 @@ class JudgeClient:
     async def _llm_create(self, kwargs: dict, max_attempts: int | None = None,
                           stream_callback: Callable[[str], None] | None = None):
         """始终使用流式接口；callback 只负责可选的前端分片通知。"""
+        # Use one request boundary for both judging and JSON repair. Preserve
+        # visual/provider extras and send False explicitly (None means omitted).
+        kwargs = dict(kwargs)
+        enable_thinking = getattr(self.cfg, "enable_thinking", None)
+        if enable_thinking is not None:
+            kwargs["extra_body"] = {
+                **(kwargs.get("extra_body") or {}),
+                "enable_thinking": enable_thinking,
+            }
         try:
             return await self._llm_create_stream(
                 kwargs,
@@ -374,6 +404,8 @@ class JudgeClient:
                     "model": self.model,
                     "error_type": type(exc).__name__,
                     "error": str(exc),
+                    "usage": _usage_dict(getattr(exc, "_auto_eval_usage", None)),
+                    "stream_stats": getattr(exc, "_auto_eval_stream_stats", None),
                     "round": current_context().round,
                 })
             raise

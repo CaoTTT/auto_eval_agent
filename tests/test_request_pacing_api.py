@@ -62,7 +62,7 @@ async def test_pacing_returns_shared_runtime_counts_without_credentials(monkeypa
         assert counts["inflight"] == 1
         assert counts["requests_last_second"] == counts["requests_last_minute"] == 1
         assert counts["reserved_tokens"] == 1000
-        assert counts["hard_second_limit"] == 9
+        assert counts["hard_second_limit"] == 10
         assert second["controller"]["total_requests"] == counts["total_requests"]
         public_json = json.dumps(first)
         assert "PRIVATE_KEY_NAME" not in public_json

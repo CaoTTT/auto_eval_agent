@@ -26,6 +26,37 @@ createApp({
     const judges = ref([]);
     const selectedJudges = ref([]);
     const visibleJudges = computed(() => judges.value);
+    const judgeModelProfiles = ref([]);
+    const defaultJudgeModelProfile = ref("");
+    const selectedJudgeModelProfile = ref("");
+    const enableThinking = ref(false);
+    const taskJudgeRuntime = ref(null);
+    const taskJudgeSummary = ref({});
+    const selectedModelProfile = computed(() =>
+      judgeModelProfiles.value.find(profile => profile.id === selectedJudgeModelProfile.value) || null
+    );
+    function changeJudgeModel({ resetConcurrency = false } = {}) {
+      const profile = selectedModelProfile.value;
+      enableThinking.value = profile?.supports_thinking === true && profile.default_enable_thinking === true;
+      const recommended = Math.max(1, Math.min(128, profile?.recommended_concurrency || 4));
+      concurrency.value = resetConcurrency || !Number.isInteger(concurrency.value) || concurrency.value < 1
+        ? recommended : Math.min(concurrency.value, recommended);
+    }
+    function thinkingLabel(value) {
+      return value === true ? "思考开启" : value === false ? "思考关闭" : "思考未记录";
+    }
+    function judgeRuntimeLabel(runtime, fallback = {}) {
+      const judge = runtime?.judges?.[0];
+      const model = judge?.model || fallback.judge_model || "模型未记录";
+      return `${model} · ${judge ? thinkingLabel(judge.enable_thinking) : `思考${fallback.enable_thinking_label || "未记录"}`}`;
+    }
+    function restoreJudgeModel(runtime) {
+      const profile = judgeModelProfiles.value.find(candidate => candidate.id === runtime?.profile_id);
+      selectedJudgeModelProfile.value = profile?.id || defaultJudgeModelProfile.value;
+      changeJudgeModel();
+      const thinking = runtime?.judges?.[0]?.enable_thinking;
+      if (profile?.supports_thinking === true && typeof thinking === "boolean") enableThinking.value = thinking;
+    }
     const evaluationProfiles = ref([]);
     const selectedEvaluationProfile = ref("");
     const compareProfiles = computed(() =>
@@ -34,6 +65,7 @@ createApp({
     const concurrency = ref(4);
     const mediaConcurrency = ref(4);
     const requestPacing = computed(() => {
+      if (selectedModelProfile.value) return !!selectedModelProfile.value.request_pacing;
       const selected = judges.value.filter((j) => selectedJudges.value.includes(j.name));
       return selected.length > 0 && selected.every((j) => j.request_pacing);
     });
@@ -129,6 +161,11 @@ createApp({
     const progressJumpPage = ref("");
     const cellTooltip = ref({ visible: false, text: "", style: {} });
     const historyItems = ref([]);
+    const historyPage = ref(1);
+    const historyTotal = ref(0);
+    const historyPageSize = 10;
+    const historyPageCount = computed(() => Math.max(1, Math.ceil(historyTotal.value / historyPageSize)));
+    const historyError = ref("");
     const historyNoteDrafts = ref({});
     const historyNoteEditing = ref({});
     const loadingHistory = ref(false);
@@ -139,6 +176,7 @@ createApp({
     const exportDownloadUrl = ref("");
     let historyLoadVersion = 0;
     let historyListVersion = 0;
+    let historyRequestedPage = 1;
     let historyLoadController = null;
     let disposed = false;
     const queueState = ref({ running: null, queued: [] });
@@ -677,7 +715,8 @@ createApp({
     }
 
     function defaultJudgeSelection() {
-      return judges.value.length ? [judges.value[0].name] : [];
+      const judge = judges.value.find(candidate => candidate.name === "judge_2") || judges.value[0];
+      return judge ? [judge.name] : [];
     }
 
     function defaultEvaluationProfile() {
@@ -747,6 +786,7 @@ createApp({
     }
     function detachResultView() {
       closeActiveStream();taskId.value='';results.value=[];summary.value=null;
+      taskJudgeRuntime.value = null;taskJudgeSummary.value = {};
       selectedTaskTiming.value = null;
       itemProgress.value={};progressEvents.value={};running.value=false;selectedTaskStatus.value='';
       repairStatus.value='idle';activeRetry.value=null;selectedRetryIndexes.value=[];
@@ -929,6 +969,14 @@ createApp({
       cancelHistoryLoad();
       const submitViewVersion = historyLoadVersion;
       runError.value = "";
+      if (judgeModelProfiles.value.length && !selectedModelProfile.value) {
+        runError.value = "请选择可用的裁判模型。";
+        return;
+      }
+      if (!Number.isInteger(concurrency.value) || concurrency.value < 1 || concurrency.value > 128) {
+        runError.value = "评估并发数必须为 1–128 的整数";
+        return;
+      }
       const valid = mode.value === 'compare' ? opItems.value : opItems.value.filter(opItemReady);
       if (mode.value === 'compare' && valid.some(item => !opItemReady(item))) {
         runError.value = '存在未填写问题或缺少产品证据的 Case，请展开检查；不会跳过这些条目提交。';
@@ -988,6 +1036,10 @@ createApp({
         options: {
           ...(mode.value === 'compare' && datasetSourceTaskId.value ? {dataset_source_task_id:datasetSourceTaskId.value} : {}),
           judges: selectedJudges.value,
+          ...(selectedModelProfile.value ? {
+            judge_model_profile: selectedModelProfile.value.id,
+            ...(selectedModelProfile.value.supports_thinking === true ? { enable_thinking: enableThinking.value } : {}),
+          } : {}),
           concurrency: concurrency.value,
           eval_timeout_s: evalTimeout.value,
         },
@@ -1045,6 +1097,8 @@ createApp({
       );
       running.value = true;
       taskId.value = d.task_id;
+      taskJudgeRuntime.value = d.judge_runtime || null;
+      taskJudgeSummary.value = {judge_model: d.judge_model, enable_thinking_label: d.enable_thinking_label};
       executionControl.value = {};
       selectedActiveRuns.value = 1;
       resumeConcurrency.value = concurrency.value;
@@ -1486,23 +1540,39 @@ createApp({
       return d.toLocaleString();
     }
 
-    async function loadHistory() {
+    async function loadHistory(requestedPage = historyRequestedPage) {
+      requestedPage = Math.max(1, Math.trunc(Number(requestedPage)) || 1);
+      historyRequestedPage = requestedPage;
       const version = ++historyListVersion;
       loadingHistory.value = true;
+      historyError.value = "";
       try {
-        const r = await fetch("/api/history?limit=50");
-        if (!r.ok) return;
+        const r = await fetch(`/api/history?page=${requestedPage}`);
+        if (!r.ok) throw new Error("请稍后重试");
         const d = await r.json();
-        if (version !== historyListVersion) return;
+        if (version !== historyListVersion || disposed) return;
         historyItems.value = (d.items || []).map(item => ({ ...item, task_timing: receiveTaskTiming(item.task_timing) }));
+        historyTotal.value = d.total ?? historyItems.value.length;
+        historyPage.value = d.page || requestedPage;
+        historyRequestedPage = historyPage.value;
         const selected = historyItems.value.find(item => item.task_id === taskId.value);
-        if (selected) updateTaskTiming(selected.task_timing);
-        historyNoteDrafts.value = Object.fromEntries(
-          historyItems.value.map((item) => [item.task_id,
+        if (selected) {
+          updateTaskTiming(selected.task_timing);
+          if (selected.judge_runtime) taskJudgeRuntime.value = selected.judge_runtime;
+          taskJudgeSummary.value = {judge_model: selected.judge_model, enable_thinking_label: selected.enable_thinking_label};
+        }
+        historyNoteDrafts.value = Object.fromEntries([
+          // Keep unfinished note edits when their rows are on another page.
+          ...Object.entries(historyNoteDrafts.value).filter(([id]) => historyNoteEditing.value[id]),
+          ...historyItems.value.map((item) => [item.task_id,
             historyNoteEditing.value[item.task_id] ? historyNoteDrafts.value[item.task_id] : item.note || ""]),
-        );
-        historyNoteEditing.value = Object.fromEntries(historyItems.value
-          .filter(item => historyNoteEditing.value[item.task_id]).map(item => [item.task_id, true]));
+        ]);
+        historyNoteEditing.value = Object.fromEntries(Object.entries(historyNoteEditing.value)
+          .filter(([, editing]) => editing));
+      } catch (error) {
+        if (version !== historyListVersion || disposed) return;
+        historyRequestedPage = historyPage.value;
+        historyError.value = "历史记录加载失败：" + (error?.message || "网络错误");
       } finally {
         if (version === historyListVersion) loadingHistory.value = false;
       }
@@ -1522,6 +1592,7 @@ createApp({
         const selected = queueEntries.value.find(item => item.task_id === taskId.value);
         if (selected) {
           updateTaskTiming(selected.task_timing);
+          if (selected.judge_runtime) taskJudgeRuntime.value = selected.judge_runtime;
           if (selected.kind !== "retry" && selectedTaskStatus.value !== "paused") {
             selectedTaskStatus.value = selected.status;
             running.value = ["pending", "queued", "running"].includes(selected.status);
@@ -1545,7 +1616,7 @@ createApp({
 
     async function loadRequestPacing() {
       if (disposed) return;
-      if (!judges.value.some((judge) => judge.request_pacing)
+      if (!(judges.value.some((judge) => judge.request_pacing) || judgeModelProfiles.value.some(profile => profile.request_pacing))
           || !(queueState.value.running || running.value || repairStatus.value === "running")) {
         pacingStatus.value = null;
         pacingError.value = "";
@@ -1558,7 +1629,14 @@ createApp({
         if (!response.ok) throw new Error("调度状态暂不可用");
         const data = await response.json();
         if (disposed || !(queueState.value.running || running.value || repairStatus.value === "running")) return;
-        pacingStatus.value = data.enabled && data.active ? data.controller : null;
+        const activeTask = queueState.value.running;
+        const runtime = activeTask ? activeTask.judge_runtime : taskJudgeRuntime.value;
+        const model = runtime?.judges?.[0]?.model;
+        const controllers = data.controllers || [];
+        const controller = model && controllers.length
+          ? controllers.find(entry => entry.model === model || (entry.models || []).includes(model))
+          : controllers.length ? (controllers.length === 1 ? controllers[0] : null) : data.controller;
+        pacingStatus.value = data.enabled && data.active ? controller || null : null;
         pacingError.value = "";
       } catch (_) {
         if (!disposed && (queueState.value.running || running.value || repairStatus.value === "running")) {
@@ -1648,10 +1726,14 @@ createApp({
       }
       if (taskId.value === id) {
         taskId.value = "";
+        taskJudgeRuntime.value = null;
+        taskJudgeSummary.value = {};
         selectedTaskTiming.value = null;
         results.value = [];
         summary.value = null;
       }
+      delete historyNoteDrafts.value[id];
+      delete historyNoteEditing.value[id];
       await loadHistory();
     }
 
@@ -1686,6 +1768,9 @@ createApp({
         loaded = true;
         closeActiveStream();
         taskId.value = d.task_id || id;
+        taskJudgeRuntime.value = d.judge_runtime || null;
+        taskJudgeSummary.value = {judge_model: d.judge_model, enable_thinking_label: d.enable_thinking_label};
+        restoreJudgeModel(d.judge_runtime);
         selectedTaskTiming.value = receiveTaskTiming(d.task_timing);
         mode.value = d.mode;
         if (d.mode === "compare") {
@@ -1827,12 +1912,16 @@ createApp({
       const r = await fetch("/api/config");
       const d = await r.json();
       judges.value = d.judges || [];
+      judgeModelProfiles.value = d.judge_model_profiles || [];
+      defaultJudgeModelProfile.value = d.default_judge_model_profile || judgeModelProfiles.value[0]?.id || "";
+      selectedJudgeModelProfile.value = defaultJudgeModelProfile.value;
       mediaConcurrency.value = d.media_concurrency || 4;
       evaluationProfiles.value = d.evaluation_profiles || [];
       selectedEvaluationProfile.value = defaultEvaluationProfile();
       selectedJudges.value = defaultJudgeSelection();
       const selectedJudge = judges.value.find((j) => j.name === selectedJudges.value[0]);
       concurrency.value = selectedJudge?.recommended_concurrency || 4;
+      if (selectedModelProfile.value) changeJudgeModel({ resetConcurrency: true });
       loadHistory();
       loadQueue();
       queueRefreshTimer = window.setInterval(loadQueue, 2000);
@@ -1840,6 +1929,7 @@ createApp({
 
     onUnmounted(() => {
       disposed = true;
+      historyListVersion++;
       datasetImportVersion++;
       cancelHistoryLoad();
       if (progressClockTimer != null) window.clearInterval(progressClockTimer);
@@ -1851,6 +1941,8 @@ createApp({
       modes, mode, modeLabel, isVideoMode, items, errors, importReport, judges, visibleJudges, selectedJudges, datasetName,
       datasetSourceTaskId, datasetRevision, useComparisonDataset,
       evaluationProfiles, compareProfiles, selectedEvaluationProfile, evaluationProfileLabel,
+      judgeModelProfiles, selectedJudgeModelProfile, selectedModelProfile, enableThinking, changeJudgeModel,
+      taskJudgeRuntime, taskJudgeSummary, thinkingLabel, judgeRuntimeLabel,
       concurrency, mediaConcurrency, requestPacing, evalTimeout, submitting, running, progress, total, results, summary, taskId, runError,
       pacingStatus, pacingError, pacingNumber, pacingWaitLabel, pacingLimitLabel,
       queueState, queueEntries, selectedTaskStatus, queueNotice, taskStatusLabel, queueKindLabel,
@@ -1860,6 +1952,7 @@ createApp({
       failedResultIndexes, retryIndexSelected, toggleRetryIndex, retryFailedCases,
       itemProgress, progressEvents, expandedProgressLogs, pagedProgressRows, progressStages,
       historyItems, historyNoteDrafts, historyNoteEditing, loadingHistory, pageSize,
+      historyPage, historyTotal, historyPageSize, historyPageCount, historyError,
       loadingTaskId, exportingTaskId, exportMessage, exportError, exportDownloadUrl,
       opPage, opPageSize, opPageCount, opJumpPage,
       progressPage, progressPageCount, progressJumpPage,

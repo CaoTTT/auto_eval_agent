@@ -14,6 +14,7 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimi
 from .observability import current_context, error_details, log_event
 from .request_throttle import RequestThrottle, estimate_input_tokens, wait_for_active
 from .request_transport import HeaderAdmission, header_admission, paced_http_client
+from .task_control import check_pause, pause_aware
 from .timing import record_model_attempt, timing_span
 
 
@@ -70,6 +71,7 @@ class AggregatedResponse:
     choices: list[AggregatedChoice]
     model: str = ""
     usage: Any = None
+    stream_stats: dict[str, Any] | None = None
 
 
 def build_openai_client(
@@ -193,6 +195,8 @@ def _rejects_stream_usage(exc: BaseException) -> bool:
 
 
 async def _collect_stream(client, kwargs: dict, *, include_usage: bool):
+    check_pause()
+    started = time.perf_counter()
     request = {**kwargs, "stream": True}
     if include_usage:
         request["stream_options"] = {"include_usage": True}
@@ -204,12 +208,14 @@ async def _collect_stream(client, kwargs: dict, *, include_usage: bool):
     usage = None
     model = kwargs.get("model", "")
     saw_choice = False
-    started = time.perf_counter()
     stats = {
         "chunk数": 0,
         "输出字符": 0,
         "工具参数字符": 0,
         "首Token耗时": None,
+        "首响应耗时": None,
+        "首答案耗时": None,
+        "思考chunk数": 0,
     }
 
     try:
@@ -230,17 +236,35 @@ async def _collect_stream(client, kwargs: dict, *, include_usage: bool):
             choice = choices[0]
             delta = choice.delta
             content = getattr(delta, "content", None)
+            reasoning = getattr(delta, "reasoning_content", None)
+            if reasoning is None:
+                reasoning = (getattr(delta, "model_extra", None) or {}).get("reasoning_content")
+            if (reasoning or content) and stats["首响应耗时"] is None:
+                stats["首响应耗时"] = round((time.perf_counter() - started) * 1000)
+            if reasoning:
+                # Keep only timing/state metadata: native reasoning must never
+                # become answer text, callback output or a stored trace body.
+                stats["思考chunk数"] += 1
+                if stats["思考chunk数"] == 1:
+                    log_event(
+                        current_context().module or "模型调用",
+                        "模型思考中",
+                        details={"首响应耗时": f"{stats['首响应耗时']}ms"},
+                        progress=40,
+                        progress_message="模型思考中",
+                    )
             if content:
                 if stats["首Token耗时"] is None:
                     stats["首Token耗时"] = round(
                         (time.perf_counter() - started) * 1000
                     )
+                    stats["首答案耗时"] = stats["首Token耗时"]
                     log_event(
                         current_context().module or "模型调用",
                         "收到首个Token",
                         details={"耗时": f"{stats['首Token耗时']}ms"},
                         progress=45,
-                        progress_message="正在接收模型流式输出",
+                        progress_message="正在生成评审结果",
                     )
                 content_chunks.append(content)
                 stats["输出字符"] += len(content)
@@ -265,6 +289,7 @@ async def _collect_stream(client, kwargs: dict, *, include_usage: bool):
     except Exception as exc:
         try:
             setattr(exc, "_auto_eval_stream_stats", dict(stats))
+            setattr(exc, "_auto_eval_usage", usage)
         except Exception:
             pass
         raise
@@ -288,6 +313,7 @@ async def _collect_stream(client, kwargs: dict, *, include_usage: bool):
     if not saw_choice:
         error = StreamProtocolError("流式响应中没有有效 choice")
         setattr(error, "_auto_eval_stream_stats", dict(stats))
+        setattr(error, "_auto_eval_usage", usage)
         raise error
 
     normalized_finish_reason = str(finish_reason or "").strip().lower()
@@ -306,6 +332,7 @@ async def _collect_stream(client, kwargs: dict, *, include_usage: bool):
             retriable=True,
         )
         setattr(error, "_auto_eval_stream_stats", dict(stats))
+        setattr(error, "_auto_eval_usage", usage)
         raise error
     if normalized_finish_reason in {
         "blocked",
@@ -320,19 +347,26 @@ async def _collect_stream(client, kwargs: dict, *, include_usage: bool):
             retriable=False,
         )
         setattr(error, "_auto_eval_stream_stats", dict(stats))
+        setattr(error, "_auto_eval_usage", usage)
         raise error
     if not content_chunks and not tool_calls:
+        reasoning_only = stats["思考chunk数"] > 0
+        exhausted_reasoning = reasoning_only and normalized_finish_reason == "length"
         error = ProviderStreamError(
-            f"服务端返回空响应：finish_reason={finish_reason or '空'}",
+            ("模型仅返回思考内容，未生成最终答案" if reasoning_only else "服务端返回空响应")
+            + f"：finish_reason={finish_reason or '空'}"
+            + ("；请检查模型输出预算，或关闭思考模式后新建任务重试" if exhausted_reasoning else ""),
             body={"finish_reason": finish_reason, "content": ""},
-            retriable=True,
+            retriable=not exhausted_reasoning,
         )
         setattr(error, "_auto_eval_stream_stats", dict(stats))
+        setattr(error, "_auto_eval_usage", usage)
         raise error
 
     response = AggregatedResponse(
         model=model,
         usage=usage,
+        stream_stats={**stats, "总耗时": round((time.perf_counter() - started) * 1000)},
         choices=[
             AggregatedChoice(
                 index=0,
@@ -365,13 +399,14 @@ async def stream_chat_completion(
     """
     if max_attempts < 1:
         raise ValueError("max_attempts 必须大于等于 1")
+    check_pause()
     if throttle is not None and not getattr(client, "_auto_eval_header_pacing", False):
         from openai import AsyncOpenAI
 
         if isinstance(client, AsyncOpenAI):
             raise ValueError("百炼限流调用必须使用 build_openai_client 创建的传输客户端")
 
-    input_tokens = await asyncio.to_thread(estimate_input_tokens, kwargs) if throttle else 0
+    input_tokens = await pause_aware(asyncio.to_thread(estimate_input_tokens, kwargs)) if throttle else 0
     request_kind = "vision" if any(
         isinstance(message.get("content"), list) and any(
             part.get("type") == "image_url" for part in message["content"]
@@ -379,6 +414,7 @@ async def stream_chat_completion(
     ) else "text"
 
     async def send(include_usage: bool):
+        check_pause()
         reservation = None
         admission = None
         response = None
@@ -389,30 +425,37 @@ async def stream_chat_completion(
                       progress_message="等待模型请求额度（请求数 / Token / 在途上限）")
             if getattr(client, "_auto_eval_header_pacing", False):
                 admission = HeaderAdmission(throttle, input_tokens, request_kind)
-            else:
-                # Compatibility for synthetic/test clients. Production clients
-                # constructed above always gate after pool/connect waits.
-                reservation = await throttle.acquire(
-                    throttle.estimate(input_tokens, request_kind),
-                    input_proxy=input_tokens, kind=request_kind,
-                )
-                record_model_attempt()
             request = {**kwargs, "extra_headers": {
                 "X-DashScope-Wait-Timeout": "30", **(kwargs.get("extra_headers") or {}),
             }}
+
+        async def collect():
+            nonlocal reservation
+            check_pause()
+            if not getattr(client, "_auto_eval_header_pacing", False):
+                # Synthetic clients have no HTTP header hook. Keep acquisition
+                # and the call in one coroutine so pausing cannot strand a permit
+                # between an outer admission and a newly scheduled collector.
+                if throttle is not None:
+                    reservation = await throttle.acquire(
+                        throttle.estimate(input_tokens, request_kind),
+                        input_proxy=input_tokens, kind=request_kind,
+                    )
+                record_model_attempt()
+            return await _collect_stream(client, request, include_usage=include_usage)
+
         try:
             if admission is not None:
                 with header_admission(admission), timing_span("model"):
                     response, chunks, stats = await wait_for_active(
-                        _collect_stream(client, request, include_usage=include_usage),
+                        collect(),
                         timeout=total_timeout_s,
                     )
             else:
-                if reservation is None:
-                    record_model_attempt()
                 with timing_span("model"):
-                    response, chunks, stats = await asyncio.wait_for(
-                        _collect_stream(client, request, include_usage=include_usage),
+                    wait = wait_for_active if throttle is not None else asyncio.wait_for
+                    response, chunks, stats = await wait(
+                        collect(),
                         timeout=total_timeout_s,
                     )
             return response, chunks, stats
@@ -420,14 +463,18 @@ async def stream_chat_completion(
             failure = exc
             raise
         finally:
+            # A provider can bill a completed reasoning phase even if it never
+            # produced a usable answer. Settle returned usage on that failure.
+            usage = getattr(response, "usage", None) or getattr(failure, "_auto_eval_usage", None)
             if reservation is not None:
-                throttle.finish(reservation, getattr(response, "usage", None), failure)
+                throttle.finish(reservation, usage, failure)
             if admission is not None:
-                admission.finish(getattr(response, "usage", None), failure)
+                admission.finish(usage, failure)
 
     last_exc: BaseException | None = None
     use_usage = include_usage
     for attempt in range(max_attempts):
+        check_pause()
         module = current_context().module or "模型调用"
         call_started = time.perf_counter()
         log_event(
@@ -435,6 +482,7 @@ async def stream_chat_completion(
             "流式调用开始" if attempt == 0 else "开始重试",
             details={
                 "模型": kwargs.get("model", ""),
+                "思考模式": (kwargs.get("extra_body") or {}).get("enable_thinking"),
                 "请求次数": f"{attempt + 1}/{max_attempts}",
                 "超时": f"{total_timeout_s:g}秒",
             },
@@ -480,6 +528,7 @@ async def stream_chat_completion(
                 "流式调用成功" if attempt == 0 else "重试成功",
                 details={
                     "模型": kwargs.get("model", ""),
+                    "思考模式": (kwargs.get("extra_body") or {}).get("enable_thinking"),
                     "请求次数": f"{attempt + 1}/{max_attempts}",
                     "结束原因": getattr(choice, "finish_reason", None),
                     "下一步": (
@@ -487,8 +536,12 @@ async def stream_chat_completion(
                     ),
                     "chunk数": stats.get("chunk数"),
                     "输出字符": stats.get("输出字符"),
-                    "输入Token": getattr(usage, "prompt_tokens", None) if usage else None,
-                    "输出Token": getattr(usage, "completion_tokens", None) if usage else None,
+                    "思考chunk数": stats.get("思考chunk数"),
+                    "首响应耗时": stats.get("首响应耗时"),
+                    "首答案耗时": stats.get("首答案耗时"),
+                    "输入Token": _error_value(usage, "prompt_tokens"),
+                    "输出Token": _error_value(usage, "completion_tokens"),
+                    "思考Token": _error_value(_error_value(usage, "completion_tokens_details"), "reasoning_tokens"),
                     "耗时": f"{time.perf_counter() - call_started:.2f}秒",
                 },
                 progress=60,
@@ -508,6 +561,7 @@ async def stream_chat_completion(
             stats = getattr(exc, "_auto_eval_stream_stats", {}) or {}
             details = {
                 "模型": kwargs.get("model", ""),
+                "思考模式": (kwargs.get("extra_body") or {}).get("enable_thinking"),
                 "请求次数": f"{attempt + 1}/{max_attempts}",
                 "可重试": retriable,
                 "已接收chunk": stats.get("chunk数"),
@@ -546,7 +600,7 @@ async def stream_chat_completion(
                 progress_message=f"{module}：调用失败，准备第{attempt + 2}次重试",
             )
             with timing_span("retry_wait"):
-                await asyncio.sleep(wait)
+                await pause_aware(asyncio.sleep(wait))
 
     assert last_exc is not None
     raise last_exc

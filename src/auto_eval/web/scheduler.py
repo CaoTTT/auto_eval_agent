@@ -260,6 +260,8 @@ class EvalScheduler:
         }
         if task.evaluation_profile:
             entry["evaluation_profile"] = task.evaluation_profile
+        if task.judge_runtime:
+            entry["judge_runtime"] = task.judge_runtime
         if job.kind == "retry":
             entry["retry_id"] = job.job_id
         return entry

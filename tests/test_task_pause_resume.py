@@ -10,7 +10,7 @@ import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
 
-from auto_eval.config import load_config
+from auto_eval.config import AppConfig, JudgeConfig, load_config
 from auto_eval.web import history, persistence, runner, scheduler, server, tasks
 from auto_eval.web.execution_control import resume_indexes
 from auto_eval.web.tasks import Task, latest_results_by_index
@@ -192,6 +192,9 @@ async def test_pause_queued_job_does_not_cancel_running_neighbor(storage, monkey
 @pytest.mark.asyncio
 async def test_resume_endpoint_idempotency_and_no_input_mutation(storage, monkeypatch):
     task = make_task(3)
+    task.judge_runtime = {"version": 1, "profile_id": "test", "judges": [
+        {"name": "judge", "model": "fake", "enable_thinking": False},
+    ]}
     task.status, task.active_runs = "paused", 0
     task.results = [{"index": 0}, {"index": 1, "error": "failed"}]
     original = copy.deepcopy(task.items)
@@ -206,7 +209,9 @@ async def test_resume_endpoint_idempotency_and_no_input_mutation(storage, monkey
             return 2
 
     monkeypatch.setattr(server, "get_task_async", get)
-    monkeypatch.setattr(server, "cfg", lambda: None)
+    monkeypatch.setattr(server, "cfg", lambda: AppConfig(judges=[
+        JudgeConfig(name="judge", model="fake", enable_thinking=False),
+    ]))
     monkeypatch.setattr(server, "EVAL_SCHEDULER", Queue())
     req = server.ResumeReq(concurrency=8, idempotency_key="once")
     response = await server.api_resume(task.id, req)

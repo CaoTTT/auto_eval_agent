@@ -127,6 +127,7 @@ def task_to_snapshot(task) -> dict:
         "options": task.options,
         "evaluation_profile": getattr(task, "evaluation_profile", ""),
         "protocol_manifest": getattr(task, "protocol_manifest", {}),
+        "judge_runtime": getattr(task, "judge_runtime", {}),
         "status": task.status,
         "results": task.results,
         "item_progress": task.item_progress,
@@ -298,8 +299,10 @@ def _snapshot_meta_row(data: dict, path: Path) -> dict:
         "error": data.get("error"),
         "repair_status": data.get("repair_status") or "idle",
         "evaluation_profile": _snapshot_evaluation_profile(data),
+        "judge_runtime": judge_runtime_display(data),
+        **judge_runtime_summary(data),
         "preview": _preview(data),
-        "meta_version": 1,
+        "meta_version": 2,
     }
 
 
@@ -330,7 +333,7 @@ def _load_meta_row(path: Path) -> dict | None:
     if meta_path.exists():
         try:
             data = json.loads(meta_path.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
+            if isinstance(data, dict) and data.get("meta_version") == 2:
                 row = data
         except Exception:
             row = None
@@ -382,6 +385,8 @@ def snapshot_payload(data: dict) -> dict:
         "options": data.get("options") or {},
         "evaluation_profile": _snapshot_evaluation_profile(data),
         "protocol_manifest": data.get("protocol_manifest") or {},
+        "judge_runtime": data.get("judge_runtime") or {},
+        **judge_runtime_summary(data),
         "status": data.get("status"),
         "results": data.get("results") or [],
         "item_progress": data.get("item_progress") or {},
@@ -398,6 +403,71 @@ def snapshot_payload(data: dict) -> dict:
     }
 
 
+def judge_runtime_display(snapshot: dict) -> dict:
+    """Small UI/report projection; connection settings stay in the saved snapshot."""
+    runtime = snapshot.get("judge_runtime") or {}
+    if not isinstance(runtime, dict) or not runtime:
+        return {}
+    return {
+        "version": runtime.get("version"),
+        "profile_id": runtime.get("profile_id", ""),
+        "judges": [
+            {key: judge.get(key) for key in ("name", "display", "model", "enable_thinking")}
+            for judge in runtime.get("judges", []) if isinstance(judge, dict)
+        ],
+    }
+
+
+def judge_runtime_summary(snapshot: dict, result: dict | None = None) -> dict:
+    """Summarize recorded inference settings without inventing legacy defaults.
+
+    Result metadata takes precedence for per-row exports. Legacy model names can
+    be recovered for display, but this never constructs a resumable runtime.
+    """
+    def records(runtime):
+        if not isinstance(runtime, dict):
+            return []
+        if isinstance(runtime.get("judges"), list):
+            return [judge for judge in runtime["judges"] if isinstance(judge, dict)]
+        return [runtime] if runtime.get("model") else []
+
+    runtime = (result or {}).get("judge_runtime") or {}
+    judges = records(runtime)
+    if not judges and result and result.get("judge_model"):
+        judges = [{"model": result["judge_model"], "enable_thinking": result.get("enable_thinking")}]
+    if not judges:
+        runtime = snapshot.get("judge_runtime") or {}
+        judges = records(runtime)
+    if not judges:
+        judges = [
+            {"model": judge.get("model"), "enable_thinking": None}
+            for judge in (snapshot.get("protocol_manifest") or {}).get("judges", [])
+            if isinstance(judge, dict) and judge.get("model")
+        ]
+    if not judges:
+        for row in snapshot.get("results") or []:
+            recorded = records(row.get("judge_runtime"))
+            judges.extend(recorded or ([{"model": row["judge_model"], "enable_thinking": row.get("enable_thinking")}]
+                                       if row.get("judge_model") else []))
+    models = list(dict.fromkeys(str(judge.get("model") or "未记录") for judge in judges))
+    thinking = list(dict.fromkeys(
+        judge.get("enable_thinking") if isinstance(judge.get("enable_thinking"), bool) else None
+        for judge in judges
+    ))
+    labels = ["开启" if value is True else "关闭" if value is False else "未记录" for value in thinking]
+    return {
+        "judge_model": " / ".join(models) or "未记录",
+        "judge_model_profile": runtime.get("profile_id", "") if isinstance(runtime, dict) else "",
+        "enable_thinking": thinking[0] if len(thinking) == 1 else None,
+        "enable_thinking_label": " / ".join(labels) or "未记录",
+    }
+
+
+def _judge_export_fields(data: dict) -> dict:
+    summary = judge_runtime_summary(data, data)
+    return {"裁判模型": summary["judge_model"], "思考模式": summary["enable_thinking_label"]}
+
+
 def export_rows(snapshot: dict) -> dict[str, list[dict]]:
     """把一次评测拆成多个 Sheet 的行数据。
 
@@ -410,6 +480,12 @@ def export_rows(snapshot: dict) -> dict[str, list[dict]]:
     """
     results = _results_with_identity(snapshot)
     aligned_results = _aligned_results(snapshot, results)
+    task_judge_summary = judge_runtime_summary(snapshot)
+    aligned_results = [
+        dict(row, **(judge_runtime_summary({}, row) if row.get("judge_runtime") or row.get("judge_model")
+                     else task_judge_summary))
+        for row in aligned_results
+    ]
     summary = dict(snapshot.get("summary") or {})
     mode = snapshot.get("mode")
     if mode == "compare" and summary:
@@ -596,6 +672,7 @@ def _rich_content_export_rows(results: list[dict]) -> list[dict]:
             if key in _RICH_CONTENT_DISPLAY_MAP and value:
                 value = _RICH_CONTENT_DISPLAY_MAP[key].get(str(value), value)
             export_row[label] = value
+        export_row.update(_judge_export_fields(row))
         export.append(export_row)
     return export
 
@@ -942,6 +1019,7 @@ def _run_info(snapshot: dict) -> dict:
         "options": snapshot.get("options") or {},
         "evaluation_profile": snapshot.get("evaluation_profile") or "",
         "protocol_manifest": snapshot.get("protocol_manifest") or {},
+        **_judge_export_fields(snapshot),
         "error": snapshot.get("error") or "",
     }
 
@@ -1095,6 +1173,7 @@ def _visual_compare_export_rows(results: list[dict]) -> list[dict]:
                 row[label] = _DISPLAY_MAP[key][v]
             else:
                 row[label] = v if v != "" else ""
+        row.update(_judge_export_fields(r))
         rows.append(row)
     return rows
 
@@ -1471,6 +1550,8 @@ def _write_xlsx(snapshot: dict, destination) -> None:
         build_compare_statistics(snapshot, _aligned_results(snapshot, _results_with_identity(snapshot)))
         if snapshot.get("mode") == "compare" else []
     )
+    if statistics:
+        statistics[0].rows[2:2] = [[key, value] for key, value in _judge_export_fields(snapshot).items()]
     if snapshot.get("mode") == "compare" and not _compare_snapshot_uses_product3(snapshot):
         extra_headers = set(_extra_input_columns(snapshot).values())
         for sheet_name in ("数据集明细", "逐题结果"):

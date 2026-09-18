@@ -14,6 +14,7 @@ from contextvars import ContextVar
 from typing import TypeVar
 
 from .timing import timing_span
+from .task_control import check_pause, pause_aware
 
 
 T = TypeVar("T")
@@ -113,20 +114,22 @@ def check_preparation() -> None:
 
 
 async def run_preparation(fn: Callable[..., T], *args, timeout: float, **kwargs) -> T:
+    check_pause()
     limit = _limit.get()
     if limit is None:
         with timing_span("media"):
-            return await _run_preparation(fn, *args, timeout=timeout, **kwargs)
+            return await pause_aware(_run_preparation(fn, *args, timeout=timeout, **kwargs))
     from .request_throttle import admission_wait
 
     with timing_span("media_queue"), admission_wait():
         if isinstance(limit, PreparationLimiter):
-            await limit.acquire(priority=_priority.get())
+            await pause_aware(limit.acquire(priority=_priority.get()), on_cancel=lambda _: limit.release())
         else:
-            await limit.acquire()
+            await pause_aware(limit.acquire(), on_cancel=lambda _: limit.release())
     try:
+        check_pause()
         with timing_span("media"):
-            return await _run_preparation(fn, *args, timeout=timeout, **kwargs)
+            return await pause_aware(_run_preparation(fn, *args, timeout=timeout, **kwargs))
     finally:
         limit.release()
 

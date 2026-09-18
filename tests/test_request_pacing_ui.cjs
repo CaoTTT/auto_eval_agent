@@ -15,7 +15,7 @@ async function main() {
     createApp(options) { app = options.setup(); return { mount() {} }; },
     async fetch(url) {
       if (url === '/api/queue') return { ok: true, json: async () => ({ running: queueRunning }) };
-      if (url === '/api/history?limit=50') return { ok: true, json: async () => ({ items: [] }) };
+      if (url.startsWith('/api/history?')) return { ok: true, json: async () => ({ items: [] }) };
       assert.equal(url, '/api/request-pacing');
       pacingCalls++;
       if (failPacing) return { ok: false };
@@ -46,7 +46,7 @@ async function main() {
   await first;
   assert.equal(app.pacingStatus.value.requests_last_second, 2);
   assert.equal(app.pacingStatus.value.inflight, 60);
-  assert.equal(app.concurrency.value, 128, 'monitoring must not change Case capacity');
+  assert.equal(app.concurrency.value, 128, 'monitoring must not change evaluation concurrency');
   assert.equal(app.pacingNumber(0), '0');
   assert.equal(app.pacingNumber(null), '—', 'unknown metrics cannot be shown as zero');
   assert.equal(app.pacingNumber(800000), '800,000');

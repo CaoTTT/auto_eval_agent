@@ -56,7 +56,7 @@ async def test_keeps_sending_before_previous_responses_return():
     records = [await throttle.acquire(100) for _ in range(16)]
     # No finish/release occurred: rate admission does not wait for a batch.
     gaps = [b.sent - a.sent for a, b in zip(records, records[1:])]
-    assert all(.125 <= gap < .13 for gap in gaps)
+    assert all(.1 <= gap < .105 for gap in gaps)
     assert records[-1].sent < 2  # All 16 start while earlier responses are pending.
     for record in records:
         throttle.finish(record)
@@ -94,12 +94,12 @@ async def test_warmup_restarts_after_idle():
     clock = Clock()
     throttle = RequestThrottle(clock=clock, sleep=clock.sleep)
     a, b = await throttle.acquire(1), await throttle.acquire(1)
-    assert .5 <= b.sent - a.sent < .51  # 2 RPS startup plus dispatch margin.
+    assert .4 <= b.sent - a.sent < .41  # 2.5 RPS startup plus dispatch margin.
     throttle.finish(a)
     throttle.finish(b)
     clock.now += 40
     c, d = await throttle.acquire(1), await throttle.acquire(1)
-    assert .5 <= d.sent - c.sent < .51
+    assert .4 <= d.sent - c.sent < .41
     throttle.finish(c)
     throttle.finish(d)
 
@@ -220,7 +220,7 @@ async def test_virtual_throughput_benchmark(capsys):
     assert clock.now < original / 3
     assert 10 < clock.peak <= 128
     for start in sent:
-        assert sum(start <= t < start + 60 for t in sent) <= 80
+        assert sum(start <= t < start + 60 for t in sent) <= 100
     # Kept as reproducible benchmark evidence for the design document.
     with capsys.disabled():
         print(f"\nVirtual benchmark: old={original:.2f}s new={clock.now:.2f}s "

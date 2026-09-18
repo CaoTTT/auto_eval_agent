@@ -16,6 +16,7 @@ from pathlib import Path
 from ..paths import RUNS_DIR
 from ..preparation import PreparationLimiter, run_preparation, preparation_limit, preparation_concurrency
 from ..timing import StageTimings, collect_timings, timing_span
+from ..task_control import PauseRequested, bind_pause_check, check_pause, pause_aware
 from ..request_throttle import (
     recommended_concurrency, supports_bailian_pacing,
     wait_for_active, SECOND_REQUEST_LIMIT,
@@ -320,17 +321,21 @@ def _make_item_evaluator(
         if task.mode == "compare"
         else None
     )
+    from ..judge_profiles import restore_runtime
     selected = runtime_options.get("judges") or [cfg.judges[0].name]
     judges_cfg = [j for j in cfg.judges if j.name in selected] or cfg.judges[:1]
     frozen_judges = task.protocol_manifest.get("judges") or []
-    if task.protocol_manifest.get("input_schema_version") == "1.1" and frozen_judges:
+    if task.judge_runtime:
+        judges_cfg = restore_runtime(cfg, task.judge_runtime)
+    elif task.protocol_manifest.get("input_schema_version") == "1.1" and frozen_judges:
         configured = {j.name: j for j in cfg.judges}
         judges_cfg = []
         for frozen in frozen_judges:
             if frozen["name"] not in configured:
                 raise ValueError("冻结裁判配置不可用，请恢复配置或新建任务")
             judges_cfg.append(configured[frozen["name"]].model_copy(update={
-                key: value for key, value in frozen.items() if key != "name"
+                "enable_thinking": None,
+                **{key: value for key, value in frozen.items() if key != "name"}
             }))
     # R3：构造中途失败（如某个 judge 缺 base_url）时，已建客户端的连接池会
     # 无人关闭而泄漏——先登记再逐个构造，失败时交后台任务关闭后重抛。
@@ -361,12 +366,12 @@ def _make_item_evaluator(
     capacity = max(1, min(128, int(runtime_options.get("concurrency", recommended_concurrency(judges_cfg)))))
     sem = asyncio.Semaphore(capacity)
     media_capacity = preparation_concurrency()
-    media_sem = PreparationLimiter(media_capacity) if any(supports_bailian_pacing(j) for j in judges_cfg) else None
+    media_sem = PreparationLimiter(media_capacity)
     if media_sem is not None:
-        log_event("请求调度", "启用百炼平滑调度", details={
+        from ..request_throttle import pacing_config
+        log_event("请求调度", "配置请求与媒体调度", details={
             "Case容量": capacity, "媒体并发": media_capacity,
-            "连续1秒请求上限": SECOND_REQUEST_LIMIT,
-            "RPM目标": 480, "TPM目标": 800_000,
+            "模型调度": [pacing_config(j) for j in judges_cfg if supports_bailian_pacing(j)],
         })
     eval_timeout = float(runtime_options.get("eval_timeout_s") or runtime_options.get("eval_timeout") or 900.0)
     loop = asyncio.get_running_loop()
@@ -394,14 +399,18 @@ def _make_item_evaluator(
         )
         _persist_task(task)
 
-    finish = on_result or _default_on_result
+    result_callback = on_result or _default_on_result
 
-    async def one(idx: int, item_dict: dict) -> dict:
+    async def finish(idx, res, started):
+        if task.judge_runtime:
+            res["judge_runtime"] = task.judge_runtime
+        await result_callback(idx, res, started)
+
+    async def one(idx: int, item_dict: dict, pending_judge_traces: list) -> dict:
         request_id = make_request_id(task.created_at, task.id, idx)
         retry_id = str(runtime_options.get("_retry_id") or "")
         if retry_id:
             request_id = f"{request_id}_r{retry_id[-6:]}"
-        pending_judge_traces: list[tuple[str, dict]] = []
 
         def publish_progress(payload: dict) -> None:
             payload = {**payload, "timings": timings.snapshot()}
@@ -458,8 +467,7 @@ def _make_item_evaluator(
                 progress_message="排队等待评测",
             )
             async with sem:
-                if task.pause_requested:
-                    return {"_paused": True}
+                check_pause()
                 # 排队时间不计入单题耗时；取得并发槽后才启动计时。
                 started = time.perf_counter()
                 timings.start()
@@ -553,6 +561,7 @@ def _make_item_evaluator(
                             progress_message="长截图准备失败" if is_screenshot else "视频校验或抽帧失败",
                             progress_status="error",
                         )
+                check_pause()
                 if last_error is None and task.mode == "compare":
                     try:
                         if item_dict.get("query_images"):
@@ -573,6 +582,7 @@ def _make_item_evaluator(
                         last_error = exc
                 if last_error is None:
                     for attempt in range(2):
+                        check_pause()
                         try:
                             if attempt:
                                 log_event(
@@ -618,7 +628,7 @@ def _make_item_evaluator(
                             )
                             if will_retry:
                                 with timing_span("retry_wait"):
-                                    await asyncio.sleep(1.0)
+                                    await pause_aware(asyncio.sleep(1.0))
                                 continue
                             break
                 if res is None:
@@ -672,8 +682,26 @@ def _make_item_evaluator(
             return res
 
     async def limited_one(idx: int, item_dict: dict) -> dict:
-        with preparation_limit(media_sem, priority=idx):
-            return await one(idx, item_dict)
+        pending_judge_traces: list[tuple[str, dict]] = []
+        with preparation_limit(media_sem, priority=idx), bind_pause_check(lambda: task.pause_requested):
+            try:
+                return await one(idx, item_dict, pending_judge_traces)
+            except PauseRequested:
+                # Pause is an unfinished item, not an evaluation failure. Keep
+                # any completed/billable call traces without publishing a score
+                # or consuming its pending index; resume will evaluate it again.
+                if pending_judge_traces:
+                    await asyncio.to_thread(flush_web_trace_records, pending_judge_traces, {
+                        "index": idx, "item_id": item_dict.get("id", f"q{idx}"),
+                        "evaluation_status": "paused", "evaluation_pending": True,
+                    })
+                previous = task.item_progress.get(str(idx)) or {}
+                _record_progress(task, idx, {
+                    **previous, "item_index": idx, "status": "paused",
+                    "message": "已暂停，尚未完成的评测将在恢复后继续",
+                    "finished_at": int(time.time() * 1000),
+                })
+                return {"_paused": True}
 
     return limited_one, clients
 
