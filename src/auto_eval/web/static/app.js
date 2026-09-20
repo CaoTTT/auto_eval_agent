@@ -1,4 +1,4 @@
-import { createApp, ref, computed, onMounted, onUnmounted, nextTick, selectEvidenceMode } from "./compare-data.js?v=20260920_legacy_single";
+import { createApp, ref, computed, onMounted, onUnmounted, nextTick, selectEvidenceMode } from "./compare-data.js?v=20260920_audit";
 
 createApp({
   setup() {
@@ -2008,6 +2008,7 @@ createApp({
       activeSkill, resultQuery, resultPage, resultPageSize,
       modalityFilter, modalityCounts, queryImageMetas, onQueryImage, setQueryImagePath,
       failedOnly, failedCaseCount, selectFailureFilter,
+      evidenceRevisions,
       evidenceImages, evidenceImageErrors, evidenceExpanded, setEvidenceExpanded, setPageEvidenceExpanded,
       skillTabs, filteredResults, pagedResults, pageCount, resultTableWidth,
       formatHint, resultCols, opItems, pagedOpItems, opPreparing, canSubmit,

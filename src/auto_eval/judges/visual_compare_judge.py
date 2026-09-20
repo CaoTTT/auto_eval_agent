@@ -272,6 +272,7 @@ class VisualCompareJudge:
         screenshot_metas: list[dict] | None = None,
         query_image_meta: list[dict] | None = None,
         conversation_input: dict | None = None,
+        evidence_callback=None,
         evaluation_time: datetime | None = None,
         stream_callback=None,
     ) -> dict[str, Any]:
@@ -361,6 +362,7 @@ class VisualCompareJudge:
                             {"type": "text", "text": f"产品{product_no} 第{part_no}/{count}块结束"},
                         ])
                         image_metadata.append({
+                            **meta["slices"][part_no - 1], "image_role": "product_answer",
                             "product_no": product_no, "part_no": part_no, "part_count": count,
                             "position": position, "split_status": meta["split_status"], "ref_path": path,
                             **({"preprocessing": meta} if part_no == 1 else {}),
@@ -404,6 +406,19 @@ class VisualCompareJudge:
             )
 
         started = time.perf_counter()
+        audit = None
+        if is_screenshot:
+            from ..evidence_audit import capture_request
+            preprocessing = ([{"product_no": n, "source_turn": turn["turn_index"],
+                               "metadata": turn[f"screenshot_meta{n}"]}
+                              for turn in conversation_input["turns"]
+                              for n in range(1, actual_product_count + 1)] if conversation_input else
+                             [{"product_no": n, "metadata": meta} for n, meta in enumerate(metas, 1)])
+            audit = await run_preparation(capture_request, system, content_parts, image_metadata,
+                                          preprocessing, self.protocol.public_metadata(), timeout=60)
+            audit["judge_model"] = getattr(self.client, "model", None)
+            if evidence_callback:
+                evidence_callback(audit)
         request_views = []
         if query_metas and conversation_input is None:
             request_views = await run_preparation(check_request_budget, system, content_parts, self.profile.query_images, timeout=60)
@@ -413,6 +428,10 @@ class VisualCompareJudge:
         if is_screenshot or query_metas:
             if is_screenshot and conversation_input is None:
                 check_context_budget(system, [p["text"] for p in content_parts if p["type"] == "text"], metas, self.profile.long_screenshot)
+            if audit is not None:
+                audit["record_status"] = "model_call_started"
+                if evidence_callback:
+                    evidence_callback(audit)
             raw_output = await self.client.complete(
                 system, user, stream_callback=stream_callback,
                 content_parts=content_parts, image_metadata=image_metadata,
@@ -424,6 +443,10 @@ class VisualCompareJudge:
                 user_images=user_images or None, user_image_refs=user_image_refs or None,
             )
 
+        if audit is not None:
+            audit["record_status"] = "model_response_received"
+            if evidence_callback:
+                evidence_callback(audit)
         data = parse_json_loose(raw_output)
         repaired = ""
         if data is None:

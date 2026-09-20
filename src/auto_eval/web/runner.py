@@ -492,6 +492,12 @@ def _make_item_evaluator(
                 last_error = None
                 res = None
                 conversation_input = None
+                item_dict.pop("screenshot_evidence", None)
+                task.items[idx].pop("screenshot_evidence", None)
+                def save_evidence(record):
+                    item_dict["screenshot_evidence"] = copy.deepcopy(record)
+                    task.items[idx]["screenshot_evidence"] = item_dict["screenshot_evidence"]
+                    _persist_task(task)
                 if conversation_preparer is not None and item_dict.get("session_id"):
                     try:
                         conversation_input = await run_preparation(conversation_preparer.prepare, item_dict,
@@ -620,6 +626,7 @@ def _make_item_evaluator(
                                     task.mode, idx, item_dict,
                                     rich_judges=rich_judges,
                                     compare_judges=compare_judges,
+                                    evidence_callback=save_evidence,
                                     category_display=category_display,
                                     **({"conversation_input": conversation_input} if conversation_input else {}),
                                 ),
@@ -797,6 +804,7 @@ async def _run(task: Task, cfg: AppConfig) -> None:
 _PREPARED_ITEM_FIELDS = {
     "query_images", "input_modality", *PREPARED_FIELDS,
     "evidence_mode", "screenshot_meta1", "screenshot_meta2", "screenshot_meta3",
+    "screenshot_evidence",
     "frames", "frames1", "frames2", "frames3", "frame_count", "media",
     "video_name", "video1_path", "video2_path", "video3_path",
     "video_source", "video_source1", "video_source2", "video_source3",
@@ -1320,6 +1328,7 @@ async def _eval_one(
     compare_judges=None,
     category_display=None,
     conversation_input=None,
+    evidence_callback=None,
 ) -> dict:
     t0 = time.perf_counter()
     item = _to_evalitem(item_dict, idx)
@@ -1410,6 +1419,7 @@ async def _eval_one(
             product_count=product_count,
             **({
                 "evidence_mode": "long_screenshot",
+                "evidence_callback": evidence_callback,
                 "screenshot_metas": [item_dict[f"screenshot_meta{n}"] for n in range(1, product_count + 1)],
             } if item_dict.get("evidence_mode") == "long_screenshot" else {}),
         )

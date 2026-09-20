@@ -508,6 +508,8 @@ def export_rows(snapshot: dict) -> dict[str, list[dict]]:
         "逐题结果": result_rows,
     }
     frame_rows = _frame_manifest_rows(snapshot)
+    from .screenshot_evidence import evidence_sheets
+    rows.update(evidence_sheets(snapshot))
     query_rows = _query_image_rows(snapshot)
     if query_rows:
         rows["提问图片清单"] = query_rows
@@ -626,6 +628,7 @@ def _aligned_results(snapshot: dict, results: list[dict]) -> list[dict]:
 
 
 _RUNTIME_ITEM_FIELDS = {
+    "screenshot_evidence",
     "evidence_mode", "screenshot_meta1", "screenshot_meta2", "screenshot_meta3",
     "frames",
     "frames1",

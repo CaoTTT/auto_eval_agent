@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <title>auto_eval 评估台</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260917_pause_dispatch">
+  <link rel="stylesheet" href="/static/style.css?v=20260920_audit">
   <style>
     .op-cards { display:flex; flex-direction:column; gap:12px; }
     .op-card { border:1px solid #e2e8f0; border-radius:8px; padding:12px; background:#fafbfc; }
@@ -395,6 +395,7 @@
       <button @click="exportJson" :disabled="!taskId || !!loadingTaskId">导出 JSON</button>
       <button @click="exportXlsx()" :disabled="!taskId || !!loadingTaskId || !!exportingTaskId">{{ exportingTaskId === taskId ? '正在生成 Excel…' : '导出 XLSX（完整）' }}</button>
       <button v-if="isVideoMode" @click="exportFrames" :disabled="!taskId || !!loadingTaskId">导出视觉证据 ZIP</button>
+      <a v-if="taskId && items.some(it=>it.evidence_mode==='long_screenshot' || it.screenshot_meta1)" :href="'/api/eval/'+encodeURIComponent(taskId)+'/export?format=screenshot_evidence'">下载长截图输入证据 ZIP</a>
       <span v-if="loadingTaskId">正在加载任务，请稍候…</span>
       <button v-if="summary && summary.failed && selectedTaskStatus === 'done'" @click="retryFailedCases(null)" :disabled="retrySubmitting || ['queued','running'].includes(repairStatus)">
         {{ retrySubmitting ? '提交中…' : '重跑全部失败项' }}
@@ -526,6 +527,9 @@
                   </div>
                 </div>
               </td></tr>
+              <tr v-if="taskId && (r.evidence_mode==='long_screenshot' || items[r.index]?.screenshot1 || items[r.index]?.screenshot_meta1)"><td colspan="99" class="query-image-panel">
+                <screenshot-evidence :key="taskId+':'+r.index+':'+(evidenceRevisions[r.index] || 0)" :task-id="taskId" :item-index="Number(r.index)"></screenshot-evidence>
+              </td></tr>
               <tr v-if="r.session_id"><td colspan="99" class="query-image-panel">
                 <strong>会话 {{r.session_id}} · 第 {{r.turn_index}} 轮</strong> · 使用前 {{r.history_turn_count}} 轮原始历史 · {{r.effective_input_modality==='text_image'?'含历史/当前题图':'文字输入'}}
                 <details><summary>历史证据与图片诊断 · {{r.image_warning_count || 0}} 项警示 · {{r.input_diagnostic_status}}</summary>
@@ -574,6 +578,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20260920_legacy_single"></script>
+  <script type="module" src="/static/app.js?v=20260920_audit"></script>
 </body>
 </html>

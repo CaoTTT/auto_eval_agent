@@ -200,6 +200,13 @@ async def test_runner_failure_does_not_block_later_turn_and_restore_third_only(d
     assert not task.results[1].get("error"), task.results[1]
     assert not task.results[2].get("error"), task.results[2]
     snapshot = history.task_to_snapshot(task)
+    from auto_eval.web.screenshot_evidence import evidence_records
+    records = evidence_records(snapshot)
+    assert len(records) == 3
+    assert len(records[2]["images"]) == 9
+    assert {im["source_turn"] for im in records[2]["images"]} == {1, 2, 3}
+    assert records[2]["images"][0]["request_role"] == "history"
+    assert records[2]["record_status"] == "model_response_received"
     restored = _task_from_snapshot(snapshot, task.id)
     one, _ = runner._make_item_evaluator(restored, cfg)
     result = await one(2, deepcopy(restored.items[2]))

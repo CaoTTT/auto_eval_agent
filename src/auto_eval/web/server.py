@@ -260,6 +260,7 @@ def _validate_eval_request(req: EvalReq, app_cfg, *, previous_items=None) -> Non
             for field in DIAGNOSTIC_FIELDS - {"session_id", "session_group", "turn_index", "input_schema_version"}:
                 item.pop(field, None)
             item.pop("conversation_assets", None)
+            item.pop("screenshot_evidence", None)
             item.update(normalize_query_input(item))
             for field in PREPARED_FIELDS:
                 item.pop(field, None)
@@ -1229,6 +1230,9 @@ def _export_snapshot(task_id: str, format: str, data: dict):
     if format == "json":
         return JSONResponse(snapshot_payload(data))
 
+    if format == "screenshot_evidence":
+        return _screenshot_evidence_zip(task_id, data)
+
     if format == "xlsx":
         # 保留原 GET 下载入口，改为文件响应；新页面使用有状态的后台导出。
         export_dir = RUNS_DIR / "exports"
@@ -1291,6 +1295,8 @@ def api_export_item(task_id: str, item_index: int, format: str):
     if item_index < 0 or item_index >= len(items):
         raise HTTPException(404, "item not found")
     item = items[item_index]
+    if format == "screenshot_evidence":
+        return _screenshot_evidence_zip(task_id, data, {item_index})
     raw_id = str(item.get("id") or f"q{item_index + 1}")
     stem = _download_stem(
         f"{item_index + 1:03d}_{raw_id}",
@@ -1390,6 +1396,52 @@ def api_item_screenshot(task_id: str, item_index: int, product_no: int, download
     return FileResponse(path, media_type=mime,
                         filename=f"{stem}_product{product_no}_original{path.suffix.lower()}" if download else None,
                         headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+
+
+def _screenshot_evidence_zip(task_id: str, data: dict, indexes: set[int] | None = None):
+    from .screenshot_evidence import write_evidence_zip
+    directory = RUNS_DIR / "exports"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"evidence-{uuid.uuid4().hex}.zip"
+    try:
+        write_evidence_zip(data, path, indexes)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return FileResponse(path, media_type="application/zip",
+                        filename=f"{_download_stem(task_id, 'task')}_screenshot_evidence.zip",
+                        background=BackgroundTask(path.unlink, missing_ok=True))
+
+
+def _screenshot_record(task_id: str, item_index: int):
+    from .screenshot_evidence import evidence_records
+    task = peek_task(task_id, touch=False)
+    data = task_to_snapshot(task) if task else load_snapshot(task_id)
+    if not data:
+        raise HTTPException(404, "任务不存在")
+    records = evidence_records(data, {item_index})
+    if not records:
+        raise HTTPException(404, "该题没有长截图证据")
+    return records[0]
+
+
+@app.get("/api/eval/{task_id}/items/{item_index}/screenshot-evidence")
+def api_screenshot_evidence(task_id: str, item_index: int):
+    return _screenshot_record(task_id, item_index)
+
+
+@app.get("/api/eval/{task_id}/items/{item_index}/screenshot-evidence/{image_no}")
+def api_screenshot_evidence_image(task_id: str, item_index: int, image_no: int):
+    from .screenshot_evidence import evidence_bytes
+    from fastapi.responses import Response
+    record = _screenshot_record(task_id, item_index)
+    image = next((im for im in record["images"] if im["image_no"] == image_no), None)
+    if image is None:
+        raise HTTPException(404, "证据图片不存在")
+    try:
+        raw, mime = evidence_bytes(image)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return Response(raw, media_type=mime, headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
 
 
 @app.get("/")

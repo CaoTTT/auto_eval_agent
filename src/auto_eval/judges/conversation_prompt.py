@@ -60,6 +60,7 @@ def assemble_conversation(system: str, bundle: dict, protocol, evaluation_dateti
                      f"第{i}/{len(meta['slices'])}块；切分状态 {meta['split_status']}")
                 image(encode_original_image(resolve_project_path(part["path"]), profile.long_screenshot, part["sha256"]),
                       {**part, "asset_id": asset_id, "source_turn": t, "product_no": n,
+                       "part_no": i, "part_count": len(meta["slices"]), "split_status": meta["split_status"],
                        "image_role": "product_answer", "request_role": role, "ref_path": part["path"]})
                 text(f"{asset_id} 结束")
         text(f"产品{n}轨迹结束")

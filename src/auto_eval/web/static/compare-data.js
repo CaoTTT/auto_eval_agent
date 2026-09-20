@@ -1,6 +1,7 @@
 import {createApp as vueCreateApp, ref, computed, watch, onMounted, onUnmounted, nextTick} from "https://unpkg.com/vue@3/dist/vue.esm-browser.js";
-import {CompareCaseList, fromDatasetItem, caseMedia, caseEvidenceMode, selectEvidenceMode} from "./compare-cases.js?v=20260920_legacy_single";
+import {CompareCaseList, fromDatasetItem, caseMedia, caseEvidenceMode, selectEvidenceMode} from "./compare-cases.js?v=20260920_audit";
 import {HumanComparePanel} from "./human-compare.js?v=20260916_human_answers";
+import {ScreenshotEvidence} from "./screenshot-evidence.js?v=20260920_audit";
 export {ref, computed, onMounted, onUnmounted, nextTick};
 export {selectEvidenceMode};
 
@@ -107,5 +108,5 @@ export const CompareDatasetPanel = {
 };
 
 export function createApp(options) {
-  return vueCreateApp({...options, components:{...options.components,CompareDatasetPanel,HumanComparePanel}});
+  return vueCreateApp({...options, components:{...options.components,CompareDatasetPanel,HumanComparePanel,ScreenshotEvidence}});
 }
