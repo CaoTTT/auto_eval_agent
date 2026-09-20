@@ -432,6 +432,8 @@
         </button>
       </div>
       <div class="result-filters">
+        <button :class="{primary:!failedOnly}" :aria-pressed="!failedOnly" @click="selectFailureFilter(false)">全部 Case</button>
+        <button :class="{primary:failedOnly}" :aria-pressed="failedOnly" @click="selectFailureFilter(true)">仅看失败（{{ failedCaseCount }}）</button>
         <input v-model="resultQuery" @input="resetResultPage" placeholder="搜索题号、query、context、回答或理由">
         <select v-if="mode==='compare'" v-model="modalityFilter" @change="resetResultPage"><option value="">全部题型</option><option value="text">文字题</option><option value="text_image">图文题</option></select>
         <input v-if="conversationGroups.length" v-model="turnFilter" @input="resetResultPage" placeholder="筛选轮次，如 3" style="max-width:130px">
@@ -572,6 +574,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20260918_multi_turn"></script>
+  <script type="module" src="/static/app.js?v=20260920_failed_filter"></script>
 </body>
 </html>

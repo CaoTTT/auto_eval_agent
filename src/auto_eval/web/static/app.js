@@ -111,6 +111,13 @@ createApp({
     const activeSkill = ref("");
     const resultQuery = ref("");
     const modalityFilter = ref("");
+    const failedOnly = ref(false);
+    const failedCaseCount = computed(() => results.value.filter(r => r.error).length);
+    function selectFailureFilter(value) {
+      failedOnly.value = value;
+      activeSkill.value = "";
+      resetResultPage();
+    }
     const turnFilter = ref(''), diagnosticFilter = ref('');
     const liveInputDiagnostics = ref({});
     const conversationGroups = computed(() => {
@@ -654,6 +661,7 @@ createApp({
     const filteredResults = computed(() => {
       const q = resultQuery.value.trim().toLowerCase();
       return skillResults.value.filter((r) => {
+        if (failedOnly.value && !r.error) return false;
         if (turnFilter.value && String(r.turn_index) !== turnFilter.value) return false;
         if (diagnosticFilter.value==='warning' && !r.image_warning_count) return false;
         if (diagnosticFilter.value==='blocked' && r.input_diagnostic_status!=='blocked') return false;
@@ -1109,6 +1117,7 @@ createApp({
       expandedProgressLogs.value = {};
       activeSkill.value = "";
       resultQuery.value = "";
+      failedOnly.value = false;
       resultPage.value = 1;
       progress.value = 0;
       total.value = submittedItems.length;
@@ -1857,6 +1866,7 @@ createApp({
         queueNotice.value = selectedTaskStatus.value === "queued" ? "该任务正在等待前序任务完成。" : "";
         activeSkill.value = "";
         resultQuery.value = "";
+        failedOnly.value = false;
         resultPage.value = 1;
         progressPage.value = 1;
         if (mode.value !== "compare" && skillTabs.value.length) activeSkill.value = skillTabs.value[0].key;
@@ -1996,6 +2006,7 @@ createApp({
       resultBrowser,
       activeSkill, resultQuery, resultPage, resultPageSize,
       modalityFilter, modalityCounts, queryImageMetas, onQueryImage, setQueryImagePath,
+      failedOnly, failedCaseCount, selectFailureFilter,
       evidenceImages, evidenceImageErrors, evidenceExpanded, setEvidenceExpanded, setPageEvidenceExpanded,
       skillTabs, filteredResults, pagedResults, pageCount, resultTableWidth,
       formatHint, resultCols, opItems, pagedOpItems, opPreparing, canSubmit,

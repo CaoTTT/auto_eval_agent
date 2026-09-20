@@ -38,7 +38,26 @@ async function main() {
   assert.equal(submitted,null,'blocked preflight cannot create a paid evaluation');
   assert.match(app.runError.value,/阻断/);
   blocked=false;
+  app.results.value=[
+    {index:0,item_id:'ok',query:'alpha',answer1_response_gate:'fail'},
+    {index:1,item_id:'failed-1',query:'alpha',error:'timeout'},
+    {index:2,item_id:'failed-2',query:'beta',error:'missing image'}
+  ];
+  app.resultPage.value=4;
+  app.selectFailureFilter(true);
+  assert.equal(app.resultPage.value,1);
+  assert.equal(app.failedCaseCount.value,2);
+  assert.equal(app.filteredResults.value.length,2,'score gates are not execution failures');
+  app.resultQuery.value='alpha';
+  assert.equal(app.filteredResults.value.length,1,'failure filter combines with search');
+  app.results.value[1]={index:1,item_id:'failed-1',query:'alpha'};
+  assert.equal(app.failedCaseCount.value,1);
+  assert.equal(app.filteredResults.value.length,0,'successful retry leaves the failure view');
+  app.selectFailureFilter(false);
+  assert.equal(app.filteredResults.value.length,2);
+  app.selectFailureFilter(true);
   await app.loadHistoryTask('history');
+  assert.equal(app.failedOnly.value,false,'loading a different task resets failure filtering');
   assert.equal(app.opItems.value[2].sessionId,'S');
   assert.equal(app.opItems.value[2].turnIndex,3);
   await app.submit();
