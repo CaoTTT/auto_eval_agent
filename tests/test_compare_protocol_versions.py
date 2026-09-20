@@ -149,7 +149,7 @@ async def test_eval_api_freezes_selected_protocol_on_new_task(monkeypatch):
     assert calibrated_response["evaluation_profile"] == V02_CALIBRATED_COMPARE_PROTOCOL_ID
     manifest = created[-1].protocol_manifest
     assert manifest["standard_version"] == "0.2-simplified-calibrated"
-    assert manifest["bundle_revision"] == "0.2.2"
+    assert manifest["bundle_revision"] == "0.2.3"
     assert manifest["score_range"] == [1, 5]
     thinking_exposure_response = await server_module.api_eval(
         server_module.EvalReq(
@@ -185,6 +185,7 @@ async def test_eval_api_freezes_selected_protocol_on_new_task(monkeypatch):
 
 @pytest.mark.parametrize("protocol_id,standard_version,revision", [
     (V02_CALIBRATED_COMPARE_PROTOCOL_ID, "0.2-simplified-calibrated", "0.2.2"),
+    (V02_CALIBRATED_COMPARE_PROTOCOL_ID, "0.2-simplified-calibrated", "0.2.3"),
     (V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID, "0.2-simplified-thinking-exposure", "0.2.3"),
     (V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID, "0.2-simplified-thinking-exposure", "0.2.4"),
 ])
@@ -206,7 +207,7 @@ def test_experimental_v02_preserves_gates_and_separate_version(
             protocol.observation_model.model_validate(_observation_data(score))
 
 
-@pytest.mark.parametrize("revision", ["0.2.0", "0.2.1", "0.2.3", "0.2.4", "0.3.0", "0.3.1", "unknown"])
+@pytest.mark.parametrize("revision", ["0.2.0", "0.2.1", "0.2.4", "0.3.0", "0.3.1", "unknown"])
 def test_calibrated_cannot_restore_another_protocols_revision(revision):
     with pytest.raises(ValueError, match="无法恢复任务冻结的实现版本"):
         resolve_compare_protocol(V02_CALIBRATED_COMPARE_PROTOCOL_ID, revision)
@@ -231,6 +232,7 @@ def test_existing_protocols_cannot_restore_thinking_exposure_revision(protocol_i
     (V03_COMPARE_PROTOCOL_ID, "0.3.0"),
     (V03_COMPARE_PROTOCOL_ID, "0.3.1"),
     (V02_CALIBRATED_COMPARE_PROTOCOL_ID, "0.2.2"),
+    (V02_CALIBRATED_COMPARE_PROTOCOL_ID, "0.2.3"),
     (V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID, "0.2.3"),
     (V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID, "0.2.4"),
 ])
