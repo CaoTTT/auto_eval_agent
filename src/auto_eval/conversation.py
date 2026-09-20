@@ -23,7 +23,15 @@ def digest(value) -> str:
 
 
 def is_conversation(item: dict) -> bool:
-    return "session_id" in item or "turn_index" in item
+    # Legacy datasets may carry business session IDs and empty CSV columns.
+    # Only an actual turn or an explicit conversation declaration opts in.
+    def present(value):
+        return value is not None and (not isinstance(value, str) or bool(value.strip()))
+    return (present(item.get("turn_index"))
+            or present(item.get("conversation_mode"))
+            or item.get("input_schema_version") == INPUT_VERSION
+            or (present(item.get("session_id")) and any(
+                present(item.get(key)) for key in ("screenshot_scope", "screenshot_scope1", "screenshot_scope2", "screenshot_scope3"))))
 
 
 def normalize_turn(item: dict, *, external: bool = False) -> dict:

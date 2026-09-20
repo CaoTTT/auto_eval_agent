@@ -166,7 +166,7 @@ async def test_calibrated_judge_completes_through_real_paced_sdk_and_local_http(
         result = task.results[0]
         assert not result.get("error"), result
         assert result["evaluation_profile"] == V02_CALIBRATED_COMPARE_PROTOCOL_ID
-        assert result["bundle_revision"] == "0.2.2"
+        assert result["bundle_revision"] == "0.2.3"
         assert result["understanding_rank_groups"] == [["product1"], ["product2"]]
         request = provider.requests[0]
         assert "qa_competitor_compare/0.2-simplified-calibrated" in request.body["messages"][0]["content"]

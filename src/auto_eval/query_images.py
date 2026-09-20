@@ -12,6 +12,7 @@ from pathlib import Path
 from PIL import Image, ImageOps
 
 from .config import QueryImageConfig
+from .conversation import is_conversation
 from .paths import PROJECT_ROOT, RUNS_DIR, resolve_project_path
 from .preparation import check_preparation
 
@@ -35,7 +36,7 @@ def normalize_query_input(item: dict) -> dict:
     if any(key in item for key in ("evaluation_profile", "standard_id", "standard_version", "bundle_revision")):
         raise ValueError("请在任务级选择标准，不能逐题覆盖评测标准")
     images = item.get("query_images", [])
-    if not isinstance(images, list) or (len(images) > 1 and not item.get("session_id")):
+    if not isinstance(images, list) or (len(images) > 1 and not is_conversation(item)):
         raise ValueError("query_images 必须是数组，首版允许 0 或 1 张静态图片")
     if any(not isinstance(path, str) or not path.strip() for path in images):
         raise ValueError("query_images 中的路径必须是非空字符串")

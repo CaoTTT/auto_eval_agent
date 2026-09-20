@@ -1,4 +1,4 @@
-import { createApp, ref, computed, onMounted, onUnmounted, nextTick, selectEvidenceMode } from "./compare-data.js?v=20260918_multi_turn";
+import { createApp, ref, computed, onMounted, onUnmounted, nextTick, selectEvidenceMode } from "./compare-data.js?v=20260920_legacy_single";
 
 createApp({
   setup() {
@@ -797,6 +797,7 @@ createApp({
     function comparisonDraftRows(rows) {
       return rows.map(raw => {
         const item = {...(raw.source_data || {}), ...raw};
+        const conversation = raw.session_id && Number.isInteger(raw.turn_index) && raw.turn_index >= 1;
         return {...newOpItem(), id:item.id || '', query:item.query || item.question || '',
           context:item.context || '', category:item.category || '',
           queryImages:[...(item.query_images || [])], queryImageMeta:item.query_image_meta || [],
@@ -809,8 +810,8 @@ createApp({
             [`videoSource${n}`,item[`video_source${n}`] || {}],
           ])), taskStartTime:item.task_start_time ?? null, taskEndTime:item.task_end_time ?? null,
           sourceLine:item.source_line ?? null, sourceData:raw.source_data || null,
-          sessionId:item.session_id || '', screenshotScope:item.screenshot_scope || '',
-          sessionGroup:item.session_group ?? null, turnIndex:item.turn_index ?? null};
+          sessionId:conversation ? raw.session_id : '', screenshotScope:conversation ? raw.screenshot_scope || '' : '',
+          sessionGroup:conversation ? raw.session_group ?? null : null, turnIndex:conversation ? raw.turn_index : null};
       });
     }
     function detachResultView() {

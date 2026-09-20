@@ -249,6 +249,13 @@ def _validate_eval_request(req: EvalReq, app_cfg, *, previous_items=None) -> Non
     invalid: list[str] = []
     for index, item in enumerate(req.items, 1):
         try:
+            if not is_conversation(item):
+                # Preserve legacy metadata, but don't let it activate the runner's
+                # conversation path after request validation.
+                if "session_id" in item or "turn_index" in item:
+                    item.setdefault("source_data", {key: value for key, value in item.items() if key != "source_data"})
+                for field in ("session_id", "turn_index", "session_group"):
+                    item.pop(field, None)
             item.update(normalize_turn(item, external=True))
             for field in DIAGNOSTIC_FIELDS - {"session_id", "session_group", "turn_index", "input_schema_version"}:
                 item.pop(field, None)

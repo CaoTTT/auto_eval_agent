@@ -20,10 +20,12 @@ export function caseEvidenceMode(item) {
 export function fromDatasetItem(item, index) {
   const source = item.source_data || {};
   const value = key => item[key] ?? source[key];
+  const conversation = item.session_id && Number.isInteger(item.turn_index) && item.turn_index >= 1;
   return {
     _uiKey: `preview-${index}`, id: value('id') || '', query: value('query') || value('question') || '',
     context: value('context') || '', queryImages: [...(item.query_images || [])],
-    sessionId:value('session_id') || '', turnIndex:value('turn_index'), screenshotScope:value('screenshot_scope') || '',
+    sessionId:conversation ? item.session_id : '', turnIndex:conversation ? item.turn_index : null,
+    screenshotScope:conversation ? item.screenshot_scope || '' : '',
     queryImageMeta: item.query_image_meta || [], productCount: value('product_count') || (value('video3') || value('screenshot3') ? 3 : 2),
     evidenceMode: item.evidence_mode || (value('screenshot1') ? 'long_screenshot' : 'video_frames'),
     _savedEvidenceMode: item.evidence_mode || (value('screenshot1') ? 'long_screenshot' : 'video_frames'),

@@ -207,7 +207,7 @@ def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
                 rejected_sessions.update(it["session_id"].strip() for it in matches if it.get("session_id"))
                 errors.append(f"conversation_structure_invalid: id 重复 {item_id}，关联会话已拒绝")
     for ln, location, obj, error in records:
-        if multi and isinstance(obj, dict) and str(obj.get("session_id", "")).strip() in rejected_sessions:
+        if multi and isinstance(obj, dict) and is_conversation(obj) and str(obj.get("session_id", "")).strip() in rejected_sessions:
             continue
         if error:
             errors.append(error)
@@ -336,7 +336,7 @@ def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
     if multi:
         accepted_lines = {it["source_line"] for it in items}
         failed_sessions = {obj["session_id"].strip() for ln, _, obj, _ in records
-                           if obj.get("session_id") and ln not in accepted_lines}
+                           if is_conversation(obj) and obj.get("session_id") and ln not in accepted_lines}
         items = [it for it in items if it.get("session_id") not in failed_sessions]
         errors.extend(f"会话 {sid} 存在无效记录，整组未导入" for sid in sorted(failed_sessions - rejected_sessions))
     return items, errors

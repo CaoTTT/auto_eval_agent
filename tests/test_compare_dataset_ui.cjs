@@ -99,6 +99,16 @@ async function main(){
     fetch(url,options){return new Promise(resolve=>requests.push({url,options,resolve}));}};
   vm.runInNewContext(strip(read('compare-cases.js'))+'\nthis.CaseList=CompareCaseList;this.mapper=fromDatasetItem;',caseContext);
   const props={items:raw.map(caseContext.mapper)},cases=caseContext.CaseList.setup(props);
+  const legacy={id:'legacy',query:'old question',product_count:2,video1:'a.mp4',video2:'b.mp4',
+    source_data:{session_id:'business-session',turn_index:3}};
+  assert.equal(caseContext.mapper(legacy,0).sessionId,'','source metadata must not activate conversations');
+  assert.equal(caseContext.mapper(legacy,0).turnIndex,null);
+  app.useComparisonDataset({task_id:'legacy',items:[legacy]});
+  assert.equal(app.opItems.value[0].sessionId,'');
+  assert.equal(app.opItems.value[0].turnIndex,null);
+  await app.submit();
+  assert.equal(submitted.items[0].session_id,undefined);
+  assert.equal(submitted.items[0].turn_index,undefined);
   assert.equal(cases.rows.value.length,10);assert.equal(requests.length,0);
   const item=props.items[0],file=cases.caseMedia(item)[0];
   cases.toggleCase(item);assert.equal(requests.length,0,'expanding case text must not fetch images');

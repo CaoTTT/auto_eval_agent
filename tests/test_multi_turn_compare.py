@@ -10,7 +10,7 @@ from PIL import Image
 
 from auto_eval import query_images
 from auto_eval.config import AppConfig, JudgeConfig, VisualExtractionConfig, VisualModeProfile
-from auto_eval.conversation import ConversationIndex, validate_conversations
+from auto_eval.conversation import ConversationIndex, is_conversation, validate_conversations
 from auto_eval.image_limits import resolve_image_limits, inspect_asset
 from auto_eval.judges.conversation_prompt import assemble_conversation
 from auto_eval.judges.compare_protocols import resolve_compare_protocol
@@ -226,6 +226,46 @@ def test_direct_api_rejects_video_before_field_cleanup(data):
     items[1]["media"] = [{"type": "video", "path": "a"}]
     with pytest.raises(HTTPException, match="multiturn_video_unsupported"):
         server._validate_eval_request(server.EvalReq(mode="compare", items=items), AppConfig(judges=[judge]))
+
+
+@pytest.mark.parametrize("metadata", [
+    {}, {"session_id": "legacy-business-id"}, {"session_id": None},
+    {"session_id": "", "turn_index": ""},
+    {"session_id": "legacy-business-id", "turn_index": None},
+    {"session_id": "legacy-business-id", "turn_index": "  "},
+    {"turn_index": None},
+])
+@pytest.mark.parametrize("evidence", ["video", "screenshot"])
+def test_legacy_metadata_import_and_direct_api_remain_single_turn(metadata, evidence):
+    original = {"id": "old", "query": "旧评测问题", "product_count": 2,
+                f"{evidence}1": "a.mp4" if evidence == "video" else "a.png",
+                f"{evidence}2": "b.mp4" if evidence == "video" else "b.png", **metadata}
+    parsed, errors = parse_jsonl(json.dumps([original]), "compare")
+    assert not errors and len(parsed) == 1
+    assert not is_conversation(parsed[0])
+    assert "session_id" not in parsed[0] and "turn_index" not in parsed[0]
+    assert parsed[0]["source_data"] == original
+    for inputs in ([deepcopy(original)], parsed):
+        req = server.EvalReq(mode="compare", items=inputs)
+        server._validate_eval_request(req, AppConfig(judges=[JudgeConfig(name="test", model="test")]))
+        assert not is_conversation(req.items[0])
+        assert "session_id" not in req.items[0] and "turn_index" not in req.items[0]
+        assert all(req.items[0]["source_data"][key] == value for key, value in original.items())
+
+
+def test_legacy_session_metadata_cannot_bypass_single_turn_image_limit():
+    item = {"query": "q", "session_id": "business", "query_images": ["a.png", "b.png"]}
+    with pytest.raises(ValueError, match="0 或 1"):
+        query_images.normalize_query_input(item)
+
+
+def test_legacy_row_with_same_business_id_survives_invalid_multiturn_group(data):
+    items, _, _ = data
+    items[1]["turn_index"] = 0
+    legacy = {"id": "legacy", "query": "single", "session_id": "s", "video1": "a.mp4", "video2": "b.mp4"}
+    parsed, errors = parse_jsonl(json.dumps([*items, legacy]), "compare")
+    assert errors and len(parsed) == 1
+    assert parsed[0]["id"] == "legacy" and not is_conversation(parsed[0])
 
 
 def test_invalid_session_does_not_erase_other_complete_sessions(data):

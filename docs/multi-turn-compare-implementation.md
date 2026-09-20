@@ -43,7 +43,7 @@
 ## 限制与迁移
 
 - 本次明确支持 `current_turn`。累计长截图、产品间不同追问、多轮视频不支持；不会猜测本轮区域或降级为单轮。
-- 无 `session_id`、无 `turn_index` 的旧单轮输入保持原路径。两字段现已是正式协议字段；原先仅作业务附加字段时应改名，例如 `upstream_session_id`、`upstream_turn_index`。已有只存于 `source_data` 的历史字段不会被裁判当作会话解析。
+- 未提供轮次（`turn_index` 缺失、null、空字符串或空白），且未明确声明多轮模式的旧输入默认按单轮处理。单独的业务 `session_id` 不会触发多轮，原始字段保留在 `source_data` 中，历史数据复用也不会将它重新变成多轮。非空轮次、`conversation_mode`、输入版本 2.0，或会话 ID 配合截图范围声明，会触发严格多轮校验；错误轮次和缺轮不会静默降级。旧业务字段若同时使用非空 `turn_index`，仍需改名为 `upstream_turn_index`。只存于 `source_data` 的历史字段不会作为正式多轮输入。
 - 官方限制当前内置核验对象是百炼 OpenAI 兼容 Base64 接口的 Qwen3.5/3.6/3.7/3.8、Qwen3-VL 系列。依据：[阿里云视觉理解文档](https://help.aliyun.com/zh/model-studio/vision)，核验日期 2026-09-18。MB 字节换算明确采用保守十进制解释；本地限制单独记录。
 - 未核验供应商或模型（包括直接使用仓库默认 SiliconFlow 地址）会明确返回 `image_limits_unverified`，严格原图多轮评估被阻断。不会把百炼阈值套用到其他供应商。部署需使用已核验的实际模型配置，或维护对应供应商的限制档案。
 - 已知像素预算内直传不等于服务端逐像素恒等处理。Token 是保护性估算，实际 usage 仍按裁判调用日志记录。
