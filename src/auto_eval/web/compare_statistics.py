@@ -409,6 +409,9 @@ def _subgroups(cases: list[Case]) -> list[tuple[str, list[Case]]]:
     for case in cases:
         item = case.item
         source = item.get("source_data") or {}
+        if item.get("session_id"):
+            groups[("轮次", str(item["turn_index"]))].append(case)
+            groups[("有效用户输入", item.get("effective_input_modality", "未检查"))].append(case)
         groups[("题型", "图文题" if item.get("query_images") else "文字题")].append(case)
         evidence = item.get("evidence_mode") or case.result.get("evidence_mode") or (
             "long_screenshot" if item.get("screenshot1") or source.get("screenshot1") else "video_frames")
@@ -474,4 +477,45 @@ def build_compare_statistics(snapshot: dict, aligned_results: list[dict]) -> lis
         ["位置偏差", "换位一致率、胜负反转率、胜平转换率", "未开展：需位置互换实验及真实产品身份映射"],
     ]
     tables.append(reliability)
+    tables.extend(conversation_statistics(snapshot, aligned_results))
     return tables
+
+
+def conversation_statistics(snapshot: dict, aligned_results: list[dict]) -> list[StatisticsTable]:
+    cases = [c for c in _cases(snapshot, aligned_results) if c.item.get("session_id")]
+    if not cases:
+        return []
+    sessions = defaultdict(list)
+    for case in cases:
+        sessions[case.item["session_id"]].append(case)
+    coverage = StatisticsTable("多轮会话覆盖", ("会话", "应执行轮数", "结构化完成轮数", "完整", "警示影响轮数", "阻断轮数"))
+    for sid, turns in sessions.items():
+        done = sum(c.status == "done" for c in turns)
+        coverage.rows.append([sid, len(turns), done, done == len(turns),
+            sum(bool(c.result.get("image_warning_count")) for c in turns),
+            sum(c.result.get("input_diagnostic_status") == "blocked" for c in turns)])
+    paired = StatisticsTable("多轮会话等权（逐轮微平均见原统计）",
+        ("标准", "实现", "维度", "方向", "有效会话数", "有效配对轮数", "A会话均值", "B会话均值", "会话等权分位值"))
+    cohorts = defaultdict(list)
+    for case in cases:
+        cohorts[(case.standard, case.revision, case.product_count)].append(case)
+    for (standard, revision, count), cohort in sorted(cohorts.items()):
+        protocol = _policy(standard, revision)
+        if protocol is None:
+            continue
+        for dimension in SCORE_DIMENSIONS:
+            for a in range(1, count + 1):
+                for b in range(1, count + 1):
+                    if a == b:
+                        continue
+                    values = defaultdict(list)
+                    for case in cohort:
+                        _, x = score_state(case, a, dimension, protocol)
+                        _, y = score_state(case, b, dimension, protocol)
+                        if x is not None and y is not None:
+                            values[case.item["session_id"]].append((x, y))
+                    x = mean(mean(v[0] for v in rows) for rows in values.values()) if values else None
+                    y = mean(mean(v[1] for v in rows) for rows in values.values()) if values else None
+                    paired.rows.append([standard, revision, DIMENSION_NAMES[dimension], f"{a}/{b}", len(values),
+                        sum(map(len, values.values())), x, y, _ratio(x, y) if x is not None else None])
+    return [coverage, paired]

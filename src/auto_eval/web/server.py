@@ -34,6 +34,7 @@ from ..judges.compare_protocols import (
 from ..media import probe_duration
 from ..paths import RUNS_DIR
 from ..query_images import normalize_query_input, PREPARED_FIELDS, prepare_query_images, QueryImageError
+from ..conversation import normalize_turn, validate_conversations, is_conversation, DIAGNOSTIC_FIELDS
 from ..preparation import run_preparation
 from .parse_input import Mode, normalize_compare_evidence, parse_csv, parse_jsonl, parse_text
 from .history import (
@@ -194,6 +195,11 @@ def _protocol_manifest(protocol, app_cfg, options: dict, resolved_judges=None) -
         for judge in (resolved_judges if resolved_judges is not None else app_cfg.judges)
         if resolved_judges is not None or judge.name in selected
     ]
+    if visual_profile is not None:
+        from ..image_limits import resolve_image_limits
+        candidates = resolved_judges if resolved_judges is not None else [j for j in app_cfg.judges if j.name in selected]
+        if candidates:
+            manifest["image_limits"] = resolve_image_limits(candidates[0], visual_profile)
     return manifest
 
 
@@ -229,7 +235,7 @@ def _resolve_operation_video_path(raw_path: str) -> Path:
     return resolve_operation_video_path(raw_path, base_dir=BASE_DIR)
 
 
-def _validate_eval_request(req: EvalReq, app_cfg) -> None:
+def _validate_eval_request(req: EvalReq, app_cfg, *, previous_items=None) -> None:
     """提交前校验：compare 模式支持完整的2或3产品同类视觉证据。"""
     selected = req.options.get("judges") or (
         [app_cfg.judges[0].name] if app_cfg.judges else []
@@ -243,6 +249,10 @@ def _validate_eval_request(req: EvalReq, app_cfg) -> None:
     invalid: list[str] = []
     for index, item in enumerate(req.items, 1):
         try:
+            item.update(normalize_turn(item, external=True))
+            for field in DIAGNOSTIC_FIELDS - {"session_id", "session_group", "turn_index", "input_schema_version"}:
+                item.pop(field, None)
+            item.pop("conversation_assets", None)
             item.update(normalize_query_input(item))
             for field in PREPARED_FIELDS:
                 item.pop(field, None)
@@ -259,6 +269,10 @@ def _validate_eval_request(req: EvalReq, app_cfg) -> None:
             item.update(normalized)
         except ValueError as exc:
             invalid.append(f"第{index}条 {exc}")
+    try:
+        validate_conversations([*(previous_items or []), *req.items])
+    except ValueError as exc:
+        invalid.append(str(exc))
     if invalid:
         preview = "；".join(invalid[:8])
         suffix = "……" if len(invalid) > 8 else ""
@@ -348,6 +362,44 @@ def api_parse(req: ParseReq):
             "rejected_count": len(errs),
             "evidence_counts": {mode: sum(item.get("evidence_mode") == mode for item in items)
                                 for mode in ("long_screenshot", "video_frames")}}
+
+
+@app.post("/api/compare/preflight")
+async def api_compare_preflight(req: EvalReq):
+    from ..image_limits import resolve_image_limits
+    from ..judges.conversation_prompt import assemble_conversation
+    from .conversation_prepare import ConversationPreparation
+    if req.mode != "compare":
+        raise HTTPException(422, "多轮预检查仅支持 compare")
+    app_cfg = cfg()
+    _validate_eval_request(req, app_cfg)
+    _, judges = _new_judge_runtime(app_cfg, req.options)
+    profile = app_cfg.visual_modes["rich_content"]
+    protocol = _compare_protocol_or_422(req.evaluation_profile)
+    limits = resolve_image_limits(judges[0], profile)
+    def inspect():
+        prepared = ConversationPreparation(req.items, "preflight-" + uuid.uuid4().hex, profile, limits)
+        rows, findings = [], {}
+        for item in sorted((it for it in req.items if it.get("session_id")), key=lambda it: (it["session_id"], it["turn_index"])):
+            error = None
+            try:
+                bundle = prepared.prepare(item)
+                system = protocol.system_template.render(persona=judges[0].persona,
+                    product_count=item.get("product_count", 2), evidence_mode="long_screenshot")
+                assemble_conversation(system, bundle, protocol)
+            except Exception as exc:
+                error = str(exc)
+            rows.append({"id": item["id"], "error": error,
+                **{k: item[k] for k in DIAGNOSTIC_FIELDS if k in item and k != "image_findings"}})
+            for finding in item.get("image_findings", []):
+                saved = findings.setdefault(finding["finding_id"], {**finding, "target_turns": []})
+                saved["target_turns"].append(item["turn_index"])
+        return {"input_schema_version": "2.0", "accepted_session_count": len(prepared.index.groups),
+            "accepted_turn_count": len(rows), "rejected_sessions": [], "warning_count": len(findings),
+            "blocked_turn_count": sum(bool(r["error"]) for r in rows), "findings": list(findings.values()),
+            "turns": rows, "limits_profile_version": limits["limits_profile_version"],
+            "preflight_status": "completed", "model": judges[0].model}
+    return await asyncio.to_thread(inspect)
 
 
 @app.get("/api/request-pacing")
@@ -562,7 +614,7 @@ async def api_retry_failed(task_id: str, req: RetryReq):
     # 会话中某轮失败会影响后续上下文；从最早目标轮起成组补跑。
     groups: dict[str, list[int]] = {}
     for index, item in enumerate(task.items):
-        if item.get("session_group"):
+        if item.get("session_group") and task.mode != "compare":
             groups.setdefault(str(item["session_group"]), []).append(index)
     for indexes in groups.values():
         indexes.sort(key=lambda i: task.items[i].get("turn_index", 0))
@@ -686,7 +738,7 @@ async def api_eval_items(req: EvalItemsReq):
             old = old_items.get(item.get("id"), {})
             if old.get("query_images") and "query_images" not in item:
                 raise HTTPException(422, "替换图文题必须显式提交 query_images；移除图片请传 []")
-        if any(item.get("query_images") for item in req.items) and task.protocol_manifest.get("input_schema_version") != "1.1":
+        if any(item.get("query_images") for item in req.items) and task.protocol_manifest.get("input_schema_version") not in {"1.1", "2.0"}:
             raise HTTPException(422, "旧任务实现不支持提问图片，请新建任务")
     if not created and requested_profile and requested_profile != task.evaluation_profile:
         raise HTTPException(
@@ -708,7 +760,17 @@ async def api_eval_items(req: EvalItemsReq):
         options=req.options,
         evaluation_profile=protocol.id if protocol else None,
     )
-    _validate_eval_request(validated_request, app_cfg)
+    previous_conversations = []
+    if not created and mode == "compare" and any(is_conversation(it) for it in [*task.items, *req.items]):
+        if any(key in req.options and req.options[key] != task.options.get(key) for key in ("product_names", "product_mapping")):
+            raise HTTPException(422, "多轮产品映射不可修改；请新建任务")
+        if task.active_runs or task.status in {"pending", "queued", "running"}:
+            raise HTTPException(409, "多轮任务运行中不能修改或追加输入")
+        existing = {it.get("id"): it for it in task.items}
+        if any(it.get("id") in existing and (is_conversation(it) or is_conversation(existing[it["id"]])) for it in req.items):
+            raise HTTPException(422, "多轮原始输入不可原地覆盖；修订后请新建任务")
+        previous_conversations = [it.copy() for it in task.items]
+    _validate_eval_request(validated_request, app_cfg, previous_items=previous_conversations)
     req.items = validated_request.items
     if created:
         task = new_task(
@@ -932,6 +994,10 @@ async def api_stream(task_id: str, compact: bool = False):
             for progress_item in ([] if compact else list(snapshot_item_progress(task).values())):
                 yield _sse("item_progress", progress_item)
             # 先回放已有结果（断线重连不丢已完成的）
+            for index, item in enumerate(task.items):
+                if item.get("session_id") and item.get("input_diagnostic_status"):
+                    yield _sse("input_diagnostics", {"item_index": index,
+                        **{key: item[key] for key in DIAGNOSTIC_FIELDS if key in item}})
             for r in ([] if compact else list(task.results)):
                 yield _sse("result", {"progress": task.done_total, "total": len(task.items), "result": r})
             # 终态判定叠加 active_runs（R4）：更新批 manage_status=False 全程
@@ -1003,7 +1069,8 @@ async def api_dataset(task_id: str):
         raise HTTPException(422, "仅支持复用垂域视觉对比数据")
     fields = {"id", "query", "question", "context", "category", "product_count", "evidence_mode",
               "query_images", "query_image_meta", "source_data", "source_line", "session_group", "turn_index",
-              "task_start_time", "task_end_time"}
+              "task_start_time", "task_end_time", "session_id", "screenshot_scope", "conversation_mode"}
+    fields.update(f"screenshot_scope{n}" for n in (1, 2, 3))
     fields.update(f"{name}{n}" for name in ("video", "screenshot", "answer", "context", "screenshot_meta", "video_source")
                   for n in range(1, 4))
     return {"task_id": task.id, "dataset_name": task.dataset_name, "created_at": task.created_at,

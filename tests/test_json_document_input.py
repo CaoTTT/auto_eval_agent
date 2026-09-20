@@ -24,7 +24,7 @@ def test_json_array_keeps_extra_values_in_source_only(mode, indent):
     source = [
         case(mode, sessionid="session-A", custom={"region": "上海", "ids": [1, 2]},
              enabled=False, count=0, optional=None, session_group="untrusted",
-             turn_index=7, metadata={"custom": "source-only"}),
+             upstream_turn_index=7, metadata={"custom": "source-only"}),
         case(mode, "case-2", sessionid="session-A"),
     ]
     before = copy.deepcopy(source)
@@ -45,7 +45,7 @@ def test_json_array_keeps_extra_values_in_source_only(mode, indent):
 
 @pytest.mark.parametrize("mode", ["compare", "rich_content"])
 def test_pretty_single_object_keeps_actual_start_line_and_bom(mode):
-    source = case(mode, session_id="original-session", note={"comment": "保留"})
+    source = case(mode, upstream_session_id="original-session", note={"comment": "保留"})
     content = "\ufeff\n\n" + json.dumps(source, ensure_ascii=False, indent=2) + "\n"
     items, errors = parse_jsonl(content, mode)
     assert errors == []

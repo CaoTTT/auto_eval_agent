@@ -271,6 +271,7 @@ class VisualCompareJudge:
         evidence_mode: str = "video_frames",
         screenshot_metas: list[dict] | None = None,
         query_image_meta: list[dict] | None = None,
+        conversation_input: dict | None = None,
         evaluation_time: datetime | None = None,
         stream_callback=None,
     ) -> dict[str, Any]:
@@ -295,9 +296,9 @@ class VisualCompareJudge:
             evidence_mode=evidence_mode,
         )
         query_metas = query_image_meta or []
-        if len(query_metas) > 1:
+        if len(query_metas) > 1 and conversation_input is None:
             raise ValueError("首版每题仅支持一张提问图片")
-        if query_metas:
+        if query_metas and conversation_input is None:
             if self.protocol.bundle_revision in {"0.2.0", "0.3.0"}:
                 raise ValueError("旧实现版本不支持提问图片，请新建任务")
             system += QUERY_IMAGE_INSTRUCTIONS
@@ -390,19 +391,27 @@ class VisualCompareJudge:
 
             return user_images, user_image_refs, content_parts, image_metadata
 
-        user_images, user_image_refs, content_parts, image_metadata = (
-            await run_preparation(prepare_images, timeout=60)
-        )
+        conversation_manifest = None
+        if conversation_input is not None:
+            from .conversation_prompt import assemble_conversation
+            system, content_parts, image_metadata, user_image_refs, conversation_manifest = await run_preparation(
+                assemble_conversation, system, conversation_input, self.protocol, evaluation_datetime=evaluation_datetime, timeout=60)
+            user_images = []
+            user = content_parts[0]["text"]
+        else:
+            user_images, user_image_refs, content_parts, image_metadata = (
+                await run_preparation(prepare_images, timeout=60)
+            )
 
         started = time.perf_counter()
         request_views = []
-        if query_metas:
+        if query_metas and conversation_input is None:
             request_views = await run_preparation(check_request_budget, system, content_parts, self.profile.query_images, timeout=60)
             for metadata, view in zip(image_metadata, request_views, strict=True):
                 metadata.update(view)
                 metadata.setdefault("image_role", "product_answer")
         if is_screenshot or query_metas:
-            if is_screenshot:
+            if is_screenshot and conversation_input is None:
                 check_context_budget(system, [p["text"] for p in content_parts if p["type"] == "text"], metas, self.profile.long_screenshot)
             raw_output = await self.client.complete(
                 system, user, stream_callback=stream_callback,
@@ -464,7 +473,9 @@ class VisualCompareJudge:
                 f"{system}\0{user}".encode("utf-8")
             ).hexdigest(),
         })
-        if query_metas:
+        if conversation_manifest:
+            result["input_manifest_sha256"] = conversation_manifest
+        elif query_metas:
             identity = {**self.protocol.public_metadata(), "original_hashes": [m["original_sha256"] for m in query_metas], "answers": [answer1, answer2, answer3],
                         "contexts": [context1, context2, context3]}
             result["input_manifest_sha256"] = input_manifest(

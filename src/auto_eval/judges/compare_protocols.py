@@ -118,6 +118,7 @@ class CompareProtocol:
             "score_range": [self.score_min, self.score_max],
             "modes": ["compare"],
             "input_modalities": ["text"] if self.bundle_revision in {"0.2.0", "0.3.0"} else ["text", "text_image"],
+            "conversation_adapter_version": None if self.bundle_revision in {"0.2.0", "0.3.0"} else "compare-conversation-1",
         }
 
 

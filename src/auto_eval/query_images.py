@@ -35,7 +35,7 @@ def normalize_query_input(item: dict) -> dict:
     if any(key in item for key in ("evaluation_profile", "standard_id", "standard_version", "bundle_revision")):
         raise ValueError("请在任务级选择标准，不能逐题覆盖评测标准")
     images = item.get("query_images", [])
-    if not isinstance(images, list) or len(images) > 1:
+    if not isinstance(images, list) or (len(images) > 1 and not item.get("session_id")):
         raise ValueError("query_images 必须是数组，首版允许 0 或 1 张静态图片")
     if any(not isinstance(path, str) or not path.strip() for path in images):
         raise ValueError("query_images 中的路径必须是非空字符串")
@@ -133,7 +133,7 @@ def prepare_query_images(item: dict, *, session_name: str, cfg: QueryImageConfig
         metas.append(meta)
     return {**normalized, "query_images": [m["original_path"] for m in metas],
             "query_image_meta": metas, "query_image_views": [m["path"] for m in metas],
-            "input_schema_version": INPUT_SCHEMA_VERSION,
+            "input_schema_version": "2.0" if item.get("session_id") else INPUT_SCHEMA_VERSION,
             "query_image_preprocess_version": PREPROCESS_VERSION}
 
 

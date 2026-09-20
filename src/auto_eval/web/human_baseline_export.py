@@ -41,7 +41,7 @@ def export_baseline_answers(baseline: dict) -> bytes:
     labels = {(r["case_key"], r["product_id"], r["dimension_id"]): r
               for r in baseline["labels"]}
     states = {r["case_key"]: r for r in baseline["states"]}
-    headers = ["case_id", "query", "公共背景", "提问原图摘要", "场景", "会话ID", "轮次"]
+    headers = ["case_id", "query", "公共背景", "提问原图摘要", "场景", "会话ID", "轮次", "历史前缀指纹"]
     for n, _ in enumerate(products, 1):
         headers.extend(f"{field}_产品{n}" for field in
                        ("产品名称", "源回答", "源背景", "采集ID", "源摘要", "证据引用"))
@@ -56,7 +56,7 @@ def export_baseline_answers(baseline: dict) -> bytes:
         state = states.get(case_key, {})
         row = [case["case_id"], case.get("query", ""), case.get("context", ""),
                _json(case.get("query_hashes", [])), case.get("category", ""),
-               case.get("session_group", ""), case.get("turn_index", "")]
+               case.get("session_group", ""), case.get("turn_index", ""), case.get("history_prefix_sha256", "")]
         for product in products:
             pid = product["product_id"]
             response = case.get("responses", {}).get(pid, {})

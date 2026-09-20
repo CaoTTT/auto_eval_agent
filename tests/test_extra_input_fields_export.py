@@ -48,7 +48,7 @@ def test_upload_to_history_export_keeps_extra_fields_by_original_index(mode, doc
                 tags=["first", {"nested": True}], formula="=HYPERLINK(\"https://example.invalid\")",
                 long_integer=123456789012345678901),
         _source(1, mode, sessionid="000002", later_field="failed row"),
-        _source(2, mode, session_id="upstream-id", last_field="not evaluated"),
+        _source(2, mode, upstream_session_id="upstream-id", last_field="not evaluated"),
     ]
     items = _parse(objects, mode, document_format)
     # Extra fields remain source metadata, not normalized judge/scheduler input.
@@ -63,7 +63,7 @@ def test_upload_to_history_export_keeps_extra_fields_by_original_index(mode, doc
     before = json.dumps(snapshot)
     sheets = history.export_rows(snapshot)
     extra_headers = ["sessionid", "count", "enabled", "absent", "metadata", "tags", "formula",
-                     "long_integer", "later_field", "session_id", "last_field"]
+                     "long_integer", "later_field", "upstream_session_id", "last_field"]
     for sheet_name in ("数据集明细", "逐题结果"):
         rows = sheets[sheet_name]
         assert len(rows) == 3
@@ -75,7 +75,7 @@ def test_upload_to_history_export_keeps_extra_fields_by_original_index(mode, doc
         assert json.loads(rows[0]["tags"]) == objects[0]["tags"]
         assert rows[0]["long_integer"] == str(objects[0]["long_integer"])
         assert rows[1]["later_field"] == "failed row"
-        assert rows[2]["session_id"] == "upstream-id"
+        assert rows[2]["upstream_session_id"] == "upstream-id"
         assert rows[2]["last_field"] == "not evaluated"
         csv_rows = list(csv.DictReader(StringIO(history.rows_to_csv(rows))))
         assert csv_rows[0]["sessionid"] == objects[0]["sessionid"]
@@ -184,14 +184,14 @@ def test_legacy_parser_bookkeeping_does_not_create_extra_result_columns():
 
 def test_explicit_source_fields_named_like_parser_bookkeeping_still_export():
     items = _parse([_source(0, "compare", source_line="business-line",
-                           session_group="business-group", turn_index=False)], "compare")
+                           session_group="business-group", upstream_turn_index=False)], "compare")
     sheets = history.export_rows({"mode": "compare", "items": items, "results": []})
     assert items[0]["source_line"] == 1
     for name in ("数据集明细", "逐题结果"):
         row = sheets[name][0]
         assert row["输入字段.source_line"] == "business-line"
         assert row["session_group"] == "business-group"
-        assert row["turn_index"] is False
+        assert row["upstream_turn_index"] is False
 
 
 def test_known_evaluation_fields_do_not_repeat_as_extra_result_columns():

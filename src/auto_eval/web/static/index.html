@@ -270,6 +270,12 @@
     <span v-else-if="running" class="running">评估中… {{ progress }}/{{ total }}</span>
     <span v-if="queueNotice" class="queue-notice">{{ queueNotice }}</span>
     <p v-if="runError" class="run-error">{{ runError }}</p>
+    <section v-if="conversationPreflight" class="query-image-panel">
+      <strong>多轮图片预检查 · {{conversationPreflight.model}}</strong>
+      <p>{{conversationPreflight.accepted_session_count}} 个会话 · {{conversationPreflight.accepted_turn_count}} 轮 · {{conversationPreflight.warning_count}} 项图片诊断 · {{conversationPreflight.blocked_turn_count}} 轮阻断。图片策略：原图 / 原分辨率无损切片。</p>
+      <details v-if="conversationPreflight.findings.length" open><summary>查看诊断</summary><p v-for="finding in conversationPreflight.findings" :key="finding.finding_id">{{finding.session_id}} · {{finding.asset_id || '模型配置'}} · 来源第 {{finding.source_turn}} 轮 · {{finding.message || finding.metric}} {{finding.observed}} / {{finding.limit}} {{finding.unit}} · {{finding.limit_kind}} · {{finding.status}}</p></details>
+      <p v-for="turn in conversationPreflight.turns.filter(t=>t.error)" :key="turn.id" class="err">{{turn.id}}：{{turn.error}}</p>
+    </section>
     <div v-if="taskId" class="task-duration-panel">
       <div class="task-duration-heading"><span>任务总耗时</span><strong>{{ selectedTaskStatus === 'queued' ? '尚未开始' : formatTaskDuration(selectedTaskTiming) }}</strong><small v-if="selectedTaskTiming && selectedTaskTiming.running">计时中</small></div>
       <p class="hint">累计实际执行时间，包含处理与等待；不含任务排队和暂停时长，失败补跑单独记录。</p>
@@ -399,6 +405,11 @@
       <span v-if="retryStatusLabel(repairStatus)" class="running">{{ retryStatusLabel(repairStatus) }}</span>
     </h2>
     <human-compare-panel v-if="mode==='compare' && taskId && !loadingTaskId" :key="taskId" :task-id="taskId"></human-compare-panel>
+    <details v-for="group in conversationGroups" :key="group.id" class="query-image-panel">
+      <summary>会话 {{group.id}} · {{group.turns.length}} 轮结果</summary>
+      <button v-for="turn in group.turns" :key="turn.index" @click="resultQuery=turn.item_id; resetResultPage()">第 {{turn.turn_index}} 轮 · {{turn.error?'失败':'完成'}} · {{turn.image_warning_count || 0}} 项图片诊断</button>
+    </details>
+    <details v-if="running && Object.keys(liveInputDiagnostics).length" class="query-image-panel" open><summary>运行中图片检查</summary><p v-for="row in liveInputDiagnostics" :key="row.item_index">{{row.session_id}} · 第 {{row.turn_index}} 轮 · {{row.input_diagnostic_status}} · {{row.image_warning_count}} 项诊断</p></details>
     <div class="summary" v-if="summary">
       <span v-if="summary.input_modality_counts">文字题 {{ summary.input_modality_counts.text }} · 图文题 {{ summary.input_modality_counts.text_image }}</span>
       <span>样本量 {{ summary.total }}</span>
@@ -423,6 +434,8 @@
       <div class="result-filters">
         <input v-model="resultQuery" @input="resetResultPage" placeholder="搜索题号、query、context、回答或理由">
         <select v-if="mode==='compare'" v-model="modalityFilter" @change="resetResultPage"><option value="">全部题型</option><option value="text">文字题</option><option value="text_image">图文题</option></select>
+        <input v-if="conversationGroups.length" v-model="turnFilter" @input="resetResultPage" placeholder="筛选轮次，如 3" style="max-width:130px">
+        <select v-if="conversationGroups.length" v-model="diagnosticFilter" @change="resetResultPage"><option value="">全部输入状态</option><option value="warning">含图片警示</option><option value="blocked">被阻断</option></select>
         <span class="result-count">共 {{ filteredResults.length }} 条</span>
         <template v-if="pagedResults.some(r => evidenceImages(r).length)">
           <span class="hint">当前页图片</span>
@@ -431,6 +444,7 @@
         </template>
       </div>
       <div class="result-table-wrap">
+        <details v-if="summary?.conversation_statistics"><summary>多轮会话统计与覆盖</summary><div v-for="table in summary.conversation_statistics" :key="table.title"><h3>{{table.title}}</h3><table class="grid"><thead><tr><th v-for="header in table.headers" :key="header">{{header}}</th></tr></thead><tbody><tr v-for="(row,i) in table.rows" :key="i"><td v-for="(value,j) in row" :key="j">{{value ?? '—'}}</td></tr></tbody></table></div></details>
         <details v-if="summary && summary.by_input_modality">
           <summary>按题型查看汇总（沿用任务统一标准）</summary>
           <div v-for="(sub, key) in summary.by_input_modality" :key="key" class="query-image-panel">
@@ -510,6 +524,15 @@
                   </div>
                 </div>
               </td></tr>
+              <tr v-if="r.session_id"><td colspan="99" class="query-image-panel">
+                <strong>会话 {{r.session_id}} · 第 {{r.turn_index}} 轮</strong> · 使用前 {{r.history_turn_count}} 轮原始历史 · {{r.effective_input_modality==='text_image'?'含历史/当前题图':'文字输入'}}
+                <details><summary>历史证据与图片诊断 · {{r.image_warning_count || 0}} 项警示 · {{r.input_diagnostic_status}}</summary>
+                  <details v-for="turn in conversationHistory(r)" :key="turn.turn"><summary>历史第 {{turn.turn}} 轮 · {{turn.query}}</summary><p v-for="picture in turn.images" :key="picture.key"><a :href="picture.previewUrl" target="_blank" rel="noopener">{{picture.label}} · 查看原图</a></p></details>
+                  <p v-for="asset in r.conversation_asset_manifest" :key="asset.asset_id">{{asset.source_turn===r.turn_index?'当前评分对象':'历史上下文'}} · {{asset.asset_id}} · 来源第 {{asset.source_turn}} 轮</p>
+                  <p v-for="finding in r.image_findings" :key="finding.finding_id" :class="finding.status==='blocked'?'err':'hint'">{{finding.asset_id}} · 来源第 {{finding.source_turn}} 轮 · {{finding.limit_kind==='local_guardrail'?'平台保护限制':finding.limit_kind==='effective_vision'?'视觉缩放风险':finding.limit_kind==='official_hard'?'官方输入限制':'输入诊断'}} · {{finding.metric || finding.code}}：{{finding.observed}} / {{finding.limit}} {{finding.unit}} · {{finding.status==='resolved_by_lossless_split'?'已通过无损切片解决':finding.message || finding.status}}</p>
+                  <p v-if="r.request_budget_report">请求图片 {{r.request_budget_report.actual_image_count}} 张 · 请求体 {{r.request_budget_report.request_payload_bytes}} 字节 · 保守估算 {{r.request_budget_report.estimated_input_tokens}} Token</p>
+                </details>
+              </td></tr>
               <tr v-if="r.error" class="result-error-detail"><td colspan="99">评估失败：{{ r.error }}</td></tr>
             </template>
           </tbody>
@@ -549,6 +572,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20260917_history_pagination"></script>
+  <script type="module" src="/static/app.js?v=20260918_multi_turn"></script>
 </body>
 </html>

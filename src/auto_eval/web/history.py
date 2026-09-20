@@ -527,6 +527,29 @@ def export_rows(snapshot: dict) -> dict[str, list[dict]]:
     items = snapshot.get("items") or []
     _append_extra_input_values(dataset_rows, items, extra_columns)
     _append_extra_input_values(result_rows, items, extra_columns)
+    if mode == "compare" and any(it.get("session_id") for it in items):
+        from .compare_statistics import conversation_statistics
+        checks = {}
+        for index, item in enumerate(items):
+            if not item.get("session_id"):
+                continue
+            result = aligned_results[index]
+            fields = {"会话ID": item["session_id"], "轮次": item["turn_index"],
+                "历史轮数": item["turn_index"] - 1,
+                "有效输入类型": result.get("effective_input_modality", item.get("effective_input_modality", "未检查")),
+                "历史前缀指纹": result.get("history_prefix_sha256", item.get("history_prefix_sha256", "")),
+                "图片警示数": result.get("image_warning_count", item.get("image_warning_count", 0)),
+                "图片检查状态": result.get("input_diagnostic_status", item.get("input_diagnostic_status", "未检查")),
+                "请求预算": result.get("request_budget_report", item.get("request_budget_report", {}))}
+            result_rows[index].update(fields)
+            dataset_rows[index].update(fields)
+            for finding in result.get("image_findings", item.get("image_findings", [])):
+                entry = checks.setdefault(finding["finding_id"], {**finding, "关联目标轮": []})
+                entry["关联目标轮"].append(item["turn_index"])
+        rows["图片检查明细"] = list(checks.values()) or [{"状态": "未发现图片警示；未检查与阻断请参见逐题结果"}]
+        tables = conversation_statistics(snapshot, aligned_results)
+        rows["多轮会话统计"] = [{"统计区块": table.title, **dict(zip(table.headers, row))}
+            for table in tables for row in table.rows]
     return rows
 
 
@@ -1572,17 +1595,28 @@ def _write_xlsx(snapshot: dict, destination) -> None:
         screenshot_rows = _original_screenshot_rows(snapshot, images)
         query_rows = _query_image_rows(snapshot)
         query_cells: list[CellImage | str] = [""] * len(snapshot.get("items", []))
+        extra_query_cells = {}
+        query_counts = {}
         if query_rows:
             for row in query_rows:
                 try:
                     original = images.add(row.get("original_path", ""), row.get("original_sha256"))
                 except OriginalImageError as exc:
                     original = str(exc)
-                query_cells[row["数据集序号"] - 1] = original
+                index = row["数据集序号"] - 1
+                number = query_counts.get(index, 0)
+                query_counts[index] = number + 1
+                if number == 0:
+                    query_cells[index] = original
+                else:
+                    extra_query_cells.setdefault(number + 1, [""] * len(query_cells))[index] = original
         if screenshot_rows:
             sheets["逐题结果"] = _insert_screenshot_columns(sheets["逐题结果"], screenshot_rows)
         if query_rows and "逐题结果" in sheets:
             sheets["逐题结果"] = _insert_query_image_column(sheets["逐题结果"], query_cells, "题目")
+            for number, cells in sorted(extra_query_cells.items()):
+                for row, cell in zip(sheets["逐题结果"], cells):
+                    row[f"输入图片原图{number}"] = cell
         if statistics:
             sheets[COMPARE_STATISTICS_SHEET] = []
         images.write_parts()

@@ -10,12 +10,14 @@
 from __future__ import annotations
 
 import csv
+from copy import deepcopy
 import io
 import json
 import math
 from numbers import Real
 from typing import Iterator, Literal
 from ..query_images import normalize_query_input
+from ..conversation import is_conversation, normalize_turn, validate_conversations
 
 Mode = Literal[
     "compare",
@@ -87,6 +89,7 @@ def _compare_product_count(obj: dict) -> int:
 
 def compare_evidence_mode(obj: dict) -> tuple[int, str]:
     """Choose one complete evidence layer for every product in the case."""
+    normalize_turn(obj)
     count = _compare_product_count(obj)
     if obj.get("evidence_mode") not in (None, "", "long_screenshot", "video_frames"):
         raise ValueError("evidence_mode 只能是 long_screenshot 或 video_frames")
@@ -175,7 +178,37 @@ def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
     items: list[dict] = []
     errors: list[str] = []
     video_item_ids: set[str] = set()
-    for ln, location, obj, error in _json_records(content):
+    records = list(_json_records(content))
+    multi = mode == "compare" and any(isinstance(obj, dict) and is_conversation(obj) for _, _, obj, _ in records)
+    rejected_sessions = set()
+    if multi:
+        if any(error or not isinstance(obj, dict) for _, _, obj, error in records):
+            return [], [error or f"{location}必须是 JSON 对象" for _, location, obj, error in records
+                        if error or not isinstance(obj, dict)] + ["多轮批次存在无法定位归属的记录，未导入任何记录"]
+        groups = {}
+        for _, _, obj, _ in records:
+            if is_conversation(obj):
+                sid = obj.get("session_id")
+                if not isinstance(sid, str) or not sid.strip():
+                    return [], ["conversation_structure_invalid: session_id 必须是非空字符串，无法定位错误记录的会话"]
+                groups.setdefault(sid.strip(), []).append(obj)
+        for sid, turns in groups.items():
+            try:
+                validate_conversations(deepcopy(turns), external=True)
+            except ValueError as exc:
+                rejected_sessions.add(sid)
+                errors.append(f"会话 {sid} 已拒绝：{exc}")
+        ids = {}
+        for _, _, obj, _ in records:
+            if isinstance(obj.get("id"), str):
+                ids.setdefault(obj["id"].strip(), []).append(obj)
+        for item_id, matches in ids.items():
+            if len(matches) > 1 and any(is_conversation(it) for it in matches):
+                rejected_sessions.update(it["session_id"].strip() for it in matches if it.get("session_id"))
+                errors.append(f"conversation_structure_invalid: id 重复 {item_id}，关联会话已拒绝")
+    for ln, location, obj, error in records:
+        if multi and isinstance(obj, dict) and str(obj.get("session_id", "")).strip() in rejected_sessions:
+            continue
         if error:
             errors.append(error)
             continue
@@ -197,6 +230,7 @@ def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
             item["context"] = context.strip()
         if mode == "compare":
             try:
+                item.update(normalize_turn(obj, external=True))
                 item.update(normalize_query_input(obj))
                 product_count, evidence_mode = compare_evidence_mode(obj)
             except ValueError as exc:
@@ -299,6 +333,12 @@ def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
         # 原始字段仅用于历史追溯和导出，不会进入 EvalItem 或裁判 prompt。
         item["source_data"] = _json_safe_source(obj)
         items.append(item)
+    if multi:
+        accepted_lines = {it["source_line"] for it in items}
+        failed_sessions = {obj["session_id"].strip() for ln, _, obj, _ in records
+                           if obj.get("session_id") and ln not in accepted_lines}
+        items = [it for it in items if it.get("session_id") not in failed_sessions]
+        errors.extend(f"会话 {sid} 存在无效记录，整组未导入" for sid in sorted(failed_sessions - rejected_sessions))
     return items, errors
 
 

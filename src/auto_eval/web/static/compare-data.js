@@ -1,5 +1,5 @@
 import {createApp as vueCreateApp, ref, computed, watch, onMounted, onUnmounted, nextTick} from "https://unpkg.com/vue@3/dist/vue.esm-browser.js";
-import {CompareCaseList, fromDatasetItem, caseMedia, caseEvidenceMode, selectEvidenceMode} from "./compare-cases.js?v=20260916_video_cache";
+import {CompareCaseList, fromDatasetItem, caseMedia, caseEvidenceMode, selectEvidenceMode} from "./compare-cases.js?v=20260918_multi_turn";
 import {HumanComparePanel} from "./human-compare.js?v=20260916_human_answers";
 export {ref, computed, onMounted, onUnmounted, nextTick};
 export {selectEvidenceMode};
@@ -89,6 +89,7 @@ export const CompareDatasetPanel = {
         </section>
       </section>
       <div class="dataset-current" ref="currentPanel">
+        <p v-if="items.some(it=>it.sessionId)" class="hint">多轮：{{new Set(items.filter(it=>it.sessionId).map(it=>it.sessionId)).size}} 个会话 · {{items.filter(it=>it.sessionId).length}} 轮。共享逐轮问题和题图；每张长截图只含当前轮。每轮使用完整原始历史独立评分，开始时自动检查图片与请求预算。</p>
         <strong>当前数据：{{datasetName || '手动录入'}}</strong><span class="dataset-tag">{{sourceTaskId?'历史复用':'新上传 / 手动录入'}}</span>
         <p class="hint" v-if="sourceTaskId">来源任务：{{sourceTaskId}}</p>
         <p class="hint">共 {{items.length}} 条 · 图文 {{counts(items).image}} · 文字 {{items.length-counts(items).image}} · 长截图 {{counts(items).shots}} · 录屏 {{counts(items).videos}} · 证据不齐全 {{counts(items).invalid}}。开始评估时提交全部 Case。</p>

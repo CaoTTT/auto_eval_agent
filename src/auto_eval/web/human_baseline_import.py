@@ -101,6 +101,7 @@ def suggest_mapping(headers: list[str], sheet_name: str, header_row: int = 1, me
                 query=cols.get("query", cols.get("题目", "")), context=cols.get("公共背景", ""),
                 query_hashes=cols.get("提问原图摘要", ""), category=cols.get("场景", ""), products=products,
                 session_group=cols.get("会话ID", ""), turn_index=cols.get("轮次", ""),
+                history_prefix_sha256=cols.get("历史前缀指纹", ""),
                 labels=labels, responses=responses, gates=gates,
                 applicability={d: cols[f"人工是否适用_{name}"] for d, name in DIMENSION_NAMES.items() if f"人工是否适用_{name}" in cols},
                 answer_text_origin="source" if metadata.get("template_version") else "unknown",
@@ -161,7 +162,7 @@ def parse_human_labels(path: Path, mapping: ImportMapping) -> dict:
         if mapping.header_signature and digest(headers) != mapping.header_signature:
             raise HumanError("表头已改变，不能复用原列地址；请重新映射", 409)
         physical_columns = [mapping.case_id, mapping.query, mapping.context, mapping.query_hashes, mapping.category,
-                            mapping.session_group, mapping.turn_index,
+                            mapping.session_group, mapping.turn_index, mapping.history_prefix_sha256,
                             *mapping.applicability.values()]
         for label in mapping.labels:
             physical_columns.extend(getattr(label, k) for k in ("score", "review", "status", "reason"))
@@ -214,6 +215,7 @@ def parse_human_labels(path: Path, mapping: ImportMapping) -> dict:
                             context=str(get(mapping.context) or ""), query_hashes=query_hashes,
                             context_known=bool(mapping.context),
                             session_group=str(get(mapping.session_group) or ""),
+                            history_prefix_sha256=str(get(mapping.history_prefix_sha256) or ""),
                             turn_index="" if get(mapping.turn_index) is None else str(get(mapping.turn_index)),
                             context_origin=mapping.context_origin, category=str(get(mapping.category) or ""), responses={})
                 for product in mapping.products:
@@ -321,7 +323,7 @@ def build_human_template(snapshot: dict, standard: str) -> bytes:
     count = max((int(i.get("product_count") or (3 if i.get("video3") or i.get("screenshot3") or i.get("answer3") else 2)) for i in items), default=2)
     names = (snapshot.get("options") or {}).get("product_names") or []
     products = [dict(product_id=f"product{n}", display_name=names[n-1] if n <= len(names) and names[n-1] else f"产品{n}") for n in range(1, count+1)]
-    headers = ["case_id", "query", "公共背景", "提问原图摘要", "场景", "会话ID", "轮次"]
+    headers = ["case_id", "query", "公共背景", "提问原图摘要", "场景", "会话ID", "轮次", "历史前缀指纹"]
     for n in range(1, count+1):
         headers.extend(f"{name}_产品{n}" for name in ("源回答", "源背景", "采集ID", "源摘要", "证据引用"))
         for dim in SCORE_DIMENSIONS:
@@ -334,7 +336,7 @@ def build_human_template(snapshot: dict, standard: str) -> bytes:
         source = item.get("source_data") or {}
         row = [str(item.get("id") or source.get("query_id") or ""), identity["query"], identity["context"],
                json.dumps(identity["query_hashes"], ensure_ascii=False), item.get("category") or source.get("category") or "",
-               item.get("session_group",source.get("session_group","")),item.get("turn_index",source.get("turn_index",""))]
+               item.get("session_group",source.get("session_group","")),item.get("turn_index",source.get("turn_index","")), item.get("history_prefix_sha256", "")]
         for n in range(1, count+1):
             response = response_identity(item, n)
             row.extend(response.get(k, "") for k in ("answer", "context", "response_id", "sha256", "evidence"))

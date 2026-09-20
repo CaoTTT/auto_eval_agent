@@ -3,7 +3,9 @@ import {ref, computed, watch, onUnmounted} from "https://unpkg.com/vue@3/dist/vu
 export function selectEvidenceMode(item) {
   const count = Number(item.productCount);
   if (count !== 2 && count !== 3) return '';
+  if (item.sessionId && ([1,2,3].some(n => item[`video${n}Path`]) || item.screenshotScope !== 'current_turn')) return '';
   for (const [prefix, mode] of [['screenshot', 'long_screenshot'], ['video', 'video_frames']]) {
+    if (item.sessionId && mode === 'video_frames') continue;
     if (Array.from({length:count}, (_, index) => item[`${prefix}${index+1}Path`])
       .every(path => typeof path === 'string' && path.trim())) return mode;
   }
@@ -21,6 +23,7 @@ export function fromDatasetItem(item, index) {
   return {
     _uiKey: `preview-${index}`, id: value('id') || '', query: value('query') || value('question') || '',
     context: value('context') || '', queryImages: [...(item.query_images || [])],
+    sessionId:value('session_id') || '', turnIndex:value('turn_index'), screenshotScope:value('screenshot_scope') || '',
     queryImageMeta: item.query_image_meta || [], productCount: value('product_count') || (value('video3') || value('screenshot3') ? 3 : 2),
     evidenceMode: item.evidence_mode || (value('screenshot1') ? 'long_screenshot' : 'video_frames'),
     _savedEvidenceMode: item.evidence_mode || (value('screenshot1') ? 'long_screenshot' : 'video_frames'),
@@ -35,7 +38,7 @@ export function fromDatasetItem(item, index) {
 
 export function caseMedia(item) {
   const files = [];
-  if (item.queryImages?.[0]) files.push({id:'query', role:'query', label:'提问图片', path:item.queryImages[0], meta:item.queryImageMeta?.[0]});
+  (item.queryImages || []).forEach((path,i) => files.push({id:i ? `query${i+1}` : 'query', role:'query', label:`提问图片 ${i+1}`, path, meta:item.queryImageMeta?.[i]}));
   const evidenceMode = caseEvidenceMode(item);
   if (!evidenceMode) return files;
   for (let n=1;n<=item.productCount;n++) {
@@ -123,7 +126,7 @@ export const CompareCaseList = {
             <span class="dataset-tag">{{entry.item.queryImages?.length?'图文':'文字'}}</span><span class="dataset-tag">{{caseEvidenceMode(entry.item)==='long_screenshot'?'长截图':caseEvidenceMode(entry.item)==='video_frames'?'录屏':'证据不齐全'}}</span><span class="dataset-tag">{{entry.item.productCount}} 产品</span>
           </div>
           <div v-if="expanded[entry.item._uiKey]" class="compare-case-body">
-            <div class="dataset-toolbar"><strong>Case {{entry.item.id || entry.index+1}}</strong><button v-if="!readonly && items.length>1" @click="$emit('remove',entry.index)" class="btn-danger">删除此条</button></div>
+            <div class="dataset-toolbar"><strong>Case {{entry.item.id || entry.index+1}}</strong><span v-if="entry.item.sessionId" class="dataset-tag">会话 {{entry.item.sessionId}} · 第 {{entry.item.turnIndex}} 轮 · 仅本轮长截图</span><button v-if="!readonly && items.length>1" @click="$emit('remove',entry.index)" class="btn-danger">删除此条</button></div>
             <label class="dataset-label">完整问题</label><p v-if="readonly" class="case-text">{{entry.item.query}}</p><textarea v-else v-model="entry.item.query" rows="2" placeholder="用户问题（必填）"></textarea>
             <label class="dataset-label">共享背景</label><p v-if="readonly" class="case-text">{{entry.item.context || '未填写'}}</p><textarea v-else v-model="entry.item.context" rows="2" placeholder="共享背景（可选）"></textarea>
             <div v-if="!readonly" class="dataset-toolbar">

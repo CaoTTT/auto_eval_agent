@@ -1,4 +1,4 @@
-import { createApp, ref, computed, onMounted, onUnmounted, nextTick, selectEvidenceMode } from "./compare-data.js?v=20260916_video_cache";
+import { createApp, ref, computed, onMounted, onUnmounted, nextTick, selectEvidenceMode } from "./compare-data.js?v=20260918_multi_turn";
 
 createApp({
   setup() {
@@ -23,6 +23,7 @@ createApp({
     const opPreparing = ref(false);
     const errors = ref([]);
     const importReport = ref(null);
+    const conversationPreflight = ref(null);
     const judges = ref([]);
     const selectedJudges = ref([]);
     const visibleJudges = computed(() => judges.value);
@@ -110,6 +111,17 @@ createApp({
     const activeSkill = ref("");
     const resultQuery = ref("");
     const modalityFilter = ref("");
+    const turnFilter = ref(''), diagnosticFilter = ref('');
+    const liveInputDiagnostics = ref({});
+    const conversationGroups = computed(() => {
+      const groups = new Map();
+      for (const row of results.value) {
+        if (!row.session_id) continue;
+        if (!groups.has(row.session_id)) groups.set(row.session_id, []);
+        groups.get(row.session_id).push(row);
+      }
+      return [...groups].map(([id, turns]) => ({id, turns:turns.sort((a,b)=>a.turn_index-b.turn_index)}));
+    });
     const modalityCounts = computed(() => ({
       text: opItems.value.filter(it => !(it.queryImages || []).length).length,
       text_image: opItems.value.filter(it => (it.queryImages || []).length).length,
@@ -153,6 +165,11 @@ createApp({
         images.push({key:url, label:`产品 ${n} 回答长截图`, previewUrl:url, downloadUrl:`${url}&download=true`, longScreenshot:true});
       }
       return images;
+    }
+    function conversationHistory(r) {
+      return items.value.map((item,index)=>({item,index})).filter(({item})=>item.session_id===r.session_id && item.turn_index<r.turn_index)
+        .sort((a,b)=>a.item.turn_index-b.item.turn_index).map(({item,index})=>({turn:item.turn_index, query:item.query,
+          images:evidenceImages(results.value.find(row=>row.index===index) || {index})}));
     }
     const resultPage = ref(1);
     const resultPageSize = ref(10);
@@ -637,9 +654,12 @@ createApp({
     const filteredResults = computed(() => {
       const q = resultQuery.value.trim().toLowerCase();
       return skillResults.value.filter((r) => {
+        if (turnFilter.value && String(r.turn_index) !== turnFilter.value) return false;
+        if (diagnosticFilter.value==='warning' && !r.image_warning_count) return false;
+        if (diagnosticFilter.value==='blocked' && r.input_diagnostic_status!=='blocked') return false;
         const modality = r.input_modality || ((items.value[r.index]?.query_images || []).length ? "text_image" : "text");
         if (modalityFilter.value && modality !== modalityFilter.value) return false;
-        if (q && !`${r.item_id || ""} ${r.query || ""} ${r.context || ""} ${r.answer_text || ""} ${r.answer1 || ""} ${r.answer2 || ""} ${r.answer3 || ""} ${(r.card_contents || []).join(" ")} ${(r.superlink_texts || []).join(" ")} ${r.rationale || ""}`.toLowerCase().includes(q)) return false;
+        if (q && !`${r.session_id || ""} ${r.turn_index || ""} ${r.item_id || ""} ${r.query || ""} ${r.context || ""} ${r.answer_text || ""} ${r.answer1 || ""} ${r.answer2 || ""} ${r.answer3 || ""} ${(r.card_contents || []).join(" ")} ${(r.superlink_texts || []).join(" ")} ${r.rationale || ""}`.toLowerCase().includes(q)) return false;
         return true;
       });
     });
@@ -781,6 +801,7 @@ createApp({
             [`videoSource${n}`,item[`video_source${n}`] || {}],
           ])), taskStartTime:item.task_start_time ?? null, taskEndTime:item.task_end_time ?? null,
           sourceLine:item.source_line ?? null, sourceData:raw.source_data || null,
+          sessionId:item.session_id || '', screenshotScope:item.screenshot_scope || '',
           sessionGroup:item.session_group ?? null, turnIndex:item.turn_index ?? null};
       });
     }
@@ -1026,6 +1047,7 @@ createApp({
         if (it.sourceData) item.source_data = it.sourceData;
         if (it.sessionGroup != null) item.session_group = it.sessionGroup;
         if (it.turnIndex != null) item.turn_index = it.turnIndex;
+        if (it.sessionId) {item.session_id = it.sessionId; item.screenshot_scope = it.screenshotScope;}
         return item;
       });
       const body = {
@@ -1047,6 +1069,14 @@ createApp({
       let r;
       submitting.value = true;
       try {
+        conversationPreflight.value = null;
+        if (submittedItems.some(item => item.session_id)) {
+          const checked = await fetch('/api/compare/preflight', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+          const report = await checked.json();
+          if (!checked.ok) throw Error(typeof report.detail === 'string' ? report.detail : '多轮预检查失败');
+          conversationPreflight.value = report;
+          if (report.blocked_turn_count) throw Error(`多轮预检查：${report.blocked_turn_count} 轮被阻断，请查看图片诊断。`);
+        }
         r = await fetch("/api/eval", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1286,6 +1316,11 @@ createApp({
         if (!isSelected()) return;
         const d = JSON.parse(e.data);
         mergeItemProgress(d);
+      });
+      es.addEventListener('input_diagnostics', e => {
+        if (!isSelected()) return;
+        const data=JSON.parse(e.data);liveInputDiagnostics.value[data.item_index]=data;
+        if(items.value[data.item_index]) Object.assign(items.value[data.item_index],data);
       });
       es.addEventListener("progress_event", (e) => {
         if (!isSelected()) return;
@@ -1938,7 +1973,8 @@ createApp({
     });
 
     return {
-      modes, mode, modeLabel, isVideoMode, items, errors, importReport, judges, visibleJudges, selectedJudges, datasetName,
+      modes, mode, modeLabel, isVideoMode, items, errors, importReport, conversationPreflight, judges, visibleJudges, selectedJudges, datasetName,
+      turnFilter, diagnosticFilter, conversationGroups, conversationHistory, liveInputDiagnostics,
       datasetSourceTaskId, datasetRevision, useComparisonDataset,
       evaluationProfiles, compareProfiles, selectedEvaluationProfile, evaluationProfileLabel,
       judgeModelProfiles, selectedJudgeModelProfile, selectedModelProfile, enableThinking, changeJudgeModel,
