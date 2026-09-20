@@ -1777,6 +1777,7 @@ createApp({
         results.value = [];
         summary.value = null;
       }
+      comparisonTaskIds.value = comparisonTaskIds.value.filter(value => value !== id);
       delete historyNoteDrafts.value[id];
       delete historyNoteEditing.value[id];
       await loadHistory();
@@ -1894,16 +1895,23 @@ createApp({
       if (loadingTaskId.value) return;
       window.open(`/api/eval/${taskId.value}/export?format=json`);
     }
-    async function exportXlsx(requestedId = "") {
-      if (exportingTaskId.value || (!requestedId && loadingTaskId.value)) return;
-      const id = requestedId || taskId.value;
+    const comparisonTaskIds = ref([]);
+    async function exportComparisonXlsx() {
+      if (comparisonTaskIds.value.length !== 2) return;
+      await exportXlsx("", [...comparisonTaskIds.value]);
+    }
+    async function exportXlsx(requestedId = "", comparisonIds = null) {
+      if (exportingTaskId.value || (!requestedId && !comparisonIds && loadingTaskId.value)) return;
+      const id = comparisonIds ? comparisonIds.join(" / ") : requestedId || taskId.value;
       if (!id) return;
       exportingTaskId.value = id;
       exportError.value = "";
       exportDownloadUrl.value = "";
       exportMessage.value = `正在为任务 ${id} 准备 Excel…`;
       try {
-        const response = await fetch(`/api/eval/${encodeURIComponent(id)}/exports`, {method: "POST"});
+        const response = comparisonIds
+          ? await fetch("/api/exports/comparison", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({task_ids: comparisonIds})})
+          : await fetch(`/api/eval/${encodeURIComponent(id)}/exports`, {method: "POST"});
         let data = await response.json();
         if (!response.ok) throw new Error(data.detail || "导出请求失败");
         while (!disposed && ["queued", "generating"].includes(data.status)) {
@@ -1998,7 +2006,7 @@ createApp({
       repairStatus, retryStatusLabel, retrySubmitting, selectedRetryIndexes, activeRetry,
       failedResultIndexes, retryIndexSelected, toggleRetryIndex, retryFailedCases,
       itemProgress, progressEvents, expandedProgressLogs, pagedProgressRows, progressStages,
-      historyItems, historyNoteDrafts, historyNoteEditing, loadingHistory, pageSize,
+      comparisonTaskIds, exportComparisonXlsx, historyItems, historyNoteDrafts, historyNoteEditing, loadingHistory, pageSize,
       historyPage, historyTotal, historyPageSize, historyPageCount, historyError,
       loadingTaskId, exportingTaskId, exportMessage, exportError, exportDownloadUrl,
       opPage, opPageSize, opPageCount, opJumpPage,

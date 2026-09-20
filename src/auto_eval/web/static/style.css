@@ -188,7 +188,8 @@ table.grid tbody tr:nth-child(even) { background: #fafbfc; }
 .auto-table { width: max-content !important; min-width: 100%; table-layout: auto; }
 .auto-table th, .auto-table td { min-width: 72px; max-width: 420px; }
 .auto-table th:first-child, .auto-table td:first-child { min-width: 48px; }
-.history-table th:first-child, .history-table td:first-child { min-width: 170px; white-space: nowrap; }
+.history-table th:nth-child(2), .history-table td:nth-child(2) { min-width: 170px; white-space: nowrap; }
+.history-table th:first-child, .history-table td:first-child { min-width: 54px; white-space: nowrap; }
 .history-table .history-progress-cell {
   width: 72px;
   min-width: 72px;

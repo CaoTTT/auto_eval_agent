@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <title>auto_eval 评估台</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260920_audit">
+  <link rel="stylesheet" href="/static/style.css?v=20260920_comparison">
   <style>
     .op-cards { display:flex; flex-direction:column; gap:12px; }
     .op-card { border:1px solid #e2e8f0; border-radius:8px; padding:12px; background:#fafbfc; }
@@ -80,13 +80,20 @@
   <details class="history-section">
     <summary>历史记录（{{ historyTotal }}）<button @click.stop="loadHistory()" :disabled="loadingHistory" style="margin-left:8px">刷新</button></summary>
     <p class="hint">历史结果保存在本地 runs/web_history，服务重启后仍可加载；运行中断时会保留已完成的题目。</p>
+    <div class="actions">
+      <button @click="exportComparisonXlsx()" :disabled="comparisonTaskIds.length !== 2 || !!exportingTaskId">合并对比导出 Excel（{{ comparisonTaskIds.length }}/2）</button>
+      <button @click="comparisonTaskIds = []" :disabled="!comparisonTaskIds.length">清空选择</button>
+    </div>
+    <p class="hint">选择同一测试数据的两个任务，可跨页选择；先选为 A，后选为 B。同一评分维度并排展示，差异标黄。输入内容和顺序须一致。</p>
+    <p v-if="comparisonTaskIds.length" class="hint">{{ comparisonTaskIds.map((id, i) => `${i === 0 ? 'A' : 'B'}：${id}`).join('；') }}</p>
     <p v-if="historyError" class="err" role="alert">{{ historyError }}</p>
     <p v-if="loadingHistory" class="hint" role="status">正在读取历史记录…</p>
     <div class="table-scroll" v-if="historyItems.length" :aria-busy="loadingHistory">
       <table class="grid history-table auto-table">
-        <thead><tr><th>时间</th><th>数据集</th><th>模式</th><th>评测标准</th><th>裁判模型 / 思考</th><th>状态</th><th class="history-progress-cell">进度</th><th>任务总耗时</th><th>预览</th><th>操作</th><th>批跑备注</th></tr></thead>
+        <thead><tr><th>对比</th><th>时间</th><th>数据集</th><th>模式</th><th>评测标准</th><th>裁判模型 / 思考</th><th>状态</th><th class="history-progress-cell">进度</th><th>任务总耗时</th><th>预览</th><th>操作</th><th>批跑备注</th></tr></thead>
         <tbody>
           <tr v-for="h in historyItems" :key="h.task_id">
+            <td><input type="checkbox" v-model="comparisonTaskIds" :value="h.task_id" :aria-label="'选择对比任务 ' + h.task_id" :disabled="!!exportingTaskId || (comparisonTaskIds.length >= 2 && !comparisonTaskIds.includes(h.task_id))">{{ comparisonTaskIds.includes(h.task_id) ? (comparisonTaskIds.indexOf(h.task_id) === 0 ? 'A' : 'B') : '' }}</td>
             <td>{{ formatTime(h.updated_at || h.created_at) }}</td>
             <td>{{ h.dataset_name || '未记录' }}</td>
             <td>{{ modeLabel(h.mode) }}</td>
@@ -578,6 +585,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20260920_audit"></script>
+  <script type="module" src="/static/app.js?v=20260920_comparison"></script>
 </body>
 </html>

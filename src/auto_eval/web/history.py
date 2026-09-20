@@ -584,6 +584,10 @@ def _aligned_results(snapshot: dict, results: list[dict]) -> list[dict]:
 
     by_index: dict[int, dict] = {}
     by_item_id: dict[str, dict] = {}
+    item_id_counts: dict[str, int] = {}
+    for index, item in enumerate(items):
+        item_id = str(item.get("id") or f"q{index}")
+        item_id_counts[item_id] = item_id_counts.get(item_id, 0) + 1
     for result in results:
         try:
             index = int(result.get("index"))
@@ -592,7 +596,7 @@ def _aligned_results(snapshot: dict, results: list[dict]) -> list[dict]:
         if index >= 0:
             by_index[index] = result
         item_id = str(result.get("item_id") or "").strip()
-        if item_id:
+        if item_id and item_id_counts.get(item_id) == 1:
             by_item_id[item_id] = result
 
     aligned: list[dict] = []

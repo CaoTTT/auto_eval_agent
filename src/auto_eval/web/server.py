@@ -1199,6 +1199,19 @@ async def api_prepare_xlsx(task_id: str):
     return XLSX_EXPORTS.create(task_id)
 
 
+class ComparisonExportReq(BaseModel):
+    task_ids: list[str] = Field(min_length=2, max_length=2)
+
+
+@app.post("/api/exports/comparison", status_code=202)
+async def api_prepare_comparison_xlsx(req: ComparisonExportReq):
+    if any(not task_id.strip() for task_id in req.task_ids):
+        raise HTTPException(422, "任务ID不能为空")
+    if req.task_ids[0] == req.task_ids[1]:
+        raise HTTPException(422, "请选择两个不同的任务")
+    return XLSX_EXPORTS.create(req.task_ids[0], req.task_ids[1])
+
+
 @app.get("/api/exports/{export_id}")
 async def api_xlsx_status(export_id: str):
     return XLSX_EXPORTS.view(export_id)

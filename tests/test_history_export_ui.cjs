@@ -70,6 +70,16 @@ async function tick(){for(let n=0;n<8;n++)await Promise.resolve();}
   assert.equal(app.loadingTaskId.value,'');
   assert.equal(app.taskId.value,'D');
   assert.match(app.runError.value,/network failed/);
+  app.comparisonTaskIds.value = ['A', 'B'];
+  const comparison = app.exportComparisonXlsx();
+  const request = requests.find(r => r.url === '/api/exports/comparison');
+  assert.deepEqual(JSON.parse(request.options.body).task_ids, ['A', 'B']);
+  app.comparisonTaskIds.value = ['C', 'D'];
+  respond('/api/exports/comparison', {export_id:'pair', status:'ready', filename:'对比.xlsx'});
+  await comparison;
+  assert.equal(app.exportDownloadUrl.value, '/api/exports/pair/download');
+  assert.match(app.exportMessage.value, /A \/ B/);
+  assert.equal(app.taskId.value, 'D');
   assert.equal(requests.length,0);
   console.log('History switching, explicit-task export, polling, errors and retry passed');
 })().catch(e=>{console.error(e);process.exitCode=1;});
