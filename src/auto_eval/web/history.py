@@ -30,6 +30,7 @@ from ..judges.compare_protocols import (
 from ..paths import PROJECT_ROOT, RUNS_DIR
 from .compare_statistics import SHEET_NAME as COMPARE_STATISTICS_SHEET, build_compare_statistics
 from .compare_statistics_xlsx import statistics_cell_styles, statistics_sheet_xml
+from .export_links import ExportLink, screenshot_links
 from .xlsx_images import CELL_IMAGE_REL, CellImage, OriginalImageError, WpsCellImages
 
 
@@ -552,6 +553,10 @@ def export_rows(snapshot: dict) -> dict[str, list[dict]]:
         tables = conversation_statistics(snapshot, aligned_results)
         rows["多轮会话统计"] = [{"统计区块": table.title, **dict(zip(table.headers, row))}
             for table in tables for row in table.rows]
+    for index, item in enumerate(items):
+        links = screenshot_links(snapshot, item, index)
+        dataset_rows[index].update(links)
+        result_rows[index].update(links)
     return rows
 
 
@@ -757,6 +762,7 @@ _QUERY_EXPORT_FIELDS = {
     "题型", "提问图片", "提问图片元数据", "输入指纹", "输入图片原图",
     "query_image_meta", "input_manifest_sha256", "error",
     "产品1原图", "产品2原图", "产品3原图",
+    *(f"产品{n}长截图查看链接" for n in (1, 2, 3)),
 }
 
 
@@ -1639,6 +1645,14 @@ def _write_xlsx(snapshot: dict, destination) -> None:
                 escape_text=_xlsx_text, column_name=_col,
             ) if name == COMPARE_STATISTICS_SHEET else _sheet_xml(rows)
             zf.writestr(f"xl/worksheets/sheet{i}.xml", xml)
+            links = _sheet_hyperlinks(rows)
+            if links:
+                relationships = ''.join(
+                    f'<Relationship Id="link{n}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="{escape(url, quote=True)}" TargetMode="External"/>'
+                    for n, (_, url) in enumerate(links, 1))
+                zf.writestr(f"xl/worksheets/_rels/sheet{i}.xml.rels",
+                    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                    + relationships + '</Relationships>')
 
 
 def _insert_query_image_column(rows: list[dict], images: list[CellImage | str], query_header: str) -> list[dict]:
@@ -1786,6 +1800,14 @@ def _styles_xml(picture_sheet: bool = False, *, statistics: bool = False) -> str
     )
 
 
+def _sheet_hyperlinks(rows: list[dict]) -> list[tuple[str, str]]:
+    headers = _headers(rows)
+    return [(f"{_col(column)}{number}", str(row[header]))
+            for number, row in enumerate(rows, 2)
+            for column, header in enumerate(headers, 1)
+            if isinstance(row.get(header), ExportLink)]
+
+
 def _sheet_xml(rows: list[dict], *, picture_sheet: bool = False) -> str:
     headers = _headers(rows)
     table = [headers] + [[row.get(h) for h in headers] for row in rows]
@@ -1824,10 +1846,15 @@ def _sheet_xml(rows: list[dict], *, picture_sheet: bool = False) -> str:
         '<selection pane="bottomRight" activeCell="D2" sqref="D2"/>'
         '</sheetView></sheetViews>'
     ) if picture_sheet else ""
+    links = _sheet_hyperlinks(rows)
+    hyperlinks = ('<hyperlinks>' + ''.join(
+        f'<hyperlink ref="{ref}" r:id="link{n}"/>' for n, (ref, _) in enumerate(links, 1)
+    ) + '</hyperlinks>') if links else ''
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'
-        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
-        f"{views}<cols>{cols}</cols><sheetData>{''.join(rows_xml)}</sheetData>"
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        f"{views}<cols>{cols}</cols><sheetData>{''.join(rows_xml)}</sheetData>{hyperlinks}"
         "</worksheet>"
     )
 

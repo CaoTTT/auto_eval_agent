@@ -16,7 +16,7 @@ from urllib.parse import quote
 
 from dotenv import load_dotenv
 from PIL import Image
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import Request, FastAPI, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -1195,8 +1195,8 @@ async def api_history_note(task_id: str, req: HistoryNoteReq):
 
 
 @app.post("/api/eval/{task_id}/exports", status_code=202)
-async def api_prepare_xlsx(task_id: str):
-    return XLSX_EXPORTS.create(task_id)
+async def api_prepare_xlsx(task_id: str, request: Request):
+    return XLSX_EXPORTS.create(task_id, base_url=str(request.base_url))
 
 
 class ComparisonExportReq(BaseModel):
@@ -1204,12 +1204,12 @@ class ComparisonExportReq(BaseModel):
 
 
 @app.post("/api/exports/comparison", status_code=202)
-async def api_prepare_comparison_xlsx(req: ComparisonExportReq):
+async def api_prepare_comparison_xlsx(req: ComparisonExportReq, request: Request):
     if any(not task_id.strip() for task_id in req.task_ids):
         raise HTTPException(422, "任务ID不能为空")
     if req.task_ids[0] == req.task_ids[1]:
         raise HTTPException(422, "请选择两个不同的任务")
-    return XLSX_EXPORTS.create(req.task_ids[0], req.task_ids[1])
+    return XLSX_EXPORTS.create(req.task_ids[0], req.task_ids[1], base_url=str(request.base_url))
 
 
 @app.get("/api/exports/{export_id}")
@@ -1230,11 +1230,12 @@ async def api_xlsx_download(export_id: str):
 
 
 @app.get("/api/eval/{task_id}/export")
-async def api_export(task_id: str, format: str = "json"):
+async def api_export(task_id: str, format: str = "json", request: Request = None):
     task = await peek_task_async(task_id)
     if task is None:
         raise HTTPException(404, "task not found")
     data = copy.deepcopy(task_to_snapshot(task))
+    data["export_base_url"] = str(request.base_url) if request else ""
     return await asyncio.to_thread(_export_snapshot, task_id, format, data)
 
 
@@ -1382,7 +1383,7 @@ def api_item_screenshot(task_id: str, item_index: int, product_no: int, download
     meta = item.get(f"screenshot_meta{product_no}") or {}
     raw = meta.get("original_path") or item.get(f"screenshot{product_no}") or source.get(f"screenshot{product_no}")
     count = item.get("product_count") or (3 if item.get("screenshot3") or source.get("screenshot3") else 2)
-    if not raw or product_no > count or item.get("evidence_mode") == "video_frames":
+    if not raw or product_no > count:
         raise HTTPException(404, "该产品没有回答长截图")
     path = Path(raw).expanduser()
     path = (path if path.is_absolute() else BASE_DIR / path).resolve()

@@ -69,11 +69,11 @@ class XlsxExports:
         return {"export_id": key, "task_id": job["task_id"], "status": job["status"],
                 "error": job.get("error", ""), "filename": job.get("filename", "")}
 
-    def create(self, task_id: str, compare_task_id: str | None = None) -> dict:
+    def create(self, task_id: str, compare_task_id: str | None = None, *, base_url: str = "") -> dict:
         self.cleanup()
         active = [job for job in self.jobs.values() if job["status"] in {"queued", "generating"}]
         for key, job in self.jobs.items():
-            if job["task_id"] == task_id and job.get("compare_task_id") == compare_task_id and job["status"] in {"queued", "generating"}:
+            if job["task_id"] == task_id and job.get("compare_task_id") == compare_task_id and job.get("base_url", "") == base_url and job["status"] in {"queued", "generating"}:
                 return self.view(key)
         if len(active) >= self.capacity:
             raise HTTPException(429, "导出队列已满，请稍后重试")
@@ -82,7 +82,7 @@ class XlsxExports:
         for key in completed[:-15]:
             self.remove(key)
         key = uuid.uuid4().hex
-        self.jobs[key] = {"task_id": task_id, "compare_task_id": compare_task_id, "status": "queued", "path": self.directory / f".xlsx-{key}.xlsx"}
+        self.jobs[key] = {"task_id": task_id, "compare_task_id": compare_task_id, "base_url": base_url, "status": "queued", "path": self.directory / f".xlsx-{key}.xlsx"}
         worker = asyncio.create_task(self._generate(key))
         self.workers.add(worker)
         worker.add_done_callback(self.workers.discard)
@@ -98,12 +98,14 @@ class XlsxExports:
                     raise ValueError("任务不存在或已删除")
                 # 快照在开始生成时固定；运行中的原任务可以继续更新。
                 snapshot = copy.deepcopy(task_to_snapshot(task))
+                snapshot["export_base_url"] = job.get("base_url", "")
                 job["filename"] = xlsx_download_name(snapshot.get("dataset_name", ""), job["task_id"])
                 if job.get("compare_task_id"):
                     other = await peek_task_async(job["compare_task_id"])
                     if other is None:
                         raise ValueError("对比任务不存在或已删除")
                     other_snapshot = copy.deepcopy(task_to_snapshot(other))
+                    other_snapshot["export_base_url"] = job.get("base_url", "")
                     job["filename"] = job["filename"].replace("_模型测评结果.xlsx", "_任务对比结果.xlsx")
                     await asyncio.to_thread(self._write_comparison, snapshot, other_snapshot, job["path"])
                 else:

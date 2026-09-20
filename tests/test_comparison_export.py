@@ -103,7 +103,7 @@ async def test_background_comparison_api_and_validation(tmp_path, monkeypatch):
         response = await client.post("/api/exports/comparison", json={"task_ids": ["a", "b"]})
         assert response.status_code == 202
         key = response.json()["export_id"]
-        assert manager.create("a", "b")["export_id"] == key
+        assert manager.create("a", "b", base_url="http://test/")["export_id"] == key
         assert manager.create("a")["export_id"] != key
         await asyncio.gather(*list(manager.workers))
         assert manager.view(key)["status"] == "ready"

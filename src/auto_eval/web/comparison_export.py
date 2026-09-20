@@ -7,6 +7,7 @@ from html import unescape
 from itertools import chain
 from pathlib import Path
 
+from .export_links import ExportLink
 from .history import (
     _aligned_results, _results_with_identity, _source_data_for_item,
     _headers, _xlsx_text, export_rows,
@@ -89,11 +90,15 @@ def write_comparison_xlsx(left: dict, right: dict, destination: Path) -> None:
         for row_number, values in enumerate(values_by_row, 1):
             # All strings are literal, including formulas supplied in dataset cells.
             for column_number, value in enumerate(values, 1):
+                hyperlink = str(value) if isinstance(value, ExportLink) else None
                 value = value if isinstance(value, (int, float, bool)) else unescape(_xlsx_text(value))
                 cell = sheet.cell(row_number, column_number, value)
                 if isinstance(value, str):
                     cell.data_type = "s"
                 cell.alignment = alignment
+                if hyperlink:
+                    cell.hyperlink = hyperlink
+                    cell.style = "Hyperlink"
         for cell in sheet[1]:
             cell.font = Font(bold=True, color="FFFFFF")
             cell.fill = PatternFill("solid", fgColor="305496")
