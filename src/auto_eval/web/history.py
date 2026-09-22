@@ -1567,20 +1567,20 @@ def _original_screenshot_rows(snapshot: dict, images: WpsCellImages) -> list[dic
     return rows
 
 
-def build_xlsx(snapshot: dict) -> bytes:
-    """原图只嵌入逐题结果，保留 WPS 单元格图片和原始字节。"""
+def build_xlsx(snapshot: dict, *, include_images: bool = True) -> bytes:
+    """可选嵌入逐题原图；默认保留 WPS 单元格图片和原始字节。"""
     buf = BytesIO()
-    write_xlsx(snapshot, buf)
+    write_xlsx(snapshot, buf, include_images=include_images)
     return buf.getvalue()
 
 
-def write_xlsx(snapshot: dict, destination) -> None:
+def write_xlsx(snapshot: dict, destination, *, include_images: bool = True) -> None:
     """直接写入文件/二进制流，线上下载不把完整工作簿缓存在内存中。"""
     with _xlsx_slot:
-        _write_xlsx(snapshot, destination)
+        _write_xlsx(snapshot, destination, include_images=include_images)
 
 
-def _write_xlsx(snapshot: dict, destination) -> None:
+def _write_xlsx(snapshot: dict, destination, *, include_images: bool = True) -> None:
     sheets = {name: rows for name, rows in export_rows(snapshot).items() if rows}
     statistics = (
         build_compare_statistics(snapshot, _aligned_results(snapshot, _results_with_identity(snapshot)))
@@ -1605,8 +1605,10 @@ def _write_xlsx(snapshot: dict, destination) -> None:
 
     with zipfile.ZipFile(destination, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         images = WpsCellImages(zf)
-        screenshot_rows = _original_screenshot_rows(snapshot, images)
-        query_rows = _query_image_rows(snapshot)
+        # Skip image loading/embedding entirely; textual evidence and URLs stay
+        # in export_rows, including when the original files are unavailable.
+        screenshot_rows = _original_screenshot_rows(snapshot, images) if include_images else []
+        query_rows = _query_image_rows(snapshot) if include_images else []
         query_cells: list[CellImage | str] = [""] * len(snapshot.get("items", []))
         extra_query_cells = {}
         query_counts = {}

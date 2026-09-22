@@ -122,10 +122,10 @@ async def test_export_other_task_while_generation_is_busy(tmp_path, monkeypatch,
     monkeypatch.setattr(server, "peek_task", lambda key, **kw: {"A": running, "B": historical}.get(key))
     release, entered = threading.Event(), threading.Event()
     original = manager._write
-    def write(snapshot, path):
+    def write(snapshot, path, **kwargs):
         entered.set()
         assert release.wait(3)
-        original(snapshot, path)
+        original(snapshot, path, **kwargs)
     monkeypatch.setattr(manager, "_write", write)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app), base_url="http://test") as client:
         try:
@@ -166,7 +166,7 @@ async def test_export_queue_capacity_failure_and_cleanup(tmp_path, monkeypatch):
     async def peek(_):
         return task
     monkeypatch.setattr(exports, "peek_task_async", peek)
-    def fail(snapshot, path):
+    def fail(snapshot, path, **kwargs):
         path.write_bytes(b"partial")
         raise OSError("disk full")
     monkeypatch.setattr(manager, "_write", fail)

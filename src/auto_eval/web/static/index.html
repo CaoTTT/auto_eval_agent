@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <title>auto_eval 评估台</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260920_comparison">
+  <link rel="stylesheet" href="/static/style.css?v=20260922_export_images">
   <style>
     .op-cards { display:flex; flex-direction:column; gap:12px; }
     .op-card { border:1px solid #e2e8f0; border-radius:8px; padding:12px; background:#fafbfc; }
@@ -86,6 +86,8 @@
     </div>
     <p class="hint">选择同一测试数据的两个任务，可跨页选择；先选为 A，后选为 B。同一评分维度并排展示，差异标黄。输入内容和顺序须一致。</p>
     <p v-if="comparisonTaskIds.length" class="hint">{{ comparisonTaskIds.map((id, i) => `${i === 0 ? 'A' : 'B'}：${id}`).join('；') }}</p>
+    <label class="export-image-option"><input type="checkbox" v-model="exportIncludeImages" :disabled="!!exportingTaskId">单任务 Excel 包含原图（文件较大）</label>
+    <p class="hint">取消勾选可加快导出和下载，保留评分、统计及原图查看链接；合并对比 Excel 始终不嵌入原图。</p>
     <p v-if="historyError" class="err" role="alert">{{ historyError }}</p>
     <p v-if="loadingHistory" class="hint" role="status">正在读取历史记录…</p>
     <div class="table-scroll" v-if="historyItems.length" :aria-busy="loadingHistory">
@@ -400,7 +402,7 @@
     <h2>③ 结果
       <button @click="exportCsv" :disabled="!taskId || !!loadingTaskId">导出 CSV</button>
       <button @click="exportJson" :disabled="!taskId || !!loadingTaskId">导出 JSON</button>
-      <button @click="exportXlsx()" :disabled="!taskId || !!loadingTaskId || !!exportingTaskId">{{ exportingTaskId === taskId ? '正在生成 Excel…' : '导出 XLSX（完整）' }}</button>
+      <button @click="exportXlsx()" :disabled="!taskId || !!loadingTaskId || !!exportingTaskId">{{ exportingTaskId === taskId ? '正在生成 Excel…' : (exportIncludeImages ? '导出 XLSX（含原图）' : '导出 XLSX（不含原图）') }}</button>
       <button v-if="isVideoMode" @click="exportFrames" :disabled="!taskId || !!loadingTaskId">导出视觉证据 ZIP</button>
       <a v-if="taskId && items.some(it=>it.evidence_mode==='long_screenshot' || it.screenshot_meta1)" :href="'/api/eval/'+encodeURIComponent(taskId)+'/export?format=screenshot_evidence'">下载长截图输入证据 ZIP</a>
       <span v-if="loadingTaskId">正在加载任务，请稍候…</span>
@@ -412,6 +414,8 @@
       </button>
       <span v-if="retryStatusLabel(repairStatus)" class="running">{{ retryStatusLabel(repairStatus) }}</span>
     </h2>
+    <label class="export-image-option"><input type="checkbox" v-model="exportIncludeImages" :disabled="!!exportingTaskId">单任务 Excel 包含原图（文件较大）</label>
+    <p class="hint">取消勾选后不嵌入回答截图和提问图片，评分、统计、图片明细及原图查看链接仍保留。</p>
     <human-compare-panel v-if="mode==='compare' && taskId && !loadingTaskId" :key="taskId" :task-id="taskId"></human-compare-panel>
     <details v-for="group in conversationGroups" :key="group.id" class="query-image-panel">
       <summary>会话 {{group.id}} · {{group.turns.length}} 轮结果</summary>
@@ -585,6 +589,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20260920_comparison"></script>
+  <script type="module" src="/static/app.js?v=20260922_export_images"></script>
 </body>
 </html>

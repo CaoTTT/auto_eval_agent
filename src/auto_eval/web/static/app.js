@@ -195,6 +195,7 @@ createApp({
     const loadingHistory = ref(false);
     const loadingTaskId = ref("");
     const exportingTaskId = ref("");
+    const exportIncludeImages = ref(true);
     const exportMessage = ref("");
     const exportError = ref("");
     const exportDownloadUrl = ref("");
@@ -1904,18 +1905,20 @@ createApp({
       if (exportingTaskId.value || (!requestedId && !comparisonIds && loadingTaskId.value)) return;
       const id = comparisonIds ? comparisonIds.join(" / ") : requestedId || taskId.value;
       if (!id) return;
+      const includeImages = !comparisonIds && exportIncludeImages.value;
+      const exportLabel = `任务 ${id}（${includeImages ? '含原图' : '不含原图'}）`;
       exportingTaskId.value = id;
       exportError.value = "";
       exportDownloadUrl.value = "";
-      exportMessage.value = `正在为任务 ${id} 准备 Excel…`;
+      exportMessage.value = `正在为${exportLabel}准备 Excel…`;
       try {
         const response = comparisonIds
           ? await fetch("/api/exports/comparison", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({task_ids: comparisonIds})})
-          : await fetch(`/api/eval/${encodeURIComponent(id)}/exports`, {method: "POST"});
+          : await fetch(`/api/eval/${encodeURIComponent(id)}/exports?include_images=${includeImages}`, {method: "POST"});
         let data = await response.json();
         if (!response.ok) throw new Error(data.detail || "导出请求失败");
         while (!disposed && ["queued", "generating"].includes(data.status)) {
-          exportMessage.value = `任务 ${id}：${data.status === 'queued' ? '等待生成' : '正在生成 Excel'}…`;
+          exportMessage.value = `${exportLabel}：${data.status === 'queued' ? '等待生成' : '正在生成 Excel'}…`;
           await new Promise(resolve => window.setTimeout(resolve, 1000));
           if (disposed) return;
           const status = await fetch(`/api/exports/${encodeURIComponent(data.export_id)}`);
@@ -1925,7 +1928,7 @@ createApp({
         if (disposed) return;
         if (data.status !== "ready") throw new Error(data.error || "生成 Excel 失败");
         exportDownloadUrl.value = `/api/exports/${encodeURIComponent(data.export_id)}/download`;
-        exportMessage.value = `任务 ${id}：Excel 已生成。若未开始下载，请点击下方链接（30 分钟内有效）。`;
+        exportMessage.value = `${exportLabel}：Excel 已生成。若未开始下载，请点击下方链接（30 分钟内有效）。`;
         // Use a same-origin download link: no popup and no full-file blob in memory.
         const link = document.createElement("a");
         link.href = exportDownloadUrl.value;
@@ -1942,7 +1945,7 @@ createApp({
         }
       } catch (error) {
         exportMessage.value = "";
-        exportError.value = `任务 ${id} 导出失败：${error?.message || "网络错误"}。可再次点击导出重试。`;
+        exportError.value = `${exportLabel}导出失败：${error?.message || "网络错误"}。可再次点击导出重试。`;
       } finally {
         exportingTaskId.value = "";
       }
@@ -2008,7 +2011,7 @@ createApp({
       itemProgress, progressEvents, expandedProgressLogs, pagedProgressRows, progressStages,
       comparisonTaskIds, exportComparisonXlsx, historyItems, historyNoteDrafts, historyNoteEditing, loadingHistory, pageSize,
       historyPage, historyTotal, historyPageSize, historyPageCount, historyError,
-      loadingTaskId, exportingTaskId, exportMessage, exportError, exportDownloadUrl,
+      loadingTaskId, exportingTaskId, exportIncludeImages, exportMessage, exportError, exportDownloadUrl,
       opPage, opPageSize, opPageCount, opJumpPage,
       progressPage, progressPageCount, progressJumpPage,
       resultJumpPage,

@@ -17,12 +17,13 @@ from .tasks import peek_task_async
 logger = logging.getLogger(__name__)
 
 
-def xlsx_download_name(dataset_name: str, task_id: str) -> str:
+def xlsx_download_name(dataset_name: str, task_id: str, *, include_images: bool = True) -> str:
     """Use the uploaded dataset basename on both Windows and Linux servers."""
     basename = str(dataset_name or "").replace("\\", "/").rsplit("/", 1)[-1]
     stem = Path(basename).stem if basename else str(task_id or "测评数据")
     stem = re.sub(r'[<>:"/\\|?*\x00-\x1f\ud800-\udfff\ufffe\uffff]', "_", stem).strip(" .")
-    return f"{stem or '测评数据'}_模型测评结果.xlsx"
+    suffix = "" if include_images else "_不含原图"
+    return f"{stem or '测评数据'}_模型测评结果{suffix}.xlsx"
 
 
 class XlsxExports:
@@ -67,13 +68,19 @@ class XlsxExports:
         if not job:
             raise HTTPException(404, "导出记录已过期，请重新导出")
         return {"export_id": key, "task_id": job["task_id"], "status": job["status"],
+                "include_images": job["include_images"],
                 "error": job.get("error", ""), "filename": job.get("filename", "")}
 
-    def create(self, task_id: str, compare_task_id: str | None = None, *, base_url: str = "") -> dict:
+    def create(self, task_id: str, compare_task_id: str | None = None, *, base_url: str = "",
+               include_images: bool = True) -> dict:
+        # Paired exports contain text and links only.
+        include_images = include_images if compare_task_id is None else False
         self.cleanup()
         active = [job for job in self.jobs.values() if job["status"] in {"queued", "generating"}]
         for key, job in self.jobs.items():
-            if job["task_id"] == task_id and job.get("compare_task_id") == compare_task_id and job.get("base_url", "") == base_url and job["status"] in {"queued", "generating"}:
+            if (job["task_id"] == task_id and job.get("compare_task_id") == compare_task_id
+                    and job.get("base_url", "") == base_url and job["include_images"] == include_images
+                    and job["status"] in {"queued", "generating"}):
                 return self.view(key)
         if len(active) >= self.capacity:
             raise HTTPException(429, "导出队列已满，请稍后重试")
@@ -82,7 +89,8 @@ class XlsxExports:
         for key in completed[:-15]:
             self.remove(key)
         key = uuid.uuid4().hex
-        self.jobs[key] = {"task_id": task_id, "compare_task_id": compare_task_id, "base_url": base_url, "status": "queued", "path": self.directory / f".xlsx-{key}.xlsx"}
+        self.jobs[key] = {"task_id": task_id, "compare_task_id": compare_task_id, "base_url": base_url,
+                          "include_images": include_images, "status": "queued", "path": self.directory / f".xlsx-{key}.xlsx"}
         worker = asyncio.create_task(self._generate(key))
         self.workers.add(worker)
         worker.add_done_callback(self.workers.discard)
@@ -109,7 +117,9 @@ class XlsxExports:
                     job["filename"] = job["filename"].replace("_模型测评结果.xlsx", "_任务对比结果.xlsx")
                     await asyncio.to_thread(self._write_comparison, snapshot, other_snapshot, job["path"])
                 else:
-                    await asyncio.to_thread(self._write, snapshot, job["path"])
+                    job["filename"] = xlsx_download_name(snapshot.get("dataset_name", ""), job["task_id"],
+                                                         include_images=job["include_images"])
+                    await asyncio.to_thread(self._write, snapshot, job["path"], include_images=job["include_images"])
                 job["status"] = "ready"
         except Exception as exc:
             logger.exception("XLSX 导出失败: task_id=%s", job["task_id"])
@@ -124,9 +134,9 @@ class XlsxExports:
         finally:
             job["finished"] = time.monotonic()
 
-    def _write(self, snapshot: dict, path: Path) -> None:
+    def _write(self, snapshot: dict, path: Path, *, include_images: bool = True) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
-        write_xlsx(snapshot, path)
+        write_xlsx(snapshot, path, include_images=include_images)
 
     def _write_comparison(self, snapshot: dict, other: dict, path: Path) -> None:
         from .comparison_export import write_comparison_xlsx

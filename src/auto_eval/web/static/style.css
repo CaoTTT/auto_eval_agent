@@ -425,3 +425,6 @@ tr.result-error td, tr.result-error-detail td { background: #fef2f2 !important; 
 .human-panel img { max-width: 600px; width: 100%; max-height: 600px; object-fit: contain; }.human-panel h4 { margin: 20px 0 10px; }
 .human-panel video { max-width: 600px; width: 100%; max-height: 600px; }
 @media(max-width: 700px) { .human-panel { padding: 10px; }.human-panel fieldset { padding: 10px; }.human-toolbar { align-items: stretch; } }
+
+.export-image-option { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; }
+.export-image-option input { width: auto; margin: 0; }

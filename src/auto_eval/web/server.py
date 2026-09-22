@@ -1195,8 +1195,8 @@ async def api_history_note(task_id: str, req: HistoryNoteReq):
 
 
 @app.post("/api/eval/{task_id}/exports", status_code=202)
-async def api_prepare_xlsx(task_id: str, request: Request):
-    return XLSX_EXPORTS.create(task_id, base_url=str(request.base_url))
+async def api_prepare_xlsx(task_id: str, request: Request, include_images: bool = True):
+    return XLSX_EXPORTS.create(task_id, base_url=str(request.base_url), include_images=include_images)
 
 
 class ComparisonExportReq(BaseModel):
@@ -1230,16 +1230,16 @@ async def api_xlsx_download(export_id: str):
 
 
 @app.get("/api/eval/{task_id}/export")
-async def api_export(task_id: str, format: str = "json", request: Request = None):
+async def api_export(task_id: str, format: str = "json", request: Request = None, include_images: bool = True):
     task = await peek_task_async(task_id)
     if task is None:
         raise HTTPException(404, "task not found")
     data = copy.deepcopy(task_to_snapshot(task))
     data["export_base_url"] = str(request.base_url) if request else ""
-    return await asyncio.to_thread(_export_snapshot, task_id, format, data)
+    return await asyncio.to_thread(_export_snapshot, task_id, format, data, include_images=include_images)
 
 
-def _export_snapshot(task_id: str, format: str, data: dict):
+def _export_snapshot(task_id: str, format: str, data: dict, *, include_images: bool = True):
 
     if format == "json":
         return JSONResponse(snapshot_payload(data))
@@ -1253,14 +1253,14 @@ def _export_snapshot(task_id: str, format: str, data: dict):
         export_dir.mkdir(parents=True, exist_ok=True)
         archive_path = export_dir / f".xlsx-{uuid.uuid4().hex}.xlsx"
         try:
-            write_xlsx(data, archive_path)
+            write_xlsx(data, archive_path, include_images=include_images)
         except Exception:
             archive_path.unlink(missing_ok=True)
             raise
         return FileResponse(
             archive_path,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            filename=xlsx_download_name(data.get("dataset_name", ""), task_id),
+            filename=xlsx_download_name(data.get("dataset_name", ""), task_id, include_images=include_images),
             background=BackgroundTask(archive_path.unlink, missing_ok=True),
         )
 

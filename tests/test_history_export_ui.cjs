@@ -40,7 +40,7 @@ async function tick(){for(let n=0;n<8;n++)await Promise.resolve();}
   assert.equal(app.exportingTaskId.value,'B');
   const d=app.loadHistoryTask('D');
   respond('/api/history/D',snapshot('D')); await d;
-  respond('/api/eval/B/exports',{export_id:'fixed-B',status:'queued'}); await tick();
+  respond('/api/eval/B/exports?include_images=true',{export_id:'fixed-B',status:'queued'}); await tick();
   respond('/api/exports/fixed-B',{export_id:'fixed-B',status:'generating'}); await tick();
   respond('/api/exports/fixed-B',{export_id:'fixed-B',status:'ready',filename:'测试数据B_模型测评结果.xlsx'}); await download;
   assert.equal(app.taskId.value,'D','exporting B must not switch visible task');
@@ -52,24 +52,37 @@ async function tick(){for(let n=0;n<8;n++)await Promise.resolve();}
 
   blockDownload=true;
   const blocked=app.exportXlsx('B');
-  respond('/api/eval/B/exports',{export_id:'blocked',status:'ready'}); await blocked;
+  respond('/api/eval/B/exports?include_images=true',{export_id:'blocked',status:'ready'}); await blocked;
   assert.equal(app.exportDownloadUrl.value,'/api/exports/blocked/download');
   assert.equal(app.exportError.value,'','a blocked automatic download must retain the ready state');
   assert.equal(removedLinks,2);
   blockDownload=false;
 
   const failed=app.exportXlsx('B');
-  respond('/api/eval/B/exports',{detail:'queue full'},false); await failed;
+  respond('/api/eval/B/exports?include_images=true',{detail:'queue full'},false); await failed;
   assert.match(app.exportError.value,/queue full/);
   assert.equal(app.exportDownloadUrl.value,'');
   const retry=app.exportXlsx('B');
-  respond('/api/eval/B/exports',{export_id:'retry',status:'error',error:'disk full'}); await retry;
+  respond('/api/eval/B/exports?include_images=true',{export_id:'retry',status:'error',error:'disk full'}); await retry;
   assert.match(app.exportError.value,/disk full/);
   const loadError=app.loadHistoryTask('gone');
   requests.shift().reject(Error('network failed')); await loadError;
   assert.equal(app.loadingTaskId.value,'');
   assert.equal(app.taskId.value,'D');
   assert.match(app.runError.value,/network failed/);
+  assert.equal(app.exportIncludeImages.value, true);
+  app.exportIncludeImages.value = false;
+  const small = app.exportXlsx();
+  assert.ok(requests.some(r => r.url === '/api/eval/D/exports?include_images=false'));
+  app.exportIncludeImages.value = true; // Changing the UI does not change an in-flight export.
+  respond('/api/eval/D/exports?include_images=false', {export_id:'small',status:'ready',filename:'数据_不含原图.xlsx'});
+  await small;
+  assert.match(app.exportMessage.value, /不含原图/);
+  assert.equal(downloads.at(-1).name, '数据_不含原图.xlsx');
+  app.exportIncludeImages.value = false;
+  const smallHistory = app.exportXlsx('B');
+  respond('/api/eval/B/exports?include_images=false', {export_id:'small-history',status:'ready'});
+  await smallHistory;
   app.comparisonTaskIds.value = ['A', 'B'];
   const comparison = app.exportComparisonXlsx();
   const request = requests.find(r => r.url === '/api/exports/comparison');
