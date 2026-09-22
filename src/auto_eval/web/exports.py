@@ -10,11 +10,29 @@ import uuid
 from pathlib import Path
 
 from fastapi import HTTPException
+from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 
 from .history import task_to_snapshot, write_xlsx
 from .tasks import peek_task_async
 
 logger = logging.getLogger(__name__)
+
+
+class _DownloadResponse(FileResponse):
+    """Always release the file lease, including on disconnect/send failure."""
+
+    def __init__(self, path: Path, *, filename: str, release):
+        super().__init__(path, filename=filename,
+                         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                         background=BackgroundTask(release))
+        self.release = release
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await self.release()
 
 
 def xlsx_download_name(dataset_name: str, task_id: str, *, include_images: bool = True) -> str:
@@ -35,6 +53,7 @@ class XlsxExports:
         self.workers: set[asyncio.Task] = set()
         self.slot = asyncio.Semaphore(1)
         self.last_cleanup = 0.0
+        self.closing = False
 
     def cleanup(self) -> None:
         for key, job in list(self.jobs.items()):
@@ -54,7 +73,7 @@ class XlsxExports:
 
     def remove(self, key: str) -> None:
         job = self.jobs.get(key)
-        if job:
+        if job and not job.get("downloads") and not job.get("waiters"):
             try:
                 job["path"].unlink(missing_ok=True)
             except OSError:
@@ -67,12 +86,48 @@ class XlsxExports:
         job = self.jobs.get(key)
         if not job:
             raise HTTPException(404, "导出记录已过期，请重新导出")
+        queued = [key for key, value in self.jobs.items() if value["status"] == "queued"]
         return {"export_id": key, "task_id": job["task_id"], "status": job["status"],
+                "queue_position": queued.index(key) + 1 if job["status"] == "queued" else 0,
                 "include_images": job["include_images"],
                 "error": job.get("error", ""), "filename": job.get("filename", "")}
 
+    def download(self, key: str) -> FileResponse:
+        state = self.view(key)
+        if state["status"] != "ready":
+            raise HTTPException(409, state.get("error") or "Excel 尚未生成完成")
+        job = self.jobs[key]
+        job["downloads"] += 1
+        released = False
+
+        async def release():
+            nonlocal released
+            if released:
+                return
+            released = True
+            job["downloads"] -= 1
+            if self.closing or time.monotonic() - job["finished"] > self.ttl:
+                self.remove(key)
+
+        return _DownloadResponse(job["path"], filename=state["filename"], release=release)
+
+    async def wait_for_download(self, key: str) -> FileResponse:
+        """Legacy direct downloads wait asynchronously on the same bounded queue."""
+        job = self.jobs[key]
+        job["waiters"] += 1
+        try:
+            # Cancelling one HTTP request cannot cancel the shared generation.
+            await job["done"].wait()
+            return self.download(key)
+        finally:
+            job["waiters"] -= 1
+            if self.closing:
+                self.remove(key)
+
     def create(self, task_id: str, compare_task_id: str | None = None, *, base_url: str = "",
-               include_images: bool = True) -> dict:
+               include_images: bool = False) -> dict:
+        if self.closing:
+            raise HTTPException(503, "服务正在关闭，请稍后重试")
         # Paired exports contain text and links only.
         include_images = include_images if compare_task_id is None else False
         self.cleanup()
@@ -83,14 +138,15 @@ class XlsxExports:
                     and job["status"] in {"queued", "generating"}):
                 return self.view(key)
         if len(active) >= self.capacity:
-            raise HTTPException(429, "导出队列已满，请稍后重试")
+            raise HTTPException(429, "导出队列已满，请稍后重试", headers={"Retry-After": "3"})
         # 限制未下载的完成记录和临时文件数量。
         completed = sorted((key for key in self.jobs if self.jobs[key]["status"] in {"ready", "error"}), key=lambda key: self.jobs[key]["finished"])
         for key in completed[:-15]:
             self.remove(key)
         key = uuid.uuid4().hex
         self.jobs[key] = {"task_id": task_id, "compare_task_id": compare_task_id, "base_url": base_url,
-                          "include_images": include_images, "status": "queued", "path": self.directory / f".xlsx-{key}.xlsx"}
+                          "include_images": include_images, "status": "queued", "path": self.directory / f".xlsx-{key}.xlsx",
+                          "downloads": 0, "waiters": 0, "done": asyncio.Event()}
         worker = asyncio.create_task(self._generate(key))
         self.workers.add(worker)
         worker.add_done_callback(self.workers.discard)
@@ -133,6 +189,7 @@ class XlsxExports:
                 job["error"] = str(exc)
         finally:
             job["finished"] = time.monotonic()
+            job["done"].set()
 
     def _write(self, snapshot: dict, path: Path, *, include_images: bool = True) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -145,6 +202,7 @@ class XlsxExports:
 
     async def close(self) -> None:
         # 不取消正在写文件的线程；先结束生成，再清理文件。
+        self.closing = True
         if self.workers:
             await asyncio.gather(*list(self.workers), return_exceptions=True)
         for key in list(self.jobs):

@@ -129,14 +129,14 @@ async def test_export_other_task_while_generation_is_busy(tmp_path, monkeypatch,
     monkeypatch.setattr(manager, "_write", write)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app), base_url="http://test") as client:
         try:
-            response = await client.post("/api/eval/B/exports")
+            response = await client.post("/api/eval/B/exports?include_images=true")
             assert response.status_code == 202
             key = response.json()["export_id"]
             await wait_until(entered.is_set)
             assert (await client.get("/api/history/A")).json()["status"] == "running"
             assert (await client.get(f"/api/exports/{key}")).json()["status"] == "generating"
             assert (await client.get(f"/api/exports/{key}/download")).status_code == 409
-            assert (await client.post("/api/eval/B/exports")).json()["export_id"] == key
+            assert (await client.post("/api/eval/B/exports?include_images=true")).json()["export_id"] == key
             # Export is a frozen view; subsequent result changes cannot corrupt it.
             historical.items[0]["query"] = "changed later"
             historical.dataset_name = "另一个文件.jsonl"

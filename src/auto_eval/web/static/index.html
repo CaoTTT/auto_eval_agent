@@ -86,8 +86,8 @@
     </div>
     <p class="hint">选择同一测试数据的两个任务，可跨页选择；先选为 A，后选为 B。同一评分维度并排展示，差异标黄。输入内容和顺序须一致。</p>
     <p v-if="comparisonTaskIds.length" class="hint">{{ comparisonTaskIds.map((id, i) => `${i === 0 ? 'A' : 'B'}：${id}`).join('；') }}</p>
-    <label class="export-image-option"><input type="checkbox" v-model="exportIncludeImages" :disabled="!!exportingTaskId">单任务 Excel 包含原图（文件较大）</label>
-    <p class="hint">取消勾选可加快导出和下载，保留评分、统计及原图查看链接；合并对比 Excel 始终不嵌入原图。</p>
+    <label class="export-image-option"><input type="checkbox" v-model="exportIncludeImages" :disabled="!!exportingTaskId">单任务 Excel 包含原图（可选，文件较大）</label>
+    <p class="hint">默认不含原图，保留评分、统计及原图查看链接；合并对比 Excel 始终不嵌入原图。</p>
     <p v-if="historyError" class="err" role="alert">{{ historyError }}</p>
     <p v-if="loadingHistory" class="hint" role="status">正在读取历史记录…</p>
     <div class="table-scroll" v-if="historyItems.length" :aria-busy="loadingHistory">
@@ -414,8 +414,8 @@
       </button>
       <span v-if="retryStatusLabel(repairStatus)" class="running">{{ retryStatusLabel(repairStatus) }}</span>
     </h2>
-    <label class="export-image-option"><input type="checkbox" v-model="exportIncludeImages" :disabled="!!exportingTaskId">单任务 Excel 包含原图（文件较大）</label>
-    <p class="hint">取消勾选后不嵌入回答截图和提问图片，评分、统计、图片明细及原图查看链接仍保留。</p>
+    <label class="export-image-option"><input type="checkbox" v-model="exportIncludeImages" :disabled="!!exportingTaskId">单任务 Excel 包含原图（可选，文件较大）</label>
+    <p class="hint">默认不嵌入回答截图和提问图片，评分、统计、图片明细及原图查看链接仍保留。</p>
     <human-compare-panel v-if="mode==='compare' && taskId && !loadingTaskId" :key="taskId" :task-id="taskId"></human-compare-panel>
     <details v-for="group in conversationGroups" :key="group.id" class="query-image-panel">
       <summary>会话 {{group.id}} · {{group.turns.length}} 轮结果</summary>
@@ -589,6 +589,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20260922_export_images"></script>
+  <script type="module" src="/static/app.js?v=20260922_export_concurrency"></script>
 </body>
 </html>

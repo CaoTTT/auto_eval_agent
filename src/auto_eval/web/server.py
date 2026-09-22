@@ -38,7 +38,6 @@ from ..conversation import normalize_turn, validate_conversations, is_conversati
 from ..preparation import run_preparation
 from .parse_input import Mode, normalize_compare_evidence, parse_csv, parse_jsonl, parse_text
 from .history import (
-    write_xlsx,
     delete_snapshot,
     export_rows,
     list_snapshots,
@@ -59,7 +58,7 @@ from .video_prepare import (
 from .runner import run_eval, run_retry, run_resume, finish_pause, run_update_batch, spawn_background, snapshot_item_progress
 from .execution_control import resume_indexes
 from .scheduler import EvalScheduler
-from .exports import XlsxExports, xlsx_download_name
+from .exports import XlsxExports
 from .dataset_media import DatasetMedia, file_hash
 from .human_baselines import HumanStore
 from .human_compare import HumanComparisons
@@ -1195,7 +1194,7 @@ async def api_history_note(task_id: str, req: HistoryNoteReq):
 
 
 @app.post("/api/eval/{task_id}/exports", status_code=202)
-async def api_prepare_xlsx(task_id: str, request: Request, include_images: bool = True):
+async def api_prepare_xlsx(task_id: str, request: Request, include_images: bool = False):
     return XLSX_EXPORTS.create(task_id, base_url=str(request.base_url), include_images=include_images)
 
 
@@ -1219,50 +1218,30 @@ async def api_xlsx_status(export_id: str):
 
 @app.get("/api/exports/{export_id}/download")
 async def api_xlsx_download(export_id: str):
-    state = XLSX_EXPORTS.view(export_id)
-    if state["status"] != "ready":
-        raise HTTPException(409, state.get("error") or "Excel 尚未生成完成")
-    return FileResponse(
-        XLSX_EXPORTS.jobs[export_id]["path"],
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        filename=state["filename"],
-    )
+    return XLSX_EXPORTS.download(export_id)
 
 
 @app.get("/api/eval/{task_id}/export")
-async def api_export(task_id: str, format: str = "json", request: Request = None, include_images: bool = True):
+async def api_export(task_id: str, format: str = "json", request: Request = None, include_images: bool = False):
+    if format == "xlsx":
+        state = XLSX_EXPORTS.create(task_id, base_url=str(request.base_url) if request else "",
+                                    include_images=include_images)
+        return await XLSX_EXPORTS.wait_for_download(state["export_id"])
     task = await peek_task_async(task_id)
     if task is None:
         raise HTTPException(404, "task not found")
     data = copy.deepcopy(task_to_snapshot(task))
     data["export_base_url"] = str(request.base_url) if request else ""
-    return await asyncio.to_thread(_export_snapshot, task_id, format, data, include_images=include_images)
+    return await asyncio.to_thread(_export_snapshot, task_id, format, data)
 
 
-def _export_snapshot(task_id: str, format: str, data: dict, *, include_images: bool = True):
+def _export_snapshot(task_id: str, format: str, data: dict):
 
     if format == "json":
         return JSONResponse(snapshot_payload(data))
 
     if format == "screenshot_evidence":
         return _screenshot_evidence_zip(task_id, data)
-
-    if format == "xlsx":
-        # 保留原 GET 下载入口，改为文件响应；新页面使用有状态的后台导出。
-        export_dir = RUNS_DIR / "exports"
-        export_dir.mkdir(parents=True, exist_ok=True)
-        archive_path = export_dir / f".xlsx-{uuid.uuid4().hex}.xlsx"
-        try:
-            write_xlsx(data, archive_path, include_images=include_images)
-        except Exception:
-            archive_path.unlink(missing_ok=True)
-            raise
-        return FileResponse(
-            archive_path,
-            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            filename=xlsx_download_name(data.get("dataset_name", ""), task_id, include_images=include_images),
-            background=BackgroundTask(archive_path.unlink, missing_ok=True),
-        )
 
     if format in {"frames", "frames_zip"}:
         export_dir = RUNS_DIR / "exports"

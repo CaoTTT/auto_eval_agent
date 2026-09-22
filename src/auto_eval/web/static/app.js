@@ -195,7 +195,7 @@ createApp({
     const loadingHistory = ref(false);
     const loadingTaskId = ref("");
     const exportingTaskId = ref("");
-    const exportIncludeImages = ref(true);
+    const exportIncludeImages = ref(false);
     const exportMessage = ref("");
     const exportError = ref("");
     const exportDownloadUrl = ref("");
@@ -1918,7 +1918,7 @@ createApp({
         let data = await response.json();
         if (!response.ok) throw new Error(data.detail || "导出请求失败");
         while (!disposed && ["queued", "generating"].includes(data.status)) {
-          exportMessage.value = `${exportLabel}：${data.status === 'queued' ? '等待生成' : '正在生成 Excel'}…`;
+          exportMessage.value = `${exportLabel}：${data.status === 'queued' ? `等待生成${data.queue_position ? `（排队第 ${data.queue_position} 位）` : ''}` : '正在生成 Excel'}…`;
           await new Promise(resolve => window.setTimeout(resolve, 1000));
           if (disposed) return;
           const status = await fetch(`/api/exports/${encodeURIComponent(data.export_id)}`);

@@ -25,6 +25,8 @@ function respond(url,data,ok=true){
 const snapshot=id=>({task_id:id,mode:'compare',status:'done',items:[{query:id}],results:[{index:0,error:'test'}]});
 async function tick(){for(let n=0;n<8;n++)await Promise.resolve();}
 (async()=>{
+  assert.equal(app.exportIncludeImages.value, false);
+  app.exportIncludeImages.value = true;
   app.taskId.value='A';
   const b=app.loadHistoryTask('B');
   assert.equal(app.loadingTaskId.value,'B');
@@ -40,7 +42,8 @@ async function tick(){for(let n=0;n<8;n++)await Promise.resolve();}
   assert.equal(app.exportingTaskId.value,'B');
   const d=app.loadHistoryTask('D');
   respond('/api/history/D',snapshot('D')); await d;
-  respond('/api/eval/B/exports?include_images=true',{export_id:'fixed-B',status:'queued'}); await tick();
+  respond('/api/eval/B/exports?include_images=true',{export_id:'fixed-B',status:'queued',queue_position:2}); await tick();
+  assert.match(app.exportMessage.value,/排队第 2 位/);
   respond('/api/exports/fixed-B',{export_id:'fixed-B',status:'generating'}); await tick();
   respond('/api/exports/fixed-B',{export_id:'fixed-B',status:'ready',filename:'测试数据B_模型测评结果.xlsx'}); await download;
   assert.equal(app.taskId.value,'D','exporting B must not switch visible task');

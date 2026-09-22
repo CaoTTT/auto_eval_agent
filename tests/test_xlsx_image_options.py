@@ -83,9 +83,9 @@ async def test_export_apis_freeze_image_option_and_deduplicate_separately(tmp_pa
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app), base_url="http://test") as client:
         await manager.slot.acquire()
         try:
-            full = (await client.post("/api/eval/a/exports")).json()
+            full = (await client.post("/api/eval/a/exports?include_images=true")).json()
             small = (await client.post("/api/eval/a/exports?include_images=false")).json()
-            repeat = (await client.post("/api/eval/a/exports?include_images=false")).json()
+            repeat = (await client.post("/api/eval/a/exports")).json()
             assert full["export_id"] != small["export_id"] == repeat["export_id"]
             assert full["include_images"] is True
             assert small["include_images"] is False
@@ -100,7 +100,7 @@ async def test_export_apis_freeze_image_option_and_deduplicate_separately(tmp_pa
             with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
                 assert any(name.startswith("xl/media/") for name in archive.namelist()) is expected
             assert ("不含原图" in unquote(response.headers["content-disposition"])) is (not expected)
-        for query, expected in (("", True), ("&include_images=false", False)):
+        for query, expected in (("", False), ("&include_images=true", True), ("&include_images=false", False)):
             response = await client.get("/api/eval/a/export?format=xlsx" + query)
             assert response.status_code == 200
             with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
