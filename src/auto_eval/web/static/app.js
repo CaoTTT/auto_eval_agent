@@ -119,6 +119,145 @@ createApp({
       resetResultPage();
     }
     const turnFilter = ref(''), diagnosticFilter = ref('');
+    const scoreDimensions = [
+      {key: 'response_gate', label: '响应体验', gate: true},
+      {key: 'safety_gate', label: '安全稳定', gate: true},
+      {key: 'understanding', label: '准确理解需求'},
+      {key: 'accuracy', label: '内容准确'},
+      {key: 'service_closure', label: '服务闭环'},
+      {key: 'scenario_fulfillment', label: '场景化满足'},
+      {key: 'intuitive_efficiency', label: '直观高效'},
+      {key: 'evidence_quality', label: '有理有据'},
+      {key: 'guided_recommendation', label: '引导推荐'},
+    ];
+    const scoreRules = ref([]), scoreRuleJoin = ref('all');
+    let scoreRuleSequence = 0;
+    const filterProducts = computed(() => results.value.some(r => Number(r.product_count) === 3)
+      || items.value.some(r => Number(r.product_count) === 3) ? [1, 2, 3] : [1, 2]);
+    function scoreOperators(rule) {
+      if (scoreDimensions.find(d => d.key === rule.dimension)?.gate) return [
+        {key: 'pass', label: '通过'}, {key: 'fail', label: '不通过'},
+        {key: 'unclear', label: '不清楚'}, {key: 'na', label: '无结果 / N/A'},
+      ];
+      return [{key: 'eq', label: '分数 ='}, {key: 'lt', label: '分数 <'},
+        {key: 'lte', label: '分数 ≤'}, {key: 'gt', label: '分数 >'}, {key: 'gte', label: '分数 ≥'},
+        {key: 'diff_lte', label: '两产品分差 ≤'}, {key: 'na', label: '无分数 / N/A'}];
+    }
+    function scoreRuleNeedsNumber(rule) {
+      return ['eq', 'lt', 'lte', 'gt', 'gte', 'diff_lte'].includes(rule.operator);
+    }
+    function addScoreRule() {
+      scoreRules.value.push({id: ++scoreRuleSequence, dimension: 'understanding', operator: 'lt',
+        value: '', products: [1, 2], productJoin: 'any'});
+      resetResultPage();
+    }
+    function changeScoreDimension(rule) {
+      rule.operator = scoreDimensions.find(d => d.key === rule.dimension)?.gate ? 'pass' : 'lt';
+      rule.value = '';
+      resetResultPage();
+    }
+    function removeScoreRule(id) {
+      scoreRules.value = scoreRules.value.filter(rule => rule.id !== id);
+      resetResultPage();
+    }
+    function clearScoreRules() {
+      scoreRules.value = [];
+      scoreRuleJoin.value = 'all';
+      resetResultPage();
+    }
+    function scoreRuleError(rule) {
+      if (!scoreDimensions.some(d => d.key === rule.dimension)
+          || !scoreOperators(rule).some(op => op.key === rule.operator)) return '请选择有效的维度和判断方式';
+      if (!rule.products.length) return '至少选择一个产品';
+      if (rule.operator === 'diff_lte' && rule.products.length !== 2) return '分差筛选需要恰好选择两个产品';
+      if (scoreRuleNeedsNumber(rule) && (String(rule.value ?? '').trim() === ''
+          || !Number.isFinite(Number(rule.value)) || Number(rule.value) < 0)) return '请输入大于或等于 0 的数值';
+      return '';
+    }
+    const scoreFilterError = computed(() => mode.value === 'compare'
+      ? scoreRules.value.map((rule, i) => scoreRuleError(rule) ? `条件 ${i + 1}：${scoreRuleError(rule)}` : '').filter(Boolean).join('；') : '');
+    function scoreValue(row, dimension, product) {
+      // Missing, inapplicable and unknown scores must never be coerced to zero.
+      if (row[`${dimension}_applicable`] === false) return null;
+      const raw = row[`answer${product}_${dimension}_score`];
+      if ((typeof raw !== 'number' && typeof raw !== 'string') || String(raw).trim() === '') return null;
+      return Number.isFinite(Number(raw)) ? Number(raw) : null;
+    }
+    function matchesScoreRule(row, rule) {
+      const count = Number(row.product_count || items.value[row.index]?.product_count || 2);
+      const present = product => Number(product) >= 1 && Number(product) <= count;
+      if (rule.operator === 'diff_lte') {
+        if (!rule.products.every(present)) return false;
+        const values = rule.products.map(product => scoreValue(row, rule.dimension, product));
+        return values.every(value => value !== null) && Math.abs(values[0] - values[1]) <= Number(rule.value);
+      }
+      const gate = scoreDimensions.find(d => d.key === rule.dimension)?.gate;
+      const matches = product => {
+        if (!present(product)) return false;
+        if (gate) {
+          const value = row[`answer${product}_${rule.dimension}`];
+          return rule.operator === 'na' ? value == null || value === '' || value === 'N/A' : value === rule.operator;
+        }
+        const value = scoreValue(row, rule.dimension, product);
+        if (rule.operator === 'na') return value === null;
+        if (value === null) return false;
+        const n = Number(rule.value);
+        return ({eq: () => value === n, lt: () => value < n, lte: () => value <= n,
+          gt: () => value > n, gte: () => value >= n})[rule.operator]?.() || false;
+      };
+      return rule.productJoin === 'all' ? rule.products.every(matches) : rule.products.some(matches);
+    }
+    function matchesScoreFilters(row) {
+      if (mode.value !== 'compare' || !scoreRules.value.length) return true;
+      if (row.error || scoreFilterError.value) return false;
+      const matches = rule => matchesScoreRule(row, rule);
+      return scoreRuleJoin.value === 'all' ? scoreRules.value.every(matches) : scoreRules.value.some(matches);
+    }
+    const allReasonsExpanded = ref(false), reasonExpansion = ref({});
+    function reasonOnlyColumn(column) {
+      return column.key === 'rationale' || column.key.endsWith('_reason');
+    }
+    function cellReasons(row, column) {
+      const entries = [];
+      const add = (label, value) => {
+        const text = Array.isArray(value) ? value.filter(Boolean).join('；') : String(value ?? '');
+        if (text.trim()) entries.push({label, text});
+      };
+      if (reasonOnlyColumn(column)) add(column.label, row[column.key]);
+      else if (['response_gate_summary', 'safety_gate_summary'].includes(column.key)) {
+        const dimension = column.key.replace('_summary', '');
+        for (let n = 1; n <= Number(row.product_count || items.value[row.index]?.product_count || 2); n++) {
+          add(`产品 ${n}`, row[`answer${n}_${dimension}_reason`]);
+        }
+      } else if (column.key.endsWith('_summary')) {
+        const dimension = column.key.replace('_summary', '');
+        add('评分理由', row[`${dimension}_reason`]);
+      } else if (column.key === 'has_conflict') add('冲突原因', row.conflict_reason);
+      else if (['needs_human_review', 'needs_review'].includes(column.key)) add('复核原因', row.review_reasons?.length ? row.review_reasons : row.review_reason);
+      return entries;
+    }
+    function reasonKey(row, column) { return `${taskId.value}:${row.index ?? row.item_id}:${column.key}`; }
+    function reasonsExpanded(row, column) {
+      return reasonExpansion.value[reasonKey(row, column)] ?? allReasonsExpanded.value;
+    }
+    function toggleCellReasons(row, column) {
+      reasonExpansion.value[reasonKey(row, column)] = !reasonsExpanded(row, column);
+      hideCellTooltip();
+    }
+    function setAllReasonsExpanded(expanded) {
+      allReasonsExpanded.value = expanded;
+      reasonExpansion.value = {};
+      hideCellTooltip();
+    }
+    function reasonSearchText(row) {
+      return Object.entries(row).filter(([key]) => key === 'rationale' || /_reason(s)?$/.test(key))
+        .map(([, value]) => Array.isArray(value) ? value.join(' ') : value || '').join(' ');
+    }
+    function resetResultFilters() {
+      activeSkill.value = ''; resultQuery.value = ''; failedOnly.value = false;
+      modalityFilter.value = ''; turnFilter.value = ''; diagnosticFilter.value = '';
+      clearScoreRules();
+    }
     const liveInputDiagnostics = ref({});
     const conversationGroups = computed(() => {
       const groups = new Map();
@@ -630,6 +769,7 @@ createApp({
 
     function columnWidth(c) {
       if (c.key === "latency_s") return 120;
+      if (reasonOnlyColumn(c)) return 200;
       const compact = [
         "latency_s", "card_presence", "card_count", "superlink_presence",
         "superlink_count", "answer_coverage", "needs_review", "problem_solved",
@@ -662,13 +802,14 @@ createApp({
     const filteredResults = computed(() => {
       const q = resultQuery.value.trim().toLowerCase();
       return skillResults.value.filter((r) => {
+        if (!matchesScoreFilters(r)) return false;
         if (failedOnly.value && !r.error) return false;
         if (turnFilter.value && String(r.turn_index) !== turnFilter.value) return false;
         if (diagnosticFilter.value==='warning' && !r.image_warning_count) return false;
         if (diagnosticFilter.value==='blocked' && r.input_diagnostic_status!=='blocked') return false;
         const modality = r.input_modality || ((items.value[r.index]?.query_images || []).length ? "text_image" : "text");
         if (modalityFilter.value && modality !== modalityFilter.value) return false;
-        if (q && !`${r.session_id || ""} ${r.turn_index || ""} ${r.item_id || ""} ${r.query || ""} ${r.context || ""} ${r.answer_text || ""} ${r.answer1 || ""} ${r.answer2 || ""} ${r.answer3 || ""} ${(r.card_contents || []).join(" ")} ${(r.superlink_texts || []).join(" ")} ${r.rationale || ""}`.toLowerCase().includes(q)) return false;
+        if (q && !`${r.session_id || ""} ${r.turn_index || ""} ${r.item_id || ""} ${r.query || ""} ${r.context || ""} ${r.answer_text || ""} ${r.answer1 || ""} ${r.answer2 || ""} ${r.answer3 || ""} ${(r.card_contents || []).join(" ")} ${(r.superlink_texts || []).join(" ")} ${reasonSearchText(r)}`.toLowerCase().includes(q)) return false;
         return true;
       });
     });
@@ -1117,10 +1258,8 @@ createApp({
       summary.value = null;
       progressEvents.value = {};
       expandedProgressLogs.value = {};
-      activeSkill.value = "";
-      resultQuery.value = "";
-      failedOnly.value = false;
-      resultPage.value = 1;
+      resetResultFilters();
+      setAllReasonsExpanded(false);
       progress.value = 0;
       total.value = submittedItems.length;
       itemProgress.value = Object.fromEntries(
@@ -1488,7 +1627,7 @@ createApp({
       if (c.key === "latency_s") return r.total_s != null ? r.total_s + "秒" : v != null ? v + "秒（旧记录）" : "";
       if (["input_status_summary", "response_gate_summary", "safety_gate_summary"].includes(c.key)) {
         const field = c.key.replace("_summary", "");
-        const labels = { complete: "完整", partial: "不完整", failed: "失败", pass: "通过", fail: "失败", unclear: "不清楚" };
+        const labels = { complete: "完整", partial: "不完整", failed: "失败", pass: "通过", fail: "不通过", unclear: "不清楚" };
         const count = Number(r.product_count || 2);
         return Array.from({ length: count }, (_, index) => {
           const productNo = index + 1;
@@ -1867,10 +2006,8 @@ createApp({
         selectedTaskStatus.value = d.status || "";
         running.value = ["pending", "queued", "running"].includes(selectedTaskStatus.value);
         queueNotice.value = selectedTaskStatus.value === "queued" ? "该任务正在等待前序任务完成。" : "";
-        activeSkill.value = "";
-        resultQuery.value = "";
-        failedOnly.value = false;
-        resultPage.value = 1;
+        resetResultFilters();
+        setAllReasonsExpanded(false);
         progressPage.value = 1;
         if (mode.value !== "compare" && skillTabs.value.length) activeSkill.value = skillTabs.value[0].key;
         if (running.value || selectedActiveRuns.value || ["queued", "running"].includes(repairStatus.value)) connectSSE(taskId.value);
@@ -1997,6 +2134,9 @@ createApp({
     return {
       modes, mode, modeLabel, isVideoMode, items, errors, importReport, conversationPreflight, judges, visibleJudges, selectedJudges, datasetName,
       turnFilter, diagnosticFilter, conversationGroups, conversationHistory, liveInputDiagnostics,
+      scoreDimensions, scoreRules, scoreRuleJoin, filterProducts, scoreOperators, scoreRuleNeedsNumber,
+      addScoreRule, changeScoreDimension, removeScoreRule, clearScoreRules, scoreFilterError, resetResultFilters,
+      reasonOnlyColumn, cellReasons, reasonsExpanded, toggleCellReasons, allReasonsExpanded, setAllReasonsExpanded,
       datasetSourceTaskId, datasetRevision, useComparisonDataset,
       evaluationProfiles, compareProfiles, selectedEvaluationProfile, evaluationProfileLabel,
       judgeModelProfiles, selectedJudgeModelProfile, selectedModelProfile, enableThinking, changeJudgeModel,

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <title>auto_eval 评估台</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260922_export_images">
+  <link rel="stylesheet" href="/static/style.css?v=20260923_result_filters">
   <style>
     .op-cards { display:flex; flex-direction:column; gap:12px; }
     .op-card { border:1px solid #e2e8f0; border-radius:8px; padding:12px; background:#fafbfc; }
@@ -398,7 +398,7 @@
     </div>
   </section>
 
-  <section v-if="results.length || summary">
+  <section v-if="results.length || summary" class="result-section">
     <h2>③ 结果
       <button @click="exportCsv" :disabled="!taskId || !!loadingTaskId">导出 CSV</button>
       <button @click="exportJson" :disabled="!taskId || !!loadingTaskId">导出 JSON</button>
@@ -450,13 +450,60 @@
         <select v-if="mode==='compare'" v-model="modalityFilter" @change="resetResultPage"><option value="">全部题型</option><option value="text">文字题</option><option value="text_image">图文题</option></select>
         <input v-if="conversationGroups.length" v-model="turnFilter" @input="resetResultPage" placeholder="筛选轮次，如 3" style="max-width:130px">
         <select v-if="conversationGroups.length" v-model="diagnosticFilter" @change="resetResultPage"><option value="">全部输入状态</option><option value="warning">含图片警示</option><option value="blocked">被阻断</option></select>
-        <span class="result-count">共 {{ filteredResults.length }} 条</span>
+        <button @click="resetResultFilters">重置全部筛选</button>
+        <span class="result-count" role="status">筛选后 {{ filteredResults.length }} / {{ results.length }} 条</span>
         <template v-if="pagedResults.some(r => evidenceImages(r).length)">
           <span class="hint">当前页图片</span>
           <button @click="setPageEvidenceExpanded(false)">全部折叠图片</button>
           <button @click="setPageEvidenceExpanded(true)">全部展开图片</button>
         </template>
       </div>
+      <div v-if="mode==='compare'" class="score-filter-panel">
+        <div class="score-filter-toolbar">
+          <strong>按评分筛选 Case</strong>
+          <button @click="addScoreRule">添加评分条件</button>
+          <label v-if="scoreRules.length > 1">条件之间
+            <select v-model="scoreRuleJoin" @change="resetResultPage" aria-label="评分条件组合">
+              <option value="all">全部满足（AND）</option><option value="any">任一满足（OR）</option>
+            </select>
+          </label>
+          <button v-if="scoreRules.length" @click="clearScoreRules">清空评分条件</button>
+        </div>
+        <p class="hint">选择维度与产品，可筛选通过 / 不通过、具体分数、低分或两产品分差。分差 = |产品 A 分数 − 产品 B 分数|。</p>
+        <div v-for="(rule, ruleIndex) in scoreRules" :key="rule.id" class="score-filter-rule">
+          <span class="score-rule-number">条件 {{ ruleIndex + 1 }}</span>
+          <label>维度
+            <select v-model="rule.dimension" @change="changeScoreDimension(rule)" :aria-label="'条件 '+(ruleIndex+1)+' 维度'">
+              <option v-for="dim in scoreDimensions" :key="dim.key" :value="dim.key">{{ dim.label }}</option>
+            </select>
+          </label>
+          <label>判断
+            <select v-model="rule.operator" @change="resetResultPage" :aria-label="'条件 '+(ruleIndex+1)+' 判断'">
+              <option v-for="op in scoreOperators(rule)" :key="op.key" :value="op.key">{{ op.label }}</option>
+            </select>
+          </label>
+          <label v-if="scoreRuleNeedsNumber(rule)">N
+            <input v-model="rule.value" type="number" min="0" step="any" placeholder="输入 N" @input="resetResultPage" :aria-label="'条件 '+(ruleIndex+1)+' 数值'">
+          </label>
+          <div class="score-rule-products" role="group" :aria-label="'条件 '+(ruleIndex+1)+' 产品'">
+            <label v-for="product in filterProducts" :key="product"><input v-model="rule.products" type="checkbox" :value="product" @change="resetResultPage" :aria-label="'条件 '+(ruleIndex+1)+' 产品 '+product">产品 {{ product }}</label>
+          </div>
+          <select v-if="rule.operator!=='diff_lte'" v-model="rule.productJoin" @change="resetResultPage" :aria-label="'条件 '+(ruleIndex+1)+' 产品组合'">
+            <option value="all">所选产品同时满足（&amp;）</option><option value="any">所选产品任一满足（|）</option>
+          </select>
+          <span v-else class="hint">选择两个产品计算分差</span>
+          <button @click="removeScoreRule(rule.id)" :aria-label="'删除条件 '+(ruleIndex+1)">删除</button>
+        </div>
+        <p v-if="scoreFilterError" class="err" role="alert">{{ scoreFilterError }}</p>
+        <p v-if="scoreRules.length" class="hint">仅比较有效分数，N/A 不作 0 分；无评分项可用“N/A”筛选。评测失败的 Case 不参与评分筛选。</p>
+      </div>
+      <div class="result-reason-toolbar">
+        <span>评分理由</span>
+        <button @click="setAllReasonsExpanded(true)">展开全部理由</button>
+        <button @click="setAllReasonsExpanded(false)">收起全部理由</button>
+        <span class="hint">各维度可单独展开；筛选仅影响页面，统计和导出保留完整任务结果。</span>
+      </div>
+      <p v-if="!filteredResults.length" class="result-empty" role="status">{{ scoreFilterError ? '请先完成评分筛选条件。' : '没有符合条件的 Case，可调整条件或重置全部筛选。' }}</p>
       <div class="result-table-wrap">
         <details v-if="summary?.conversation_statistics"><summary>多轮会话统计与覆盖</summary><div v-for="table in summary.conversation_statistics" :key="table.title"><h3>{{table.title}}</h3><table class="grid"><thead><tr><th v-for="header in table.headers" :key="header">{{header}}</th></tr></thead><tbody><tr v-for="(row,i) in table.rows" :key="i"><td v-for="(value,j) in row" :key="j">{{value ?? '—'}}</td></tr></tbody></table></div></details>
         <details v-if="summary && summary.by_input_modality">
@@ -497,13 +544,21 @@
                 <td
                   v-for="c in resultCols"
                   :key="c.key"
-                  @mouseenter="c.key !== 'latency_s' && showCellTooltip($event, cell(r, c))"
+                  @mouseenter="c.key !== 'latency_s' && !reasonOnlyColumn(c) && showCellTooltip($event, cell(r, c))"
                   @mouseleave="scheduleHideCellTooltip"
                 >
                   <div
+                    v-if="!reasonOnlyColumn(c)"
                     class="cell-clamp"
                     :class="{'cell-center': ['card_presence','superlink_presence','card_count','superlink_count','answer_coverage','needs_review','problem_solved','card_suitability','superlink_suitability','has_conflict','relevance','safety','content_quality','need_closure','personalization','latency_s'].includes(c.key)}"
                   >{{ cell(r, c) }}</div>
+                  <template v-if="cellReasons(r, c).length">
+                    <button class="reason-toggle" :aria-expanded="reasonsExpanded(r, c)" @click="toggleCellReasons(r, c)">{{ reasonsExpanded(r, c) ? '收起理由' : '展开理由' }}</button>
+                    <div v-if="reasonsExpanded(r, c)" class="cell-reasons">
+                      <p v-for="(reason, reasonIndex) in cellReasons(r, c)" :key="reasonIndex"><strong>{{ reason.label }}</strong><span>{{ reason.text }}</span></p>
+                    </div>
+                  </template>
+                  <span v-else-if="reasonOnlyColumn(c)" class="hint">无理由记录</span>
                   <details v-if="c.key === 'latency_s' && r.timings" class="timing-details">
                     <summary>耗时分解</summary>
                     <dl><template v-for="entry in timingEntries(r.timings)" :key="entry.key"><dt>{{ entry.label }}</dt><dd>{{ entry.seconds.toFixed(1) }} 秒</dd></template><dt>已发送调用</dt><dd>{{ r.timings.attempts }} 次</dd></dl>
@@ -589,6 +644,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20260922_export_concurrency"></script>
+  <script type="module" src="/static/app.js?v=20260923_result_filters"></script>
 </body>
 </html>
