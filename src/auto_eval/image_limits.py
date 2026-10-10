@@ -12,28 +12,35 @@ from PIL import Image
 from .conversation import digest
 from .long_screenshot import data_url_size, MIME_TYPES
 from .query_images import QueryImageError
+from .preparation import check_preparation
 
 SOURCE = "https://help.aliyun.com/zh/model-studio/vision"
 PROFILE_VERSION = "bailian-base64-2026-09-18-v1"
+REQUEST_BUDGET_VERSION = "encoded-request-budget-v2"
 
 
 def resolve_image_limits(judge, profile) -> dict:
-    host = (urlparse(judge.base_url or "").hostname or "").lower()
-    model = (judge.model or "").lower()
+    host = (urlparse(getattr(judge, "base_url", None) or "").hostname or "").lower()
+    model_name = getattr(judge, "model", None)
+    model = (model_name or "").lower()
     verified = (host in {"dashscope.aliyuncs.com", "dashscope-intl.aliyuncs.com", "dashscope-us.aliyuncs.com"}
                 or host.endswith(".maas.aliyuncs.com")) and model.startswith(("qwen3.5-", "qwen3.6-", "qwen3.7-", "qwen3.8-", "qwen3-vl-"))
-    cap = (16_777_216 if judge.vl_high_resolution_images else 2_621_440) if verified else None
-    result = {"provider": "bailian" if verified else "unverified", "model": judge.model,
-              "endpoint_host": host, "api_family": judge.runner, "transport": "base64",
+    high_resolution = bool(getattr(judge, "vl_high_resolution_images", False))
+    cap = (16_777_216 if high_resolution else 2_621_440) if verified else None
+    declared = {key: getattr(judge, key, None) for key in ("max_input_tokens", "context_window")}
+    result = {"provider": "bailian" if verified else "unverified", "model": model_name,
+              "endpoint_host": host, "api_family": getattr(judge, "runner", "openai_compat"), "transport": "base64",
               "capability_verified": bool(verified), "effective_pixel_cap": cap,
-              "vl_high_resolution_images": judge.vl_high_resolution_images,
+              "vl_high_resolution_images": high_resolution,
               "official_rules": {"file_bytes": 20_000_000, "data_uri_bytes": 20_000_000,
                   "min_edge": 11, "aspect_ratio": 200, "request_images": 250} if verified else {},
               "source_url": SOURCE if verified else None, "verified_at": "2026-09-18" if verified else None,
               "byte_interpretation": "20 MB; conservative decimal bytes (provider unit unspecified)",
               "local_guardrails": profile.query_images.model_dump(),
               "answer_guardrails": profile.long_screenshot.model_dump(),
-              "limits_profile_version": PROFILE_VERSION if verified else "unverified-v1"}
+              "limits_profile_version": PROFILE_VERSION if verified else "unverified-v1",
+              "model_declared_limits": declared, "model_context_limits_verified": False,
+              "model_token_limits_origin": "operator_declared_judge_config" if any(declared.values()) else "visual_profile_local_guardrails"}
     result["limits_profile_sha256"] = digest(result)
     return result
 
@@ -96,27 +103,150 @@ def inspect_asset(path, identity: dict, limits: dict) -> tuple[dict, list[dict]]
     return asset, findings
 
 
-def request_budget(system: str, parts: list[dict], metadata: list[dict], limits: dict, profile) -> dict:
+def request_budget(system: str, parts: list[dict], metadata: list[dict], limits: dict, profile,
+                   *, request_kwargs: dict | None = None) -> dict:
+    """Inspect all encoded request images; the token count is a conservative estimate.
+
+    Actual billing comes from provider usage. Reports contain hashes/dimensions,
+    never Base64 content, so they are safe to persist on both success and failure.
+    """
     q, s = profile.query_images, profile.long_screenshot
-    images = [p["image_url"]["url"] for p in parts if p["type"] == "image_url"]
-    body = {"model": limits["model"], "messages": [{"role": "system", "content": system},
+    images = [p["image_url"]["url"] for p in parts if p.get("type") == "image_url"]
+    body = request_kwargs or {"model": limits.get("model"), "messages": [{"role": "system", "content": system},
             {"role": "user", "content": parts}], "stream": True}
-    if limits["vl_high_resolution_images"]:
+    if not request_kwargs and limits.get("vl_high_resolution_images"):
         body["vl_high_resolution_images"] = True
-    payload = len(json.dumps(body, ensure_ascii=False).encode())
-    tokens = len((system + "".join(p.get("text", "") for p in parts)).encode())
-    for url in images:
-        with Image.open(io.BytesIO(base64.b64decode(url.split(",", 1)[1], validate=True))) as im:
-            tokens += ((im.width + 31) // 32) * ((im.height + 31) // 32) + 256
+    serialized = json.dumps(body, ensure_ascii=False).encode()
+    payload = len(serialized)
+    text_tokens = len((system + "".join(p.get("text", "") for p in parts)).encode())
+    views, reasons = [], []
+    for index, url in enumerate(images):
+        check_preparation()
+        if not url.startswith("data:") or "," not in url:
+            raise QueryImageError("request_image_invalid", "请求预算检查仅支持平台编码的本地图片")
+        try:
+            raw = base64.b64decode(url.split(",", 1)[1], validate=True)
+            with Image.open(io.BytesIO(raw)) as im:
+                width, height = im.size
+        except Exception as exc:
+            raise QueryImageError("request_image_invalid", "请求图片无法解码，不能计算完整预算") from exc
+        identity = metadata[index] if index < len(metadata) else {}
+        image_cfg = q if identity.get("image_role") == "query_image" else s
+        uri_bytes = len(url.encode())
+        image_tokens = ((width + 31) // 32) * ((height + 31) // 32) + 256
+        view = {key: identity[key] for key in (
+            "product", "product_id", "turn_id", "turn_index", "image_role", "view_id", "query_image_id",
+            "timestamp", "time", "source_video", "evidence_type", "index",
+            "time_s", "frame_no", "source_video_sha256",
+            "asset_id", "source_turn", "product_no", "request_role", "part_no", "part_count",
+        ) if key in identity}
+        view.update({"request_image_index": index + 1, "sha256": hashlib.sha256(raw).hexdigest(),
+                     "width": width, "height": height, "file_bytes": len(raw),
+                     "data_uri_bytes": uri_bytes, "estimated_visual_tokens": image_tokens})
+        image_reasons = []
+        if width * height > image_cfg.max_pixels:
+            image_reasons.append("request_image_pixels_exceeded")
+        if uri_bytes >= image_cfg.max_data_url_bytes:
+            image_reasons.append("request_image_data_uri_bytes_exceeded")
+        if min(width, height) < image_cfg.min_edge:
+            image_reasons.append("request_image_min_edge_invalid")
+        hard = limits.get("official_rules", {})
+        if (hard.get("data_uri_bytes") and uri_bytes > hard["data_uri_bytes"]
+                or hard.get("file_bytes") and len(raw) > hard["file_bytes"]):
+            image_reasons.append("request_image_official_bytes_exceeded")
+        view["blocking_reasons"] = image_reasons
+        reasons.extend(reason for reason in image_reasons if reason not in reasons)
+        views.append(view)
+    visual_tokens = sum(v["estimated_visual_tokens"] for v in views)
+    tokens = text_tokens + visual_tokens
     reserve = max(q.output_reserve_tokens, s.output_reserve_tokens)
-    reasons = []
-    if len(images) > q.max_request_images:
+    declared = limits.get("model_declared_limits") or {}
+    max_input = min(q.max_input_tokens, s.max_input_tokens, declared.get("max_input_tokens") or q.max_input_tokens)
+    context_window = min(q.context_window, s.context_window, declared.get("context_window") or q.context_window)
+    max_images = min(q.max_request_images, limits.get("official_rules", {}).get("request_images", q.max_request_images))
+    effective = {"max_input_tokens": max_input, "context_window": context_window,
+                 "output_reserve_tokens": reserve, "max_request_images": max_images,
+                 "max_request_bytes": q.max_request_bytes, "request_overhead_bytes": q.request_overhead_bytes}
+    if len(images) > max_images:
         reasons.append("request_image_count_exceeded")
     if payload + q.request_overhead_bytes > q.max_request_bytes:
         reasons.append("request_payload_bytes_exceeded")
-    if tokens > min(q.max_input_tokens, s.max_input_tokens) or tokens + reserve > min(q.context_window, s.context_window):
+    if tokens > max_input or tokens + reserve > context_window:
         reasons.append("context_budget_exceeded")
-    return {"actual_image_count": len(images), "actual_data_uri_bytes": sum(len(u.encode()) for u in images),
+    report = {"actual_image_count": len(images), "actual_data_uri_bytes": sum(v["data_uri_bytes"] for v in views),
             "request_payload_bytes": payload, "request_overhead_reserve_bytes": q.request_overhead_bytes,
-            "estimated_input_tokens": tokens, "output_reserve_tokens": reserve,
-            "limits_profile_version": limits["limits_profile_version"], "blocked": bool(reasons), "blocking_reasons": reasons}
+            "estimated_input_tokens": tokens, "estimated_text_tokens": text_tokens,
+            "estimated_visual_tokens": visual_tokens, "output_reserve_tokens": reserve,
+            "estimated_total_with_output_reserve": tokens + reserve,
+            "max_input_tokens": max_input, "context_window": context_window,
+            "token_estimation_method": "utf8_text_bytes_plus_32px_image_patches_and_256_per_image",
+            "token_estimation_is_billing": False, "model": limits.get("model"),
+            "effective_limits": effective, "model_declared_limits": declared,
+            "limit_sources": {"query_images": q.model_dump(), "long_screenshot": s.model_dump(),
+                              "model": limits.get("model_token_limits_origin", "visual_profile_local_guardrails")},
+            "limits_profile_version": limits.get("limits_profile_version", "unverified-v1"),
+            "limits_profile_sha256": limits.get("limits_profile_sha256"),
+            "budget_algorithm_version": REQUEST_BUDGET_VERSION,
+            "request_sha256": hashlib.sha256(serialized).hexdigest(), "image_views": views,
+            "blocked": bool(reasons), "blocking_reasons": reasons,
+            "retry_allowed": not bool(reasons), "automatic_retry_skipped": bool(reasons)}
+    report["report_id"] = digest(report)
+    return report
+
+
+def enforce_request_budget(report: dict) -> None:
+    """Raise a permanent, traceable local error without discarding any evidence."""
+    if not report.get("blocked"):
+        return
+    reasons = report.get("blocking_reasons", [])
+    context = "context_budget_exceeded" in reasons
+    code = "context_budget_exceeded" if context else "request_image_limit_exceeded"
+    caps = report.get("effective_limits", {})
+    detail = (f"保守估算输入 {report.get('estimated_input_tokens')} Token，输入上限 {caps.get('max_input_tokens')}，"
+              f"含输出预留 {report.get('estimated_total_with_output_reserve')}，上下文上限 {caps.get('context_window')}")
+    exc = QueryImageError(code, "完整图文请求超过模型或平台保护限制：" + ", ".join(reasons) + "；" + detail + "；已停止自动重试",
+                         request_budget_report=report)
+    from .request_errors import request_limit_diagnostics
+    error = request_limit_diagnostics(exc, model=report.get("model"))
+    exc.request_limit_error = error
+    if context:
+        exc.context_limit_error = error
+    raise exc
+
+
+def declared_request_budget(kwargs: dict, judge) -> dict | None:
+    """Guard every judge/repair call when an operator declared model token caps."""
+    caps = {key: getattr(judge, key, None) for key in ("max_input_tokens", "context_window")}
+    if not any(caps.values()):
+        return None
+    from types import SimpleNamespace
+    from .config import QueryImageConfig
+    # Other image guardrails belong to the visual profile and are checked by its
+    # request_budget call. This boundary only applies the declared token caps.
+    unbounded = 2**63 - 1
+    reserve = kwargs.get("max_completion_tokens") or kwargs.get("max_tokens") or 8192
+    cfg = QueryImageConfig(max_input_tokens=caps["max_input_tokens"] or unbounded,
+                           context_window=caps["context_window"] or unbounded,
+                           output_reserve_tokens=reserve, min_edge=1,
+                           max_pixels=unbounded, max_data_url_bytes=unbounded,
+                           max_request_images=unbounded, max_request_bytes=unbounded)
+    system, parts = [], []
+    for message in kwargs.get("messages", []):
+        content = message.get("content") or ""
+        if message.get("role") == "system" and isinstance(content, str):
+            system.append(content)
+        elif isinstance(content, str):
+            parts.append({"type": "text", "text": content})
+        elif isinstance(content, list):
+            parts.extend(content)
+        if message.get("tool_calls"):
+            parts.append({"type": "text", "text": json.dumps(message["tool_calls"], ensure_ascii=False)})
+    for key in ("tools", "response_format"):
+        if kwargs.get(key):
+            parts.append({"type": "text", "text": json.dumps(kwargs[key], ensure_ascii=False)})
+    limits = {"model": kwargs.get("model"), "model_declared_limits": caps,
+              "model_token_limits_origin": "operator_declared_judge_config",
+              "limits_profile_version": "declared-judge-token-caps-v1"}
+    limits["limits_profile_sha256"] = digest(limits)
+    return request_budget("\n".join(system), parts, [], limits,
+                          SimpleNamespace(query_images=cfg, long_screenshot=cfg), request_kwargs=kwargs)

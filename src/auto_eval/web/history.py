@@ -521,13 +521,50 @@ def export_rows(snapshot: dict) -> dict[str, list[dict]]:
                                "提问图片元数据": item.get("query_image_meta", []),
                                "输入指纹": item.get("input_manifest_sha256", "")})
     if frame_rows:
-        has_screenshots = any(item.get("evidence_mode") == "long_screenshot" for item in snapshot.get("items", []))
+        has_screenshots = any(item.get("evidence_mode") in {"long_screenshot", "long_screenshot_with_video"} for item in snapshot.get("items", []))
         rows["视觉证据清单" if has_screenshots else "抽帧清单"] = frame_rows
     rows["运行信息"] = [_run_info(snapshot)]
     if summary:
         rows["汇总指标"] = [_flatten_dict(summary, skip_keys={"by_category"})]
     extra_columns = _extra_input_columns(snapshot, dataset_rows=dataset_rows, result_rows=result_rows)
     items = snapshot.get("items") or []
+    budget_rows = []
+    for index, item in enumerate(items):
+        result = aligned_results[index]
+        report = result.get("request_budget_report") or item.get("request_budget_report")
+        failure = result.get("context_limit_error") or item.get("context_limit_error") or result.get("request_limit_error") or item.get("request_limit_error")
+        if report or failure:
+            from .screenshot_evidence import _chunks
+            report_chunks, error_chunks = _chunks(report or {}), _chunks(failure or {})
+            report_cell = report or {}
+            error_cell = failure or {}
+            if len(report_chunks) > 1:
+                report_cell = {key: value for key, value in report.items() if key in {
+                    "report_id", "model", "estimated_input_tokens", "output_reserve_tokens",
+                    "max_input_tokens", "context_window", "actual_image_count", "blocked", "blocking_reasons"}}
+                report_cell["完整报告工作表"] = "请求预算与错误"
+            if len(error_chunks) > 1:
+                error_cell = {key: value for key, value in failure.items() if key in {
+                    "error_id", "code", "reason", "origin", "model", "provider_request_id", "retry_allowed"}}
+                error_cell["完整错误工作表"] = "请求预算与错误"
+            for row in (dataset_rows[index], result_rows[index]):
+                row.update({"请求预算": report_cell, "请求限制错误": error_cell,
+                            "允许重试": result.get("retry_allowed", item.get("retry_allowed", True))})
+            for part in range(max(len(report_chunks), len(error_chunks))):
+                budget_rows.append({"数据集序号": index + 1, "id": item.get("id"),
+                    "请求编号": result.get("request_id", ""),
+                    "输入指纹": result.get("input_manifest_sha256", item.get("input_manifest_sha256", "")),
+                    "证据模式": item.get("evidence_mode"), "报告编号": (report or {}).get("report_id", ""),
+                    "错误编号": (failure or {}).get("error_id", ""),
+                    "错误来源": (failure or {}).get("origin", ""), "错误代码": (failure or {}).get("code", ""),
+                    "网关请求编号": (failure or {}).get("provider_request_id", ""),
+                    "错误原因": (failure or {}).get("reason", ""),
+                    "分段序号": part + 1, "分段总数": max(len(report_chunks), len(error_chunks)),
+                    "请求预算": report_chunks[part] if part < len(report_chunks) else "",
+                    "请求限制错误": error_chunks[part] if part < len(error_chunks) else "",
+                    "允许重试": result.get("retry_allowed", item.get("retry_allowed", True))})
+    if budget_rows:
+        rows["请求预算与错误"] = budget_rows
     _append_extra_input_values(dataset_rows, items, extra_columns)
     _append_extra_input_values(result_rows, items, extra_columns)
     if mode == "compare" and any(it.get("session_id") for it in items):
@@ -543,7 +580,7 @@ def export_rows(snapshot: dict) -> dict[str, list[dict]]:
                 "历史前缀指纹": result.get("history_prefix_sha256", item.get("history_prefix_sha256", "")),
                 "图片警示数": result.get("image_warning_count", item.get("image_warning_count", 0)),
                 "图片检查状态": result.get("input_diagnostic_status", item.get("input_diagnostic_status", "未检查")),
-                "请求预算": result.get("request_budget_report", item.get("request_budget_report", {}))}
+                "请求预算": result_rows[index].get("请求预算", result.get("request_budget_report", item.get("request_budget_report", {})))}
             result_rows[index].update(fields)
             dataset_rows[index].update(fields)
             for finding in result.get("image_findings", item.get("image_findings", [])):
@@ -643,6 +680,9 @@ _RUNTIME_ITEM_FIELDS = {
     "frames1",
     "frames2",
     "frames3",
+    *(f"{prefix}{n}" for prefix in ("aux_frames", "aux_frame_meta") for n in (1, 2, 3)),
+    "aux_frame_count", "joint_evidence_version", "request_budget_report", "context_limit_error",
+    "request_limit_error", "retry_allowed", "automatic_retry_skipped",
     "frame_count",
     "media",
     "video_name",
@@ -837,7 +877,7 @@ def _append_extra_input_values(rows: list[dict], items: list[dict], columns: dic
 def _item_visual_streams(item: dict) -> list[dict[str, Any]]:
     """统一返回 rich_content 单路或 compare 双/三路视频及关键帧。"""
     source = _source_data_for_item(item)
-    if item.get("evidence_mode") == "long_screenshot" or (
+    if item.get("evidence_mode") in {"long_screenshot", "long_screenshot_with_video"} or (
         not item.get("evidence_mode") and (item.get("screenshot1") or source.get("screenshot1"))
     ):
         count = item.get("product_count") or (3 if item.get("screenshot3") or source.get("screenshot3") else 2)
@@ -852,6 +892,15 @@ def _item_visual_streams(item: dict) -> list[dict[str, Any]]:
                 "screenshot_meta": meta,
                 "frames": [PROJECT_ROOT / str(path) for path in item.get(f"frames{product_no}", [])],
             })
+            if item.get("evidence_mode") == "long_screenshot_with_video":
+                streams.append({
+                    "product_no": product_no, "evidence_mode": "video_frames", "evidence_role": "supplement",
+                    "source_video": source.get(f"video{product_no}") or item.get(f"video{product_no}") or "",
+                    "runtime_video": item.get(f"video{product_no}_path") or "",
+                    "video_source": item.get(f"video_source{product_no}") or {},
+                    "duration": item.get(f"duration{product_no}") or "",
+                    "frames": [PROJECT_ROOT / str(path) for path in item.get(f"aux_frames{product_no}", [])],
+                })
         return streams
     has_numbered_streams = any(
         item.get(field) not in (None, "", []) or source.get(field) not in (None, "", [])

@@ -3,6 +3,9 @@ from copy import deepcopy
 import base64
 import hashlib
 import json
+import io
+
+from PIL import Image
 
 from .paths import RUNS_DIR
 from .query_images import _snapshot_bytes
@@ -21,9 +24,16 @@ def capture_request(system: str, parts: list[dict], metadata: list[dict],
         raw = base64.b64decode(part["image_url"]["url"].split(",", 1)[1], validate=True)
         meta = deepcopy(metadata[index])
         meta.pop("preprocessing", None)
-        meta.update(image_no=index + 1, sha256=hashlib.sha256(raw).hexdigest(),
+        encoded_sha256 = hashlib.sha256(raw).hexdigest()
+        if meta.get("sha256") and meta["sha256"] != encoded_sha256:
+            meta["source_frame_sha256"] = meta["sha256"]
+        meta.update(image_no=index + 1, sha256=encoded_sha256,
                     file_bytes=len(raw), data_url_bytes=len(part["image_url"]["url"].encode()),
                     mime=part["image_url"]["url"].split(";", 1)[0][5:])
+        with Image.open(io.BytesIO(raw)) as encoded:
+            if meta.get("width") and (meta["width"], meta.get("height")) != encoded.size:
+                meta.update(source_width=meta["width"], source_height=meta.get("height"))
+            meta.update(width=encoded.width, height=encoded.height)
         suffix = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}[meta["mime"]]
         frozen = RUNS_DIR / "screenshot_evidence" / (meta["sha256"] + suffix)
         frozen.parent.mkdir(parents=True, exist_ok=True)

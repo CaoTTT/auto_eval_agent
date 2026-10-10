@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import time
 from datetime import datetime
 from pathlib import Path
@@ -23,6 +24,7 @@ from ..schema import VisualCompareObservation
 from .base import JudgeClient, JudgeOutputParseError
 from .prompts import parse_json_loose
 from .query_image_prompt import QUERY_IMAGE_INSTRUCTIONS
+from .joint_evidence_prompt import MODE as JOINT_MODE, VERSION as JOINT_VERSION, adapt_joint_prompts
 from .compare_protocols import (
     CompareProtocol,
     DIMENSIONS,
@@ -270,6 +272,9 @@ class VisualCompareJudge:
         product_count: Literal[2, 3] | None = None,
         evidence_mode: str = "video_frames",
         screenshot_metas: list[dict] | None = None,
+        aux_frame_groups: list[list[str]] | None = None,
+        aux_frame_metas: list[list[dict]] | None = None,
+        image_limits: dict | None = None,
         query_image_meta: list[dict] | None = None,
         conversation_input: dict | None = None,
         evidence_callback=None,
@@ -284,17 +289,34 @@ class VisualCompareJudge:
         actual_product_count: Literal[2, 3] = product_count or (
             3 if (context3 or answer3 or frames3 is not None) else 2
         )
-        if evidence_mode not in ("video_frames", "long_screenshot"):
+        if evidence_mode not in ("video_frames", "long_screenshot", JOINT_MODE):
             raise ValueError("未知视觉证据模式")
-        is_screenshot = evidence_mode == "long_screenshot"
+        is_joint = evidence_mode == JOINT_MODE
+        if is_joint and conversation_input is not None:
+            raise ValueError("multiturn_video_unsupported: 多轮仅支持当前轮长截图")
+        is_screenshot = evidence_mode in ("long_screenshot", JOINT_MODE)
         metas = screenshot_metas or []
         if is_screenshot and len(metas) != actual_product_count:
             raise ValueError("长截图缺少逐产品预处理元数据")
+        aux_groups = aux_frame_groups or []
+        aux_metas = aux_frame_metas or []
+        if is_joint:
+            if len(aux_groups) != actual_product_count or len(aux_metas) != actual_product_count:
+                raise ValueError("联合证据缺少逐产品录屏帧及时间戳元数据")
+            for n, (paths, metadata) in enumerate(zip(aux_groups, aux_metas, strict=True), 1):
+                if not paths or len(paths) != len(metadata):
+                    raise ValueError(f"产品{n}录屏帧与元数据不完整")
+                times = [m.get("time_s") for m in metadata]
+                if any(not isinstance(t, (int, float)) or isinstance(t, bool) or not math.isfinite(t) or t < 0 for t in times):
+                    raise ValueError(f"产品{n}录屏帧时间戳无效")
+                if times != sorted(times):
+                    raise ValueError(f"产品{n}录屏帧未按时间排序")
+        template_mode = "long_screenshot" if is_joint else evidence_mode
 
         system = self.protocol.system_template.render(
             persona=self.client.persona,
             product_count=actual_product_count,
-            evidence_mode=evidence_mode,
+            evidence_mode=template_mode,
         )
         query_metas = query_image_meta or []
         if len(query_metas) > 1 and conversation_input is None:
@@ -317,7 +339,7 @@ class VisualCompareJudge:
             frame_count1=len(frames1) if frames1 else 0,
             frame_count2=len(frames2) if frames2 else 0,
             frame_count3=len(frames3) if frames3 else 0,
-            evidence_mode=evidence_mode,
+            evidence_mode=template_mode,
             image_count1=len(frames1 or []),
             image_count2=len(frames2 or []),
             image_count3=len(frames3 or []),
@@ -325,6 +347,8 @@ class VisualCompareJudge:
             split_manifest2=_screenshot_prompt_manifest(metas[1]) if metas else "",
             split_manifest3=_screenshot_prompt_manifest(metas[2]) if len(metas) > 2 else "",
         )
+        if is_joint:
+            system, user = adapt_joint_prompts(system, user, [len(paths) for paths in aux_groups])
 
         def prepare_images():
             user_images: list[str] = []
@@ -363,12 +387,29 @@ class VisualCompareJudge:
                         ])
                         image_metadata.append({
                             **meta["slices"][part_no - 1], "image_role": "product_answer",
+                            **({"evidence_type": "long_screenshot"} if is_joint else {}),
                             "product_no": product_no, "part_no": part_no, "part_count": count,
                             "position": position, "split_status": meta["split_status"], "ref_path": path,
                             **({"preprocessing": meta} if part_no == 1 else {}),
                         })
                     content_parts.append({"type": "text", "text": f"产品{product_no}长截图结束"})
                     user_image_refs.extend(frames)
+                    if is_joint:
+                        content_parts.append({"type": "text", "text": f"产品{product_no}同一回答录屏补充证据开始；按录屏时间排序，不是长截图切片。"})
+                        for frame_no, (path, frame_meta) in enumerate(zip(aux_groups[product_no - 1], aux_metas[product_no - 1], strict=True), 1):
+                            check_preparation()
+                            encoded = encode_frame(resolve_project_path(path), max_edge=extraction.max_edge, quality=extraction.jpeg_quality)
+                            time_s = frame_meta["time_s"]
+                            content_parts.extend([
+                                {"type": "text", "text": f"产品{product_no} 补充录屏第{frame_no}帧，{time_s:g}秒"},
+                                {"type": "image_url", "image_url": {"url": encoded}},
+                                {"type": "text", "text": f"产品{product_no} 补充录屏第{frame_no}帧结束"},
+                            ])
+                            image_metadata.append({**frame_meta, "image_role": "product_answer_video_supplement",
+                                "evidence_type": "video_frame", "product_no": product_no, "frame_no": frame_no,
+                                "time_s": time_s, "ref_path": path})
+                            user_image_refs.append(path)
+                        content_parts.append({"type": "text", "text": f"产品{product_no}录屏补充证据结束"})
                     continue
                 encoded_frames = list(
                     encode_frame(
@@ -420,23 +461,72 @@ class VisualCompareJudge:
             if evidence_callback:
                 evidence_callback(audit)
         request_views = []
-        if query_metas and conversation_input is None:
+        budget_report = None
+        if is_joint:
+            from ..image_limits import request_budget, enforce_request_budget, resolve_image_limits
+            from ..request_errors import request_limit_diagnostics
+            limits = image_limits or resolve_image_limits(self.client.cfg, self.profile)
+            request_kwargs = {"model": getattr(self.client, "model", None), "stream": True,
+                "messages": [{"role": "system", "content": system}, {"role": "user", "content": content_parts}]}
+            if callable(getattr(self.client, "_sampling_kwargs", None)):
+                request_kwargs.update(self.client._sampling_kwargs())
+            cfg = self.client.cfg
+            if getattr(cfg, "enable_thinking", None) is not None:
+                request_kwargs["enable_thinking"] = cfg.enable_thinking
+            if getattr(cfg, "vl_high_resolution_images", False):
+                request_kwargs["vl_high_resolution_images"] = True
+            budget_report = await run_preparation(request_budget, system, content_parts, image_metadata, limits, self.profile,
+                                                 request_kwargs=request_kwargs, timeout=60)
+            for metadata, view in zip(image_metadata, budget_report["image_views"], strict=True):
+                if metadata.get("sha256") and metadata["sha256"] != view.get("sha256"):
+                    metadata["source_frame_sha256"] = metadata["sha256"]
+                metadata.update(view)
+            if audit is not None:
+                audit.update(evidence_mode=JOINT_MODE, joint_evidence_version=JOINT_VERSION,
+                             request_budget_report=budget_report, limits_profile=limits)
+            try:
+                enforce_request_budget(budget_report)
+            except Exception as exc:
+                if audit is not None:
+                    details = request_limit_diagnostics(exc, model=getattr(self.client, "model", None), request_budget_report=budget_report)
+                    audit.update(record_status="blocked_before_model_call", retry_allowed=False,
+                                 request_limit_error=details)
+                    if getattr(exc, "context_limit_error", None):
+                        audit["context_limit_error"] = details
+                    if evidence_callback:
+                        evidence_callback(audit)
+                raise
+        elif query_metas and conversation_input is None:
             request_views = await run_preparation(check_request_budget, system, content_parts, self.profile.query_images, timeout=60)
             for metadata, view in zip(image_metadata, request_views, strict=True):
                 metadata.update(view)
                 metadata.setdefault("image_role", "product_answer")
         if is_screenshot or query_metas:
-            if is_screenshot and conversation_input is None:
+            if is_screenshot and not is_joint and conversation_input is None:
                 check_context_budget(system, [p["text"] for p in content_parts if p["type"] == "text"], metas, self.profile.long_screenshot)
             if audit is not None:
                 audit["record_status"] = "model_call_started"
                 if evidence_callback:
                     evidence_callback(audit)
-            raw_output = await self.client.complete(
-                system, user, stream_callback=stream_callback,
-                content_parts=content_parts, image_metadata=image_metadata,
-                user_image_refs=user_image_refs,
-            )
+            try:
+                raw_output = await self.client.complete(
+                    system, user, stream_callback=stream_callback,
+                    content_parts=content_parts, image_metadata=image_metadata,
+                    user_image_refs=user_image_refs,
+                )
+            except Exception as exc:
+                from ..request_errors import nonretryable_context_error, request_limit_diagnostics
+                failed_budget = getattr(exc, "request_budget_report", None) or budget_report
+                if failed_budget is not None:
+                    setattr(exc, "request_budget_report", failed_budget)
+                details = request_limit_diagnostics(exc, model=getattr(self.client, "model", None), request_budget_report=failed_budget)
+                if details and audit is not None:
+                    audit.update(record_status="model_request_limit_rejected", retry_allowed=False, request_limit_error=details)
+                    if nonretryable_context_error(exc):
+                        audit["context_limit_error"] = details
+                    if evidence_callback:
+                        evidence_callback(audit)
+                raise
         else:
             raw_output = await self.client.complete(
                 system, user, stream_callback=stream_callback,
@@ -450,11 +540,25 @@ class VisualCompareJudge:
         data = parse_json_loose(raw_output)
         repaired = ""
         if data is None:
-            repaired = await self.client.repair_json(
-                raw_output,
-                label="垂域视觉对比评测输出",
-                round_no=2,
-            )
+            try:
+                repaired = await self.client.repair_json(
+                    raw_output,
+                    label="垂域视觉对比评测输出",
+                    round_no=2,
+                )
+            except Exception as exc:
+                from ..request_errors import nonretryable_context_error, request_limit_diagnostics
+                details = request_limit_diagnostics(exc, model=getattr(self.client, "model", None))
+                if details and audit is not None:
+                    audit.update(record_status="model_request_limit_rejected", retry_allowed=False,
+                                 request_limit_error=details, failed_request_purpose="json_repair")
+                    if nonretryable_context_error(exc):
+                        audit["context_limit_error"] = details
+                    if getattr(exc, "request_budget_report", None):
+                        audit["failed_request_budget_report"] = exc.request_budget_report
+                    if evidence_callback:
+                        evidence_callback(audit)
+                raise
             data = parse_json_loose(repaired)
         if data is None:
             raise JudgeOutputParseError(
@@ -496,9 +600,13 @@ class VisualCompareJudge:
                 f"{system}\0{user}".encode("utf-8")
             ).hexdigest(),
         })
+        if is_joint:
+            result.update(evidence_mode=JOINT_MODE, joint_evidence_version=JOINT_VERSION, request_budget_report=budget_report)
+            result["input_manifest_sha256"] = audit["request_sha256"] if audit else hashlib.sha256(
+                json.dumps(image_metadata, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
         if conversation_manifest:
             result["input_manifest_sha256"] = conversation_manifest
-        elif query_metas:
+        elif query_metas and not is_joint:
             identity = {**self.protocol.public_metadata(), "original_hashes": [m["original_sha256"] for m in query_metas], "answers": [answer1, answer2, answer3],
                         "contexts": [context1, context2, context3]}
             result["input_manifest_sha256"] = input_manifest(

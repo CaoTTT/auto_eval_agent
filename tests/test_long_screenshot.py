@@ -274,7 +274,8 @@ def test_mixed_import_reports_rejected_cases_and_layer_counts():
     for content in (json.dumps(rows), "\n".join(map(json.dumps, rows))):
         response = server.api_parse(server.ParseReq(mode="compare", jsonl=content))
         assert response["count"] == 2 and response["rejected_count"] == 1
-        assert response["evidence_counts"] == {"long_screenshot": 1, "video_frames": 1}
+        assert response["evidence_counts"] == {"long_screenshot": 1, "video_frames": 1,
+                                                "long_screenshot_with_video": 0}
         assert [item["id"] for item in response["items"]] == ["shots", "fallback"]
         assert "Case reject" in response["errors"][0]
         assert "screenshot2" in response["errors"][0] and "video1" in response["errors"][0]

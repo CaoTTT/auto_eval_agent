@@ -47,6 +47,9 @@ _TRACE_FIELDS = {
     "error",
     "error_type",
     "round",
+    "request_budget_report",
+    "request_limit_error",
+    "context_limit_error",
 }
 
 
@@ -389,13 +392,27 @@ class JudgeClient:
                 **(kwargs.get("extra_body") or {}),
                 "enable_thinking": enable_thinking,
             }
+        budget = None
         try:
+            if getattr(self.cfg, "max_input_tokens", None) or getattr(self.cfg, "context_window", None):
+                from ..image_limits import declared_request_budget, enforce_request_budget
+                from ..preparation import run_preparation
+                budget = await run_preparation(declared_request_budget, kwargs, self.cfg, timeout=60)
+                enforce_request_budget(budget)
             return await self._llm_create_stream(
                 kwargs,
                 callback=stream_callback,
                 max_attempts=max_attempts,
             )
         except Exception as exc:
+            from ..request_errors import request_limit_diagnostics
+            if budget is not None and getattr(exc, "request_budget_report", None) is None:
+                setattr(exc, "request_budget_report", budget)
+            limit_error = request_limit_diagnostics(exc, model=self.model, request_budget_report=budget)
+            if limit_error:
+                setattr(exc, "request_limit_error", limit_error)
+                if limit_error["code"] in {"context_budget_exceeded", "context_limit_exceeded"}:
+                    setattr(exc, "context_limit_error", limit_error)
             if self.trace_path:
                 self._write_trace({
                     "ts": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
@@ -406,6 +423,10 @@ class JudgeClient:
                     "error": str(exc),
                     "usage": _usage_dict(getattr(exc, "_auto_eval_usage", None)),
                     "stream_stats": getattr(exc, "_auto_eval_stream_stats", None),
+                    "request_limit_error": getattr(exc, "request_limit_error", None),
+                    "context_limit_error": getattr(exc, "context_limit_error", None),
+                    "request_budget_report": getattr(exc, "request_budget_report", None),
+                    "messages": _redact_data_urls(kwargs.get("messages") or []),
                     "round": current_context().round,
                 })
             raise

@@ -3,6 +3,11 @@ import {ref, computed, watch, onUnmounted} from "https://unpkg.com/vue@3/dist/vu
 export function selectEvidenceMode(item) {
   const count = Number(item.productCount);
   if (count !== 2 && count !== 3) return '';
+  if (item.evidenceMode === 'long_screenshot_with_video') {
+    if (item.sessionId) return '';
+    return ['screenshot', 'video'].every(prefix => Array.from({length:count}, (_, index) => item[`${prefix}${index+1}Path`])
+      .every(path => typeof path === 'string' && path.trim())) ? 'long_screenshot_with_video' : '';
+  }
   if (item.sessionId && ([1,2,3].some(n => item[`video${n}Path`]) || item.screenshotScope !== 'current_turn')) return '';
   for (const [prefix, mode] of [['screenshot', 'long_screenshot'], ['video', 'video_frames']]) {
     if (item.sessionId && mode === 'video_frames') continue;
@@ -15,6 +20,24 @@ export function selectEvidenceMode(item) {
 export function caseEvidenceMode(item) {
   // History previews retain their evaluated layer; editable drafts follow current paths.
   return item._savedEvidenceMode || selectEvidenceMode(item);
+}
+
+export function evidenceModeLabel(mode) {
+  return ({long_screenshot:'长截图', video_frames:'录屏', long_screenshot_with_video:'长截图＋录屏补充'})[mode] || '证据不齐全';
+}
+
+export function evidenceModeMessage(item) {
+  if (item.sessionId) return selectEvidenceMode(item) === 'long_screenshot'
+    ? '实际评估：多轮仍仅使用每个产品当前轮长截图，不支持录屏或联合证据。'
+    : '多轮仅支持当前轮长截图，请补齐所有产品长截图并移除录屏；不支持联合证据。';
+  if (item.evidenceMode === 'long_screenshot_with_video') return selectEvidenceMode(item)
+    ? '实际评估：每个产品同时输入长截图与本题录屏采帧；两类证据均未出现卡片时，判定未出卡片。'
+    : '联合证据不齐全：每个产品都必须提供长截图和本题录屏，当前 Case 无法提交。';
+  return selectEvidenceMode(item) === 'long_screenshot'
+    ? '实际评估：所有产品统一使用长截图（长截图齐全时优先）。'
+    : selectEvidenceMode(item) === 'video_frames'
+      ? '实际评估：所有产品统一使用录屏采样帧（长截图不齐全，回退录屏）。'
+      : '证据不齐全：请为所有产品补齐长截图或录屏，当前 Case 无法提交。';
 }
 
 export function fromDatasetItem(item, index) {
@@ -42,15 +65,18 @@ export function caseMedia(item) {
   const files = [];
   (item.queryImages || []).forEach((path,i) => files.push({id:i ? `query${i+1}` : 'query', role:'query', label:`提问图片 ${i+1}`, path, meta:item.queryImageMeta?.[i]}));
   const evidenceMode = caseEvidenceMode(item);
-  if (!evidenceMode) return files;
+  const joint = evidenceMode === 'long_screenshot_with_video' || (!item._savedEvidenceMode && !item.sessionId && item.evidenceMode === 'long_screenshot_with_video');
+  if (!evidenceMode && !joint) return files;
   for (let n=1;n<=item.productCount;n++) {
-    const screenshot = evidenceMode === 'long_screenshot';
-    const rawPath = item[`${screenshot ? 'screenshot' : 'video'}${n}Path`];
-    const path = typeof rawPath === 'string' ? rawPath.trim() : '';
-    const source = item[`videoSource${n}`] || {};
-    if (path) files.push({id:`product${n}`, role:screenshot ? 'screenshot' : 'video',
-      label:`产品${n}${screenshot ? '回答长截图' : '录屏'}`, path,
-      meta:screenshot ? item[`screenshotMeta${n}`] : {original_path:source.input_path || source.path,original_sha256:source.sha256}});
+    for (const kind of joint ? ['screenshot', 'video'] : [evidenceMode === 'long_screenshot' ? 'screenshot' : 'video']) {
+      const screenshot = kind === 'screenshot';
+      const rawPath = item[`${screenshot ? 'screenshot' : 'video'}${n}Path`];
+      const path = typeof rawPath === 'string' ? rawPath.trim() : '';
+      const source = item[`videoSource${n}`] || {};
+      if (path) files.push({id:joint ? `product${n}-${kind}` : `product${n}`, role:screenshot ? 'screenshot' : 'video',
+        label:`产品${n}${screenshot ? '回答长截图' : joint ? '补充录屏' : '录屏'}`, path,
+        meta:screenshot ? item[`screenshotMeta${n}`] : {original_path:source.input_path || source.path,original_sha256:source.sha256}});
+    }
   }
   return files;
 }
@@ -109,7 +135,7 @@ export const CompareCaseList = {
     watch(listOpen,open=>{if(!open){stopMedia();batchVersion++;}});
     onUnmounted(()=>{stopMedia();batchVersion++;});
     const hasImages=computed(()=>rows.value.some(({item})=>caseMedia(item).some(f=>f.role!=='video')));
-    return {page,search,expanded,media,listOpen,filtered,pageCount,rows,key,caseMedia,caseEvidenceMode,toggleCase,toggleMedia,allImages,changePage,hasImages,
+    return {page,search,expanded,media,listOpen,filtered,pageCount,rows,key,caseMedia,caseEvidenceMode,evidenceModeLabel,evidenceModeMessage,toggleCase,toggleMedia,allImages,changePage,hasImages,
       basename:path=>String(path||'').split(/[\\/]/).pop()};
   },
   template:`
@@ -125,17 +151,17 @@ export const CompareCaseList = {
             <button class="case-toggle" @click="toggleCase(entry.item)" :aria-expanded="!!expanded[entry.item._uiKey]">
               <span>{{expanded[entry.item._uiKey]?'▾':'▸'}} {{entry.index+1}}</span><span class="case-heading-query">{{entry.item.query || '尚未填写问题'}}</span>
             </button>
-            <span class="dataset-tag">{{entry.item.queryImages?.length?'图文':'文字'}}</span><span class="dataset-tag">{{caseEvidenceMode(entry.item)==='long_screenshot'?'长截图':caseEvidenceMode(entry.item)==='video_frames'?'录屏':'证据不齐全'}}</span><span class="dataset-tag">{{entry.item.productCount}} 产品</span>
+            <span class="dataset-tag">{{entry.item.queryImages?.length?'图文':'文字'}}</span><span class="dataset-tag">{{evidenceModeLabel(caseEvidenceMode(entry.item))}}</span><span class="dataset-tag">{{entry.item.productCount}} 产品</span>
           </div>
           <div v-if="expanded[entry.item._uiKey]" class="compare-case-body">
             <div class="dataset-toolbar"><strong>Case {{entry.item.id || entry.index+1}}</strong><span v-if="entry.item.sessionId" class="dataset-tag">会话 {{entry.item.sessionId}} · 第 {{entry.item.turnIndex}} 轮 · 仅本轮长截图</span><button v-if="!readonly && items.length>1" @click="$emit('remove',entry.index)" class="btn-danger">删除此条</button></div>
             <label class="dataset-label">完整问题</label><p v-if="readonly" class="case-text">{{entry.item.query}}</p><textarea v-else v-model="entry.item.query" rows="2" placeholder="用户问题（必填）"></textarea>
             <label class="dataset-label">共享背景</label><p v-if="readonly" class="case-text">{{entry.item.context || '未填写'}}</p><textarea v-else v-model="entry.item.context" rows="2" placeholder="共享背景（可选）"></textarea>
             <div v-if="!readonly" class="dataset-toolbar">
-              <label>编辑证据类型 <select v-model="entry.item.evidenceMode"><option value="video_frames">录屏视频</option><option value="long_screenshot">回答长截图</option></select></label>
+              <label>编辑证据类型 <select v-model="entry.item.evidenceMode"><option value="video_frames" :disabled="!!entry.item.sessionId">录屏视频</option><option value="long_screenshot">回答长截图</option><option value="long_screenshot_with_video" :disabled="!!entry.item.sessionId">长截图＋录屏补充（单轮）</option></select></label>
               <label>产品数 <select v-model.number="entry.item.productCount"><option :value="2">2</option><option :value="3">3</option></select></label>
             </div>
-            <p v-if="!readonly" :class="caseEvidenceMode(entry.item)?'hint':'err'">{{caseEvidenceMode(entry.item)==='long_screenshot'?'实际评估：所有产品统一使用长截图（长截图齐全时优先）。':caseEvidenceMode(entry.item)==='video_frames'?'实际评估：所有产品统一使用录屏采样帧（长截图不齐全，回退录屏）。':'证据不齐全：请为所有产品补齐长截图或录屏，当前 Case 无法提交。'}}</p>
+            <p v-if="!readonly" :class="caseEvidenceMode(entry.item)?'hint':'err'">{{evidenceModeMessage(entry.item)}}</p>
             <div class="case-products"><div v-for="n in entry.item.productCount" :key="n" class="case-product">
               <strong>产品 {{n}}</strong><label class="dataset-label">回答文字</label><p v-if="readonly" class="case-text">{{entry.item['answer'+n] || '未填写'}}</p><textarea v-else v-model="entry.item['answer'+n]" rows="3" placeholder="产品回答文字（可选）"></textarea>
               <label class="dataset-label">产品背景</label><p v-if="readonly" class="case-text">{{entry.item['context'+n] || '未填写'}}</p><input v-else v-model="entry.item['context'+n]" placeholder="产品背景（可选）">
@@ -160,7 +186,10 @@ export const CompareCaseList = {
                 <label class="op-upload-btn"><input type="file" accept=".png,.jpg,.jpeg,.webp" hidden :disabled="entry.item.queryUploading" @change="$emit('query-upload',$event,entry.index)">上传 / 替换提问图片</label>
                 <button v-if="entry.item.queryImages?.length" @click="$emit('query-path',entry.item,'')" :disabled="entry.item.queryUploading">移除提问图片</button>
                 <span v-if="entry.item.queryUploading">上传中…</span><p v-if="entry.item.queryUploadError" class="err">{{entry.item.queryUploadError}}</p>
-                <template v-for="n in entry.item.productCount" :key="n"><label class="dataset-label">产品 {{n}} {{entry.item.evidenceMode==='long_screenshot'?'长截图':'录屏'}}路径</label><input v-if="entry.item.evidenceMode==='long_screenshot'" v-model="entry.item['screenshot'+n+'Path']" placeholder="回答长截图路径"><input v-else v-model="entry.item['video'+n+'Path']" placeholder="录屏路径"></template>
+                <template v-for="n in entry.item.productCount" :key="n">
+                  <template v-if="entry.item.sessionId || ['long_screenshot','long_screenshot_with_video'].includes(entry.item.evidenceMode)"><label class="dataset-label">产品 {{n}} 长截图路径</label><input v-model="entry.item['screenshot'+n+'Path']" placeholder="回答长截图路径"></template>
+                  <template v-if="!entry.item.sessionId && ['video_frames','long_screenshot_with_video'].includes(entry.item.evidenceMode)"><label class="dataset-label">产品 {{n}} {{entry.item.evidenceMode==='long_screenshot_with_video'?'补充录屏':'录屏'}}路径</label><input v-model="entry.item['video'+n+'Path']" placeholder="当前题目录屏路径"></template>
+                </template>
               </template>
             </details>
           </div>

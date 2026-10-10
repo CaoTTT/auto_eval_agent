@@ -37,9 +37,12 @@ def evidence_records(snapshot: dict, item_indexes: set[int] | None = None) -> li
                         "image_no": len(record["images"]) + 1, "image_role": "product_answer",
                         "product_no": n, "part_no": i, "part_count": len(meta["slices"]),
                         "source_turn": item.get("turn_index"), "split_status": meta.get("split_status")})
-        record.update(item_index=index, item_id=item.get("id", str(index + 1)),
+        record.update(item_index=index, item_id=item.get("id", str(index + 1)), evidence_mode=item.get("evidence_mode"),
                       session_id=item.get("session_id"), target_turn=item.get("turn_index"),
-                      request_budget_report=item.get("request_budget_report"),
+                      request_budget_report=record.get("request_budget_report") or item.get("request_budget_report"),
+                      context_limit_error=item.get("context_limit_error") or record.get("context_limit_error"),
+                      request_limit_error=item.get("request_limit_error") or record.get("request_limit_error"),
+                      retry_allowed=item.get("retry_allowed", record.get("retry_allowed", True)),
                       image_findings=item.get("image_findings", []))
         records.append(record)
     return records
@@ -121,6 +124,8 @@ def evidence_sheets(snapshot: dict) -> dict[str, list[dict]]:
         for image in record["images"]:
             for chunk_no, chunk in enumerate(_chunks(image), 1):
                 images.append({**base, "请求图片序号": image["image_no"], "图片角色": image.get("image_role", "product_answer"),
+                    "证据类型": image.get("evidence_type", "long_screenshot"),
+                    "录屏时间（秒）": image.get("time_s"), "来源录屏SHA256": image.get("source_video_sha256"),
                     "产品序号": image.get("product_no"), "来源轮次": image.get("source_turn"),
                     "历史或当前": image.get("request_role"), "图片路径": image.get("ref_path"),
                     "SHA256": image.get("sha256"), "宽": image.get("width"), "高": image.get("height"),

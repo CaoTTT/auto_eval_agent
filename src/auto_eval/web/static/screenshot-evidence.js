@@ -23,17 +23,20 @@ export const ScreenshotEvidence = {
     onUnmounted(()=>controller?.abort());
     const pretty=value=>JSON.stringify(value,null,2);
     const state=value=>({assembled:'请求已组装',model_call_started:'已开始模型调用',
-      model_response_received:'已收到模型响应',request_not_recorded:'历史任务：实际请求未记录'})[value] || value;
+      model_response_received:'已收到模型响应',request_blocked:'请求预算超限，未调用模型',
+      blocked_before_model_call:'请求预算超限，未调用模型',model_request_limit_rejected:'模型拒绝超限请求，已停止重试',
+      request_not_recorded:'历史任务：实际请求未记录'})[value] || value;
     return {opened,loading,error,record,imageErrors,base,toggle,pretty,state};
   },
   template:`<section class="screenshot-audit">
-    <div class="dataset-toolbar"><button @click="toggle" :aria-expanded="opened">{{opened?'收起':'查看'}}长截图预处理与输入序列</button>
+    <div class="dataset-toolbar"><button @click="toggle" :aria-expanded="opened">{{opened?'收起':'查看'}}模型图片预处理与输入序列</button>
       <a :href="base+'/export?format=screenshot_evidence'">下载本 Case 证据 ZIP</a></div>
     <div v-if="opened">
       <p v-if="loading">正在加载证据记录…</p><p v-if="error" class="err">{{error}}；可收起后重试。</p>
       <template v-if="record">
         <p><strong>{{state(record.record_status)}}</strong> · {{record.images.length}} 张已记录证据图片</p>
-        <details><summary>请求版本、模型与预算</summary><pre class="case-text">{{pretty({version:record.version,judge_model:record.judge_model,protocol:record.protocol,request_sha256:record.request_sha256,composition:record.composition,request_budget_report:record.request_budget_report,image_findings:record.image_findings})}}</pre></details>
+        <p v-if="record.context_limit_error || record.request_limit_error" class="err" role="alert">{{(record.context_limit_error || record.request_limit_error).reason || (record.context_limit_error || record.request_limit_error).message || '请求输入超过限制'}} · 已停止重试，请调整数据或模型配置后新建任务。</p>
+        <details><summary>请求版本、模型与预算</summary><pre class="case-text">{{pretty({version:record.version,judge_model:record.judge_model,protocol:record.protocol,request_sha256:record.request_sha256,composition:record.composition,request_budget_report:record.request_budget_report,context_limit_error:record.context_limit_error,request_limit_error:record.request_limit_error,failed_request_purpose:record.failed_request_purpose,failed_request_budget_report:record.failed_request_budget_report,image_findings:record.image_findings})}}</pre></details>
         <p v-if="record.notice" class="err">{{record.notice}}</p>
         <p class="hint">原图或切片按序输入，无像素拼接。图片顺序与下方 Prompt 中的图片编号对应；文件变化或缺失时不提供替代图片。</p>
         <details v-for="(entry,i) in record.preprocessing" :key="i" class="audit-parameters">
@@ -44,7 +47,7 @@ export const ScreenshotEvidence = {
         </details>
         <div class="evidence-gallery">
           <figure v-for="picture in record.images" :key="picture.image_no" class="evidence-card">
-            <figcaption>图片 {{picture.image_no}} · {{picture.image_role==='query_image'?'共享题图':'产品 '+picture.product_no}} <span v-if="picture.source_turn">· 第 {{picture.source_turn}} 轮</span> · {{picture.request_role==='history'?'历史上下文':picture.request_role==='current'?'当前轮':''}} <span v-if="picture.part_no">· 第 {{picture.part_no}}/{{picture.part_count}} 块</span></figcaption>
+            <figcaption>图片 {{picture.image_no}} · {{picture.image_role==='query_image'?'共享题图':'产品 '+picture.product_no}} <span v-if="picture.source_turn">· 第 {{picture.source_turn}} 轮</span> · {{picture.request_role==='history'?'历史上下文':picture.request_role==='current'?'当前轮':''}} <span v-if="picture.evidence_type==='video_frame' || ['product_answer_video_supplement','aux_video_frame','video_frame'].includes(picture.image_role)">· 补充录屏帧 <span v-if="picture.time_s!=null || picture.timestamp!=null">{{picture.time_s ?? picture.timestamp}} 秒</span></span><span v-else-if="picture.image_role!=='query_image'">· 回答长截图</span> <span v-if="picture.part_no">· 第 {{picture.part_no}}/{{picture.part_count}} 块</span></figcaption>
             <p v-if="imageErrors[picture.image_no]" class="err">图片缺失、已变化或无法校验，请查看 ZIP 清单。</p>
             <a v-else :href="base+'/screenshot-evidence/'+picture.image_no" target="_blank" rel="noopener" class="evidence-image-scroll is-long-screenshot"><img :src="base+'/screenshot-evidence/'+picture.image_no" :alt="'证据图片 '+picture.image_no" loading="lazy" @error="imageErrors[picture.image_no]=true"></a>
             <small>{{picture.width}} × {{picture.height}} px <span v-if="picture.start_y!=null">· 原图纵坐标 [{{picture.start_y}}, {{picture.end_y}})</span></small>

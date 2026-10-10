@@ -1,5 +1,7 @@
 """Large batches must start judging before the whole media queue is prepared."""
 import asyncio
+import base64
+import io
 import json
 import threading
 import time
@@ -65,9 +67,13 @@ async def test_large_compare_batch_starts_judging_while_later_media_waits(monkey
                 }
         return prepared
 
+    encoded_image = io.BytesIO()
+    Image.new("RGB", (40, 40), "white").save(encoded_image, format="PNG")
+    encoded_url = "data:image/png;base64," + base64.b64encode(encoded_image.getvalue()).decode()
+
     def encode(*args, **kwargs):
         media_work(.001)
-        return "data:image/png;base64,c3ludGhldGlj"
+        return encoded_url
 
     class Client:
         def __init__(self, cfg):

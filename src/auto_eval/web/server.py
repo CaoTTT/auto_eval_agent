@@ -170,9 +170,11 @@ def _compare_protocol_or_422(protocol_id: str | None):
         raise HTTPException(422, str(exc)) from exc
 
 
-def _protocol_manifest(protocol, app_cfg, options: dict, resolved_judges=None) -> dict:
+def _protocol_manifest(protocol, app_cfg, options: dict, resolved_judges=None, items=None) -> dict:
     """Freeze non-secret runtime facts needed to interpret/reproduce a task."""
     manifest = protocol.public_metadata()
+    if any(item.get("evidence_mode") == "long_screenshot_with_video" for item in (items or [])):
+        manifest["joint_evidence_version"] = "single-turn-joint-v1"
     visual_profile = app_cfg.visual_modes.get("rich_content")
     if visual_profile is not None:
         manifest["media_algorithm_version"] = visual_profile.extraction.algorithm_version
@@ -248,6 +250,8 @@ def _validate_eval_request(req: EvalReq, app_cfg, *, previous_items=None) -> Non
     invalid: list[str] = []
     for index, item in enumerate(req.items, 1):
         try:
+            if is_conversation(item) and item.get("evidence_mode") == "long_screenshot_with_video":
+                raise ValueError("multiturn_video_unsupported: 多轮仅支持当前轮长截图，不能使用联合证据")
             if not is_conversation(item):
                 # Preserve legacy metadata, but don't let it activate the runner's
                 # conversation path after request validation.
@@ -264,7 +268,9 @@ def _validate_eval_request(req: EvalReq, app_cfg, *, previous_items=None) -> Non
             for field in PREPARED_FIELDS:
                 item.pop(field, None)
             for field in ("media", "frame_count", "video_source", *(f"{prefix}{n}" for n in (1, 2, 3)
-                          for prefix in ("frames", "duration", "screenshot_meta", "video_source"))):
+                          for prefix in ("frames", "aux_frames", "aux_frame_meta", "duration", "screenshot_meta", "video_source")),
+                          "aux_frame_count", "screenshot_frame_count", "joint_evidence_version",
+                          "context_limit_error", "request_limit_error", "retry_allowed", "warning"):
                 item.pop(field, None)
             for n in (1, 2, 3):
                 item.pop(f"video{n}_path", None)
@@ -368,7 +374,7 @@ def api_parse(req: ParseReq):
     return {"items": items, "errors": errs, "count": len(items),
             "rejected_count": len(errs),
             "evidence_counts": {mode: sum(item.get("evidence_mode") == mode for item in items)
-                                for mode in ("long_screenshot", "video_frames")}}
+                                for mode in ("long_screenshot", "video_frames", "long_screenshot_with_video")}}
 
 
 @app.post("/api/compare/preflight")
@@ -467,7 +473,7 @@ async def api_eval(req: EvalReq):
         dataset_name=req.dataset_name.strip(),
         evaluation_profile=protocol.id if protocol else "",
         protocol_manifest=(
-            _protocol_manifest(protocol, app_cfg, req.options, judges) if protocol else {}
+            _protocol_manifest(protocol, app_cfg, req.options, judges, req.items) if protocol else {}
         ),
         judge_runtime=judge_runtime,
     )
@@ -553,7 +559,15 @@ async def api_resume(task_id: str, req: ResumeReq):
         raise HTTPException(409, "当前任务状态不能恢复")
     _check_judge_options(task, {})
     indexes = resume_indexes(task, req.include_failed)
+    latest = latest_results_by_index(task)
+    skipped = [{"index": index, "reason": "request_limit_nonretryable"} for index in indexes
+               if (latest.get(index) or {}).get("retry_allowed") is False
+               or task.items[index].get("retry_allowed") is False]
+    blocked_indexes = {row["index"] for row in skipped}
+    indexes = [index for index in indexes if index not in blocked_indexes]
     if not indexes:
+        if skipped:
+            raise HTTPException(409, {"message": "超过请求或上下文限制的 Case 不再重试，请调整输入后新建任务", "skipped": skipped})
         raise HTTPException(409, "没有待执行的题目；如需重试失败项，请勾选同时重试失败项")
     app_cfg = cfg()
     attempt = {"id": f"resume_{uuid.uuid4().hex[:10]}", "idempotency_key": idem,
@@ -565,7 +579,7 @@ async def api_resume(task_id: str, req: ResumeReq):
     _freeze_legacy_judge(task, app_cfg)
     position = EVAL_SCHEDULER.enqueue(task, app_cfg, run_resume)
     await wait_task_save(task, save=save_task)
-    return {"task_id": task.id, "resume_id": attempt["id"], "status": "queued", "selected": len(indexes), "queue_position": position}
+    return {"task_id": task.id, "resume_id": attempt["id"], "status": "queued", "selected": len(indexes), "queue_position": position, "skipped": skipped}
 
 
 @app.post("/api/eval/{task_id}/retries", status_code=202)
@@ -609,6 +623,11 @@ async def api_retry_failed(task_id: str, req: RetryReq):
             skipped.append({"index": index, "reason": "index_out_of_range"})
             continue
         result = latest.get(index)
+        if (result or {}).get("retry_allowed") is False or task.items[index].get("retry_allowed") is False:
+            skipped.append({"index": index, "reason": "request_limit_nonretryable",
+                "error_type": (result or {}).get("error_type"),
+                "context_limit_error": (result or {}).get("context_limit_error") or task.items[index].get("context_limit_error")})
+            continue
         if result is None and req.include_unfinished:
             accepted.add(index)
             reasons[index] = "unfinished"
@@ -636,6 +655,10 @@ async def api_retry_failed(task_id: str, req: RetryReq):
         if earlier_failed:
             first = min(earlier_failed)
         for idx in indexes[first:]:
+            if (latest.get(idx) or {}).get("retry_allowed") is False or task.items[idx].get("retry_allowed") is False:
+                if not any(row["index"] == idx for row in skipped):
+                    skipped.append({"index": idx, "reason": "request_limit_nonretryable"})
+                continue
             if idx not in accepted:
                 accepted.add(idx)
                 reasons[idx] = "session_dependency"
@@ -697,6 +720,80 @@ async def api_retry_status(task_id: str, retry_id: str):
     if not retry:
         raise HTTPException(404, "retry not found")
     return retry
+
+
+def _evaluation_input_changed(previous: dict, incoming: dict, mode: str, profile) -> bool:
+    """Compare consumed inputs and recorded source bytes, ignoring client diagnostics."""
+    def path(value):
+        candidate = Path(str(value)).expanduser()
+        return str((candidate if candidate.is_absolute() else BASE_DIR / candidate).resolve()).casefold()
+
+    aliases, source_hashes = {}, {}
+    for meta in previous.get("query_image_meta") or []:
+        original, source = meta.get("original_path"), meta.get("source_path")
+        if original and source:
+            aliases[path(original)] = path(source)
+        for raw in (original, source):
+            if raw and meta.get("original_sha256"):
+                source_hashes[path(raw)] = meta["original_sha256"]
+    for number in (1, 2, 3):
+        screenshot = previous.get(f"screenshot_meta{number}") or {}
+        video = previous.get(f"video_source{number}") or {}
+        if screenshot.get("original_path") and screenshot.get("original_sha256"):
+            source_hashes[path(screenshot["original_path"])] = screenshot["original_sha256"]
+        if video.get("path") and video.get("sha256"):
+            source_hashes[path(video["path"])] = video["sha256"]
+    video = previous.get("video_source") or {}
+    if video.get("path") and video.get("sha256"):
+        source_hashes[path(video["path"])] = video["sha256"]
+
+    def identity(item):
+        text = lambda key: str(item.get(key) or "").strip()
+        count = int(item.get("product_count") or (3 if item.get("screenshot3") or item.get("video3") else 2))
+        evidence = item.get("evidence_mode") or (
+            "long_screenshot" if all(item.get(f"screenshot{n}") for n in range(1, count + 1)) else "video_frames")
+        values = {"query": text("query") or text("question"), "context": text("context")}
+        values["context"] = values["context"].split("\n\n历史对话总结：\n", 1)[0]
+        if values["context"].startswith("历史对话总结：\n"):
+            values["context"] = ""
+        for key, legacy in (("task_start_time", "content_start_time"), ("task_end_time", "content_end_time")):
+            values[key] = item.get(key, item.get(legacy))
+        media = []
+        if mode == "compare":
+            values.update(product_count=count, evidence_mode=evidence)
+            kinds = ("screenshot", "video") if evidence == "long_screenshot_with_video" else (
+                "screenshot" if evidence == "long_screenshot" else "video",)
+            for n in range(1, count + 1):
+                for key in (f"answer{n}", f"context{n}"):
+                    values[key] = text(key)
+                for kind in kinds:
+                    raw = item.get(f"{kind}{n}") or ""
+                    values[f"{kind}{n}"] = path(raw)
+                    media.append(raw)
+            media.extend(item.get("query_images") or [])
+            values["query_images"] = [aliases.get(path(raw), path(raw)) for raw in item.get("query_images") or []]
+        else:
+            values.update(answer_text=text("answer_text"), video_path=path(item.get("video_path") or ""))
+            media.append(item.get("video_path") or "")
+        return values, media
+
+    old_values, _ = identity(previous)
+    new_values, media = identity(incoming)
+    if old_values != new_values:
+        return True
+    allowed = operation_video_roots(BASE_DIR)
+    if profile is not None:
+        for raw in profile.query_images.allowed_roots:
+            root = Path(raw).expanduser()
+            allowed.append((root if root.is_absolute() else BASE_DIR / root).resolve())
+    for raw in media:
+        candidate = Path(raw).expanduser()
+        candidate = (candidate if candidate.is_absolute() else BASE_DIR / candidate).resolve()
+        expected = source_hashes.get(str(candidate).casefold())
+        if expected and candidate.is_file() and any(candidate.is_relative_to(root) for root in allowed):
+            if file_hash(candidate) != expected:
+                return True
+    return False
 
 
 @app.post("/api/eval/items")
@@ -779,6 +876,36 @@ async def api_eval_items(req: EvalItemsReq):
         previous_conversations = [it.copy() for it in task.items]
     _validate_eval_request(validated_request, app_cfg, previous_items=previous_conversations)
     req.items = validated_request.items
+    if not created:
+        latest = latest_results_by_index(task)
+        existing = {item.get("id"): (index, item) for index, item in enumerate(task.items)}
+        blocked, reassessments = [], []
+        for item in req.items:
+            match = existing.get(item.get("id"))
+            if not match:
+                continue
+            index, previous = match
+            result = latest.get(index) or {}
+            if previous.get("retry_allowed") is not False and result.get("retry_allowed") is not False:
+                continue
+            changed = await asyncio.to_thread(_evaluation_input_changed, previous, item, mode,
+                                             app_cfg.visual_modes.get("rich_content"))
+            if not changed:
+                blocked.append({"index": index, "item_id": item["id"], "reason": "request_limit_nonretryable",
+                    "context_limit_error": result.get("context_limit_error") or previous.get("context_limit_error"),
+                    "request_limit_error": result.get("request_limit_error") or previous.get("request_limit_error")})
+            else:
+                for field in ("context_limit_error", "request_limit_error", "retry_allowed", "warning",
+                              "request_budget_report", "input_diagnostic_status", "image_warning_count", "image_blocking_count"):
+                    item.pop(field, None)
+                reassessments.append({"index": index, "item_id": item["id"], "created_at": time.time(),
+                    "reason": "evaluation_input_changed", "previous_request_id": result.get("request_id"),
+                    "previous_limit_error": copy.deepcopy(result.get("context_limit_error") or result.get("request_limit_error")
+                        or previous.get("context_limit_error") or previous.get("request_limit_error"))})
+        if blocked:
+            raise HTTPException(409, {"message": "永久超限 Case 的原样输入不能重试，请修改评测输入后重新提交", "blocked": blocked})
+        if reassessments:
+            task.execution_control.setdefault("request_limit_reassessments", []).extend(reassessments)
     if created:
         task = new_task(
             mode,
@@ -788,7 +915,7 @@ async def api_eval_items(req: EvalItemsReq):
             task_id=task_id,
             evaluation_profile=protocol.id if protocol else "",
             protocol_manifest=(
-                _protocol_manifest(protocol, app_cfg, req.options, judges) if protocol else {}
+                _protocol_manifest(protocol, app_cfg, req.options, judges, req.items) if protocol else {}
             ),
             judge_runtime=judge_runtime,
         )
@@ -1297,7 +1424,7 @@ def api_export_item(task_id: str, item_index: int, format: str):
     )
 
     if format == "video":
-        raw_path = str(item.get("video_path") or "").strip()
+        raw_path = str(item.get("video_path") or item.get("video1_path") or item.get("video1") or "").strip()
         if not raw_path:
             media = item.get("media") or []
             raw_path = str(media[0]).strip() if media else ""

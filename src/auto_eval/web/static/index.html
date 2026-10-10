@@ -173,7 +173,7 @@
           <span v-if="errors.length" class="err">⚠ {{ errors.length }} 条未导入</span>
         </div>
         <p v-if="mode==='compare'" class="hint">双产品示例：{"id":"c001","query":"查询天气","product_count":2,"video1":"./video_a.mp4","video2":"./video_b.mp4","answer1":"今天多云","answer2":"今天晴"}<br>三产品示例再增加："product_count":3、"video3"、"context3"、"answer3"。</p>
-        <p v-if="mode==='compare'" class="hint">长截图示例：{"id":"c002","query":"查询天气","screenshot1":"./product1.png","screenshot2":"./product2.png","answer1":"今天多云","answer2":"今天晴"}；三产品增加 screenshot3。路径须为服务可读取的本地文件，同一题不可混用截图与录屏。</p>
+        <p v-if="mode==='compare'" class="hint">长截图示例：{"id":"c002","query":"查询天气","screenshot1":"./product1.png","screenshot2":"./product2.png","answer1":"今天多云","answer2":"今天晴"}；三产品增加 screenshot3。路径须为服务可读取的本地文件。默认统一使用一种证据；单轮显式设置 evidence_mode: "long_screenshot_with_video" 时，每个产品同时提供长截图和录屏；多轮仍仅支持当前轮长截图。</p>
         <p v-else class="hint">示例：{"id":"rich_001","query":"北京明天天气怎么样","context":"当前地点北京","video_path":"data/rich_content/weather.mp4","category":"weather","answer_text":"北京明天晴","task_start_time":0,"task_end_time":18.5}</p>
         <p class="hint">支持 JSON 数组或单个对象，也支持每行一个对象的 JSONL。每条数据可添加 sessionid 等自定义字段，导出 Excel 时自动保留。</p>
         <details v-if="errors.length"><summary>导入错误明细</summary><pre>{{ errors.join('\n') }}</pre></details>
@@ -404,9 +404,9 @@
       <button @click="exportJson" :disabled="!taskId || !!loadingTaskId">导出 JSON</button>
       <button @click="exportXlsx()" :disabled="!taskId || !!loadingTaskId || !!exportingTaskId">{{ exportingTaskId === taskId ? '正在生成 Excel…' : (exportIncludeImages ? '导出 XLSX（含原图）' : '导出 XLSX（不含原图）') }}</button>
       <button v-if="isVideoMode" @click="exportFrames" :disabled="!taskId || !!loadingTaskId">导出视觉证据 ZIP</button>
-      <a v-if="taskId && items.some(it=>it.evidence_mode==='long_screenshot' || it.screenshot_meta1)" :href="'/api/eval/'+encodeURIComponent(taskId)+'/export?format=screenshot_evidence'">下载长截图输入证据 ZIP</a>
+      <a v-if="taskId && items.some(it=>['long_screenshot','long_screenshot_with_video'].includes(it.evidence_mode) || it.screenshot_meta1)" :href="'/api/eval/'+encodeURIComponent(taskId)+'/export?format=screenshot_evidence'">下载模型输入证据 ZIP</a>
       <span v-if="loadingTaskId">正在加载任务，请稍候…</span>
-      <button v-if="summary && summary.failed && selectedTaskStatus === 'done'" @click="retryFailedCases(null)" :disabled="retrySubmitting || ['queued','running'].includes(repairStatus)">
+      <button v-if="summary && failedResultIndexes.length && selectedTaskStatus === 'done'" @click="retryFailedCases(null)" :disabled="retrySubmitting || ['queued','running'].includes(repairStatus)">
         {{ retrySubmitting ? '提交中…' : '重跑全部失败项' }}
       </button>
       <button v-if="selectedRetryIndexes.length" @click="retryFailedCases(selectedRetryIndexes)" :disabled="retrySubmitting || ['queued','running'].includes(repairStatus)">
@@ -421,7 +421,7 @@
       <summary>会话 {{group.id}} · {{group.turns.length}} 轮结果</summary>
       <button v-for="turn in group.turns" :key="turn.index" @click="resultQuery=turn.item_id; resetResultPage()">第 {{turn.turn_index}} 轮 · {{turn.error?'失败':'完成'}} · {{turn.image_warning_count || 0}} 项图片诊断</button>
     </details>
-    <details v-if="running && Object.keys(liveInputDiagnostics).length" class="query-image-panel" open><summary>运行中图片检查</summary><p v-for="row in liveInputDiagnostics" :key="row.item_index">{{row.session_id}} · 第 {{row.turn_index}} 轮 · {{row.input_diagnostic_status}} · {{row.image_warning_count}} 项诊断</p></details>
+    <details v-if="running && Object.keys(liveInputDiagnostics).length" class="query-image-panel" open><summary>运行中输入检查</summary><p v-for="row in liveInputDiagnostics" :key="row.item_index" :class="row.input_diagnostic_status==='blocked'?'err':'hint'">Case {{row.item_id || items[row.item_index]?.id || Number(row.item_index)+1}}<span v-if="row.session_id"> · 会话 {{row.session_id}} · 第 {{row.turn_index}} 轮</span> · {{row.input_diagnostic_status}} · {{row.image_warning_count || 0}} 项诊断<span v-if="row.request_budget_report"> · {{requestDiagnosticText(row)}}</span><span v-if="row.context_limit_error || row.request_limit_error"> · {{contextLimitReason(row)}} · 已停止重试</span></p></details>
     <div class="summary" v-if="summary">
       <span v-if="summary.input_modality_counts">文字题 {{ summary.input_modality_counts.text }} · 图文题 {{ summary.input_modality_counts.text_image }}</span>
       <span>样本量 {{ summary.total }}</span>
@@ -449,7 +449,7 @@
         <input v-model="resultQuery" @input="resetResultPage" placeholder="搜索题号、query、context、回答或理由">
         <select v-if="mode==='compare'" v-model="modalityFilter" @change="resetResultPage"><option value="">全部题型</option><option value="text">文字题</option><option value="text_image">图文题</option></select>
         <input v-if="conversationGroups.length" v-model="turnFilter" @input="resetResultPage" placeholder="筛选轮次，如 3" style="max-width:130px">
-        <select v-if="conversationGroups.length" v-model="diagnosticFilter" @change="resetResultPage"><option value="">全部输入状态</option><option value="warning">含图片警示</option><option value="blocked">被阻断</option></select>
+        <select v-if="results.some(r=>r.input_diagnostic_status || r.context_limit_error || r.request_limit_error || r.request_budget_report)" v-model="diagnosticFilter" @change="resetResultPage"><option value="">全部输入状态</option><option value="warning">含输入警示</option><option value="blocked">被阻断</option><option value="context_limit">输入 / 上下文超限</option></select>
         <button @click="resetResultFilters">重置全部筛选</button>
         <span class="result-count" role="status">筛选后 {{ filteredResults.length }} / {{ results.length }} 条</span>
         <template v-if="pagedResults.some(r => evidenceImages(r).length)">
@@ -539,7 +539,8 @@
               <tr :class="{'result-error':r.error}">
                 <td><div class="cell-clamp cell-center">{{ (resultPage-1)*resultPageSize+i+1 }}</div></td>
                 <td class="cell-center">
-                  <input v-if="r.error" type="checkbox" :checked="retryIndexSelected(r.index)" @change="toggleRetryIndex(r.index)" :disabled="['queued','running'].includes(repairStatus)">
+                  <input v-if="r.error && r.retry_allowed!==false" type="checkbox" :checked="retryIndexSelected(r.index)" @change="toggleRetryIndex(r.index)" :disabled="['queued','running'].includes(repairStatus)">
+                  <span v-else-if="r.error && r.retry_allowed===false" class="dataset-tag" title="调整数据或模型配置后新建任务">不重试</span>
                 </td>
                 <td
                   v-for="c in resultCols"
@@ -593,7 +594,7 @@
                   </div>
                 </div>
               </td></tr>
-              <tr v-if="taskId && (r.evidence_mode==='long_screenshot' || items[r.index]?.screenshot1 || items[r.index]?.screenshot_meta1)"><td colspan="99" class="query-image-panel">
+              <tr v-if="taskId && (['long_screenshot','long_screenshot_with_video'].includes(r.evidence_mode) || items[r.index]?.screenshot1 || items[r.index]?.screenshot_meta1)"><td colspan="99" class="query-image-panel">
                 <screenshot-evidence :key="taskId+':'+r.index+':'+(evidenceRevisions[r.index] || 0)" :task-id="taskId" :item-index="Number(r.index)"></screenshot-evidence>
               </td></tr>
               <tr v-if="r.session_id"><td colspan="99" class="query-image-panel">
@@ -604,6 +605,11 @@
                   <p v-for="finding in r.image_findings" :key="finding.finding_id" :class="finding.status==='blocked'?'err':'hint'">{{finding.asset_id}} · 来源第 {{finding.source_turn}} 轮 · {{finding.limit_kind==='local_guardrail'?'平台保护限制':finding.limit_kind==='effective_vision'?'视觉缩放风险':finding.limit_kind==='official_hard'?'官方输入限制':'输入诊断'}} · {{finding.metric || finding.code}}：{{finding.observed}} / {{finding.limit}} {{finding.unit}} · {{finding.status==='resolved_by_lossless_split'?'已通过无损切片解决':finding.message || finding.status}}</p>
                   <p v-if="r.request_budget_report">请求图片 {{r.request_budget_report.actual_image_count}} 张 · 请求体 {{r.request_budget_report.request_payload_bytes}} 字节 · 保守估算 {{r.request_budget_report.estimated_input_tokens}} Token</p>
                 </details>
+              </td></tr>
+              <tr v-if="r.context_limit_error || r.request_limit_error || r.request_budget_report" :class="{'result-error-detail':r.context_limit_error || r.request_limit_error}"><td colspan="99" class="query-image-panel">
+                <p v-if="r.context_limit_error || r.request_limit_error" class="err" role="alert"><strong>{{r.context_limit_error?'输入 / 上下文超限':'请求输入超过限制'}}</strong> · {{contextLimitReason(r)}}<span v-if="r.retry_allowed===false"> · 已停止重试；请调整数据或模型配置后新建任务。</span></p>
+                <p v-if="r.request_budget_report" :class="r.input_diagnostic_status==='blocked'?'err':'hint'">{{requestDiagnosticText(r)}}</p>
+                <details><summary>请求预算与错误溯源 · Case {{r.item_id || r.index}}</summary><pre class="case-text">{{diagnosticJson(r)}}</pre></details>
               </td></tr>
               <tr v-if="r.error" class="result-error-detail"><td colspan="99">评估失败：{{ r.error }}</td></tr>
             </template>
@@ -644,6 +650,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20260923_result_filters"></script>
+  <script type="module" src="/static/app.js?v=20261010_joint"></script>
 </body>
 </html>

@@ -24,8 +24,9 @@ FORMATS = {".png": "PNG", ".jpg": "JPEG", ".jpeg": "JPEG", ".webp": "WEBP"}
 
 
 class QueryImageError(ValueError):
-    def __init__(self, code: str, message: str):
+    def __init__(self, code: str, message: str, *, request_budget_report: dict | None = None):
         self.code = code
+        self.request_budget_report = request_budget_report
         super().__init__(message)
 
 
@@ -163,27 +164,14 @@ def _snapshot_bytes(path: Path, content: bytes) -> None:
 
 def check_request_budget(system: str, parts: list[dict], cfg: QueryImageConfig) -> list[dict]:
     """Inspect actual encoded views; estimates are local guardrails, not billing."""
-    views = []
-    for part in parts:
-        check_preparation()
-        if part["type"] != "image_url":
-            continue
-        url = part["image_url"]["url"]
-        raw = base64.b64decode(url.split(",", 1)[1], validate=True)
-        with Image.open(io.BytesIO(raw)) as im:
-            if im.width * im.height > cfg.max_pixels or len(url) >= cfg.max_data_url_bytes:
-                raise QueryImageError("request_image_limit_exceeded", "请求中的单图超过模型图片限制")
-            views.append({"sha256": hashlib.sha256(raw).hexdigest(), "width": im.width, "height": im.height})
-    if len(views) > cfg.max_request_images:
-        raise QueryImageError("request_image_limit_exceeded", "题图和回答证据的总图片数超限")
-    payload_size = len(json.dumps({"system": system, "content": parts}, ensure_ascii=False).encode())
-    if payload_size + cfg.request_overhead_bytes > cfg.max_request_bytes:
-        raise QueryImageError("request_image_limit_exceeded", "题图和回答证据的请求体总大小超限")
-    text = system + "".join(p.get("text", "") for p in parts)
-    estimate = len(text.encode("utf-8")) + sum(((v["width"] + 31) // 32) * ((v["height"] + 31) // 32) + 256 for v in views)
-    if estimate > cfg.max_input_tokens or estimate + cfg.output_reserve_tokens > cfg.context_window:
-        raise QueryImageError("context_budget_exceeded", "图文请求的保守上下文预算超限")
-    return views
+    # Keep the established API, but share the complete report/error path used by
+    # requests without question images and by the joint-evidence mode.
+    from types import SimpleNamespace
+    from .image_limits import request_budget, enforce_request_budget
+    report = request_budget(system, parts, [], {"model": None, "limits_profile_version": "local-query-image-v2"},
+                            SimpleNamespace(query_images=cfg, long_screenshot=cfg))
+    enforce_request_budget(report)
+    return [{key: view[key] for key in ("sha256", "width", "height")} for view in report["image_views"]]
 
 
 def input_manifest(question: str, context: str, parts: list[dict], views: list[dict], protocol: dict, policy: dict) -> str:

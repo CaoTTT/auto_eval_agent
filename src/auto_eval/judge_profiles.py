@@ -35,12 +35,15 @@ def model_profiles(config: AppConfig) -> list[JudgeModelProfile]:
                         id=profile_id if len(config.judges) == 1 else f"{judge.name}_{profile_id}",
                         display=display, judge_name=judge.name, model=model_id,
                         supports_thinking=True, default_enable_thinking=thinking, rate_limit=rate,
+                        max_input_tokens=judge.max_input_tokens if model_id == model.lower() else None,
+                        context_window=judge.context_window if model_id == model.lower() else None,
                     ))
             else:
                 profiles.append(JudgeModelProfile(
                     id=f"configured_{judge.name}", display=model, judge_name=judge.name, model=model,
                     supports_thinking=judge.enable_thinking is not None,
                     default_enable_thinking=judge.enable_thinking, rate_limit=judge.rate_limit,
+                    max_input_tokens=judge.max_input_tokens, context_window=judge.context_window,
                 ))
     names = {j.name for j in config.judges}
     if len({p.id for p in profiles}) != len(profiles):
@@ -71,6 +74,12 @@ def configured_profile(config: AppConfig, profile: JudgeModelProfile, thinking=N
     base = next(j for j in config.judges if j.name == profile.judge_name)
     data = base.model_dump()
     data.update(model=profile.model, enable_thinking=thinking, rate_limit=profile.rate_limit)
+    same_model = profile.model.lower() == (base.model or base.name).lower()
+    for field in ("max_input_tokens", "context_window"):
+        declared = getattr(profile, field)
+        # Caps belong to a model/endpoint; a sibling model must not accidentally
+        # inherit the configured model's declared context window.
+        data[field] = declared if declared is not None else getattr(base, field) if same_model else None
     if profile.total_timeout_s is not None:
         data["total_timeout_s"] = profile.total_timeout_s
     return JudgeConfig.model_validate(data)
@@ -175,6 +184,10 @@ def legacy_runtime(config: AppConfig, task) -> dict:
         raise ValueError("旧任务裁判连接配置不可用，请新建任务")
     data = base.model_dump()
     data.update(record, model=model, enable_thinking=record.get("enable_thinking"))
+    # Legacy snapshots did not declare token caps. A newly configured cap must
+    # not be retroactively attributed to that historical model/request.
+    for field in ("max_input_tokens", "context_window"):
+        data[field] = record.get(field)
     if model != base.model:
         data["rate_limit"] = None
     judge = JudgeConfig.model_validate(data)

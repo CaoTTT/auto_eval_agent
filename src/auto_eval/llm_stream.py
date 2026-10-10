@@ -14,6 +14,7 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimi
 from .observability import current_context, error_details, log_event
 from .request_throttle import RequestThrottle, estimate_input_tokens, wait_for_active
 from .request_transport import HeaderAdmission, header_admission, paced_http_client
+from .request_errors import is_nonretryable_request_limit, request_limit_diagnostics
 from .task_control import check_pause, pause_aware
 from .timing import record_model_attempt, timing_span
 
@@ -110,6 +111,8 @@ def _status_code(exc: BaseException) -> int | None:
 
 def is_retriable_llm_error(exc: BaseException) -> bool:
     """只重试瞬时错误，避免对鉴权和参数错误反复请求。"""
+    if is_nonretryable_request_limit(exc):
+        return False
     if isinstance(exc, ProviderStreamError):
         return exc.retriable
     if isinstance(
@@ -188,6 +191,8 @@ def _provider_stream_error(error: Any) -> ProviderStreamError:
 
 
 def _rejects_stream_usage(exc: BaseException) -> bool:
+    if is_nonretryable_request_limit(exc):
+        return False
     if not isinstance(exc, APIStatusError) or _status_code(exc) not in {400, 422}:
         return False
     detail = f"{exc} {getattr(exc, 'body', '')}".lower()
@@ -556,6 +561,11 @@ async def stream_chat_completion(
             raise
         except Exception as exc:
             last_exc = exc
+            limit_error = request_limit_diagnostics(exc, model=kwargs.get("model"))
+            if limit_error:
+                setattr(exc, "request_limit_error", limit_error)
+                if limit_error["code"] in {"context_budget_exceeded", "context_limit_exceeded"}:
+                    setattr(exc, "context_limit_error", limit_error)
             retriable = is_retriable_llm_error(exc)
             final = attempt >= max_attempts - 1 or not retriable
             stats = getattr(exc, "_auto_eval_stream_stats", {}) or {}
@@ -569,11 +579,15 @@ async def stream_chat_completion(
                 "耗时": f"{time.perf_counter() - call_started:.2f}秒",
                 **error_details(exc, include_traceback=final),
             }
+            if limit_error:
+                details["request_limit_error"] = limit_error
             if final:
                 log_event(
                     module,
                     (
-                        "服务端返回错误，停止重试"
+                        "请求超过模型或平台限制，停止重试"
+                        if limit_error
+                        else "服务端返回错误，停止重试"
                         if isinstance(exc, ProviderStreamError)
                         else "流式调用最终失败"
                     ),

@@ -54,6 +54,10 @@ class JudgeConfig(BaseModel):
     vl_high_resolution_images: bool = False
     enable_thinking: StrictBool | None = None
     rate_limit: RateLimitConfig | None = None
+    # Optional operator-declared model/gateway caps. They are always combined
+    # with the stricter visual-mode guardrails and are not official verification.
+    max_input_tokens: int | None = Field(default=None, gt=0)
+    context_window: int | None = Field(default=None, gt=0)
 
     def api_key(self) -> str | None:
         return os.environ.get(self.api_key_env) if self.api_key_env else None
@@ -125,6 +129,8 @@ class JudgeModelProfile(BaseModel):
     default_enable_thinking: StrictBool | None = None
     rate_limit: RateLimitConfig | None = None
     total_timeout_s: float | None = Field(default=None, gt=0)
+    max_input_tokens: int | None = Field(default=None, gt=0)
+    context_window: int | None = Field(default=None, gt=0)
 
 
 class AppConfig(BaseModel):

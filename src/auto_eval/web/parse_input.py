@@ -14,6 +14,7 @@ from copy import deepcopy
 import io
 import json
 import math
+import re
 from numbers import Real
 from typing import Iterator, Literal
 from ..query_images import normalize_query_input
@@ -89,14 +90,23 @@ def _compare_product_count(obj: dict) -> int:
 
 def compare_evidence_mode(obj: dict) -> tuple[int, str]:
     """Choose one complete evidence layer for every product in the case."""
+    requested_mode = obj.get("evidence_mode")
+    if requested_mode == "long_screenshot_with_video" and is_conversation(obj):
+        raise ValueError("multiturn_video_unsupported: 多轮仅支持当前轮长截图，不能使用联合证据")
     normalize_turn(obj)
     count = _compare_product_count(obj)
-    if obj.get("evidence_mode") not in (None, "", "long_screenshot", "video_frames"):
-        raise ValueError("evidence_mode 只能是 long_screenshot 或 video_frames")
+    if requested_mode not in (None, "", "long_screenshot", "video_frames", "long_screenshot_with_video"):
+        raise ValueError("evidence_mode 只能是 long_screenshot、video_frames 或 long_screenshot_with_video")
     missing = {}
     for kind in ("screenshot", "video"):
         missing[kind] = [f"{kind}{n}" for n in range(1, count + 1)
                          if not isinstance(obj.get(f"{kind}{n}"), str) or not obj[f"{kind}{n}"].strip()]
+    if requested_mode == "long_screenshot_with_video":
+        missing_fields = missing["screenshot"] + missing["video"]
+        if missing_fields:
+            raise ValueError("联合证据要求所有产品同时提供长截图和录屏；缺少或路径无效："
+                             + "、".join(missing_fields))
+        return count, requested_mode
     if not missing["screenshot"]:
         return count, "long_screenshot"
     if not missing["video"]:
@@ -112,11 +122,13 @@ def normalize_compare_evidence(obj: dict) -> dict:
     """Keep only selected input paths; unused evidence remains in source_data."""
     count, mode = compare_evidence_mode(obj)
     normalized = dict(obj)
-    selected = "screenshot" if mode == "long_screenshot" else "video"
+    selected = {"screenshot", "video"} if mode == "long_screenshot_with_video" else {
+        "screenshot" if mode == "long_screenshot" else "video"
+    }
     for number in range(1, 4):
         for kind in ("screenshot", "video"):
             field = f"{kind}{number}"
-            if kind == selected and number <= count:
+            if kind in selected and number <= count:
                 normalized[field] = obj[field].strip()
             else:
                 normalized.pop(field, None)
@@ -239,8 +251,10 @@ def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
             item["product_count"] = product_count
             item["evidence_mode"] = evidence_mode
             invalid = False
-            for product_no in range(1, product_count + 1):
-                field = f"{'screenshot' if evidence_mode == 'long_screenshot' else 'video'}{product_no}"
+            kinds = ("screenshot", "video") if evidence_mode == "long_screenshot_with_video" else (
+                "screenshot" if evidence_mode == "long_screenshot" else "video",
+            )
+            for field in (f"{kind}{product_no}" for product_no in range(1, product_count + 1) for kind in kinds):
                 value = obj.get(field)
                 if not isinstance(value, str) or not value.strip():
                     errors.append(f"{location} compare 模式缺少 {field}")
@@ -387,10 +401,66 @@ def _build_csv_context(start_time_node: str, location: str) -> str:
     return "；".join(parts)
 
 
-def parse_csv(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
-    """解析垂域视觉评测多轮 CSV。
+def _parse_compare_csv(content: str) -> tuple[list[dict], list[str]]:
+    """Read compare input columns through the same JSON validator, including conversations."""
+    try:
+        reader = csv.DictReader(io.StringIO(content.removeprefix("\ufeff")))
+        headers = reader.fieldnames or []
+        if not headers:
+            return [], ["CSV 没有列名"]
+        if len(headers) != len({header.strip() for header in headers}):
+            return [], ["CSV 列名不能重复"]
+        records, errors, source_lines = [], [], []
+        previous_line = reader.line_num
+        for row in reader:
+            line = previous_line + 1
+            previous_line = reader.line_num
+            source_lines.append(line)
+            if None in row:
+                errors.append(f"CSV 第 {line} 行列数超过表头")
+                records.append({"query": ""})
+                continue
+            obj = {key.strip(): value.strip() for key, value in row.items()
+                   if key and value is not None and value.strip()}
+            invalid = False
+            for field in ("product_count", "turn_index"):
+                if field in obj:
+                    try:
+                        obj[field] = int(obj[field])
+                    except ValueError:
+                        errors.append(f"CSV 第 {line} 行 {field} 必须是整数")
+                        invalid = True
+            for field in (*_RICH_CONTENT_TIME_LEGACY, *_RICH_CONTENT_TIME_LEGACY.values()):
+                if field in obj:
+                    try:
+                        obj[field] = float(obj[field])
+                    except ValueError:
+                        errors.append(f"CSV 第 {line} 行 {field} 必须是有限数字")
+                        invalid = True
+            if "query_images" in obj:
+                try:
+                    obj["query_images"] = json.loads(obj["query_images"])
+                except json.JSONDecodeError:
+                    errors.append(f"CSV 第 {line} 行 query_images 必须是 JSON 数组")
+                    invalid = True
+            # Keep record positions for truthful CSV source_line and grouped validation.
+            records.append(obj if not invalid else {"query": ""})
+        if errors and any(is_conversation(obj) for obj in records):
+            return [], errors + ["多轮 CSV 批次存在无效记录，未导入任何记录"]
+        items, parsed_errors = parse_jsonl("\n".join(json.dumps(obj, ensure_ascii=False) for obj in records), "compare")
+        for item in items:
+            item["source_line"] = source_lines[int(item.get("source_line") or 1) - 1]
+        parsed_errors = [re.sub(r"第 (\d+) 行", lambda match: f"CSV 第 {source_lines[int(match[1]) - 1]} 行", error)
+                         for error in parsed_errors]
+        return items, errors + parsed_errors
+    except csv.Error as exc:
+        return [], [f"CSV 解析错误：{exc}"]
 
-    仅支持 rich_content。**完全按 ``is_start``/``is_end``
+
+def parse_csv(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
+    """解析 compare 标准字段 CSV 或 rich_content 采集 CSV。
+
+    rich_content 完全按 ``is_start``/``is_end``
     切 session**（不依赖上游 ``session_id`` 列）：每个 session 共享一段视频
     （``video_path`` 取 ``is_end`` 行的「文件路径」），每行（每轮 query）产出一条
     item，带上合成的 ``session_group``/``turn_index``，供 runner 组内串行评测、
@@ -400,6 +470,8 @@ def parse_csv(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
     与 ``文件路径`` 可为空（按默认策略）。前序轮次的总结不在解析阶段生成，
     而是在评测时产生（见 runner.run_session）。
     """
+    if mode == "compare":
+        return _parse_compare_csv(content)
     if mode != "rich_content":
         return [], ["CSV 导入仅支持垂域视觉评测（rich_content）模式"]
 

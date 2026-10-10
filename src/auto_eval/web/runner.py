@@ -31,6 +31,7 @@ from ..judges import (
 from ..judges.base import flush_web_trace_records
 from ..judges.compare_protocols import resolve_compare_protocol
 from ..llm_stream import is_retriable_llm_error
+from ..request_errors import request_limit_diagnostics, is_nonretryable_request_limit
 from ..long_screenshot import ContextBudgetExceeded, RISKY_REVIEW_REASON
 from ..observability import (
     bind_chain_context,
@@ -45,6 +46,7 @@ from .video_prepare import (
     prepare_session_rich_content_item,
     prepare_session_visual_compare_item,
     prepare_session_long_screenshot_item,
+    prepare_session_joint_evidence_item,
 )
 from .tasks import (
     Task,
@@ -404,6 +406,12 @@ def _make_item_evaluator(
     from ..image_limits import resolve_image_limits
     from .conversation_prepare import ConversationPreparation
     conversation_preparer = None
+    if task.mode == "compare" and any(it.get("evidence_mode") == "long_screenshot_with_video" for it in task.items):
+        version = task.protocol_manifest.get("joint_evidence_version", "single-turn-joint-v1")
+        if version != "single-turn-joint-v1":
+            raise ValueError("不支持该联合证据版本，请使用原版本恢复")
+        task.protocol_manifest.update(joint_evidence_version=version,
+            image_limits=task.protocol_manifest.get("image_limits") or resolve_image_limits(judges_cfg[0], rich_profile))
     if task.mode == "compare" and any(it.get("session_id") for it in task.items):
         if task.protocol_manifest.get("conversation_adapter_version", VERSION) != VERSION:
             raise ValueError("不支持该多轮适配器版本，请使用原版本恢复")
@@ -510,9 +518,10 @@ def _make_item_evaluator(
                         **{key: item_dict[key] for key in DIAGNOSTIC_FIELDS if key in item_dict}})
                 item_dict.pop("input_manifest_sha256", None)
                 is_screenshot = task.mode == "compare" and (
-                    item_dict.get("evidence_mode") == "long_screenshot"
+                    item_dict.get("evidence_mode") in {"long_screenshot", "long_screenshot_with_video"}
                     or (not item_dict.get("evidence_mode") and bool(item_dict.get("screenshot1")))
                 )
+                is_joint = task.mode == "compare" and item_dict.get("evidence_mode") == "long_screenshot_with_video"
                 has_source_video = (
                     any(item_dict.get(f"video{n}") for n in (1, 2, 3))
                     if task.mode == "compare"
@@ -527,6 +536,7 @@ def _make_item_evaluator(
                     try:
                         log_event(
                             "视觉证据准备" if is_screenshot else "视频准备",
+                            "校验长截图和补充录屏" if is_joint else
                             "校验长截图并选择切片边界" if is_screenshot else "校验视频并分析场景",
                             details={
                                 "视觉证据路径": (
@@ -541,11 +551,13 @@ def _make_item_evaluator(
                                 )
                             },
                             progress=3,
-                            progress_message="正在准备长截图视觉证据" if is_screenshot else "正在校验视频并分析场景",
+                            progress_message="正在准备长截图和补充录屏帧" if is_joint else
+                            "正在准备长截图视觉证据" if is_screenshot else "正在校验视频并分析场景",
                         )
                         if rich_profile is None:
                             raise ValueError("缺少 rich_content 视觉模式配置")
                         prepare_call = (
+                            prepare_session_joint_evidence_item if is_joint else
                             prepare_session_long_screenshot_item if is_screenshot else prepare_session_visual_compare_item
                             if task.mode == "compare"
                             else prepare_session_rich_content_item
@@ -569,14 +581,18 @@ def _make_item_evaluator(
                             _frame_dir = str(Path(item_dict["frames1"][0]).parent)
                         log_event(
                             "视觉证据准备" if is_screenshot else "视频准备",
-                            "长截图准备完成" if is_screenshot else "关键帧提取完成",
+                            "联合证据准备完成" if is_joint else "长截图准备完成" if is_screenshot else "关键帧提取完成",
                             details={
                                 "视觉证据图片数": item_dict.get("frame_count"),
+                                **({"补充录屏帧数": item_dict.get("aux_frame_count", 0)} if is_joint else {}),
                                 "证据目录": _frame_dir,
                                 **({"长截图预处理": [item_dict.get(f"screenshot_meta{n}") for n in range(1, _compare_product_count(item_dict) + 1)]} if is_screenshot else {}),
                             },
                             progress=12,
-                            progress_message=f"长截图准备完成（{item_dict.get('frame_count', 0)} 张）" if is_screenshot else f"关键帧提取完成（{item_dict.get('frame_count', 0)} 帧）",
+                            progress_message=(f"联合证据准备完成（长截图{item_dict.get('screenshot_frame_count', 0)}张、"
+                                f"录屏{item_dict.get('aux_frame_count', 0)}帧）") if is_joint else
+                                f"长截图准备完成（{item_dict.get('frame_count', 0)} 张）" if is_screenshot else
+                                f"关键帧提取完成（{item_dict.get('frame_count', 0)} 帧）",
                         )
                     except Exception as e:
                         last_error = e
@@ -586,7 +602,8 @@ def _make_item_evaluator(
                             level=logging.ERROR,
                             details=error_details(e),
                             progress=12,
-                            progress_message="长截图准备失败" if is_screenshot else "视频校验或抽帧失败",
+                            progress_message="长截图或补充录屏准备失败" if is_joint else
+                            "长截图准备失败" if is_screenshot else "视频校验或抽帧失败",
                             progress_status="error",
                         )
                 check_pause()
@@ -628,6 +645,7 @@ def _make_item_evaluator(
                                     compare_judges=compare_judges,
                                     evidence_callback=save_evidence,
                                     category_display=category_display,
+                                    **({"image_limits": task.protocol_manifest.get("image_limits")} if is_joint else {}),
                                     **({"conversation_input": conversation_input} if conversation_input else {}),
                                 ),
                                 timeout=eval_timeout,
@@ -644,7 +662,7 @@ def _make_item_evaluator(
                             break
                         except Exception as e:
                             last_error = e
-                            retryable = is_retriable_llm_error(e)
+                            retryable = not is_nonretryable_request_limit(e) and is_retriable_llm_error(e)
                             will_retry = attempt == 0 and retryable
                             log_event(
                                 "单题评测",
@@ -676,6 +694,26 @@ def _make_item_evaluator(
                             needs_review=True, needs_review_label="T",
                             review_reasons=[str(last_error)], review_reason=str(last_error),
                         )
+                    limit_error = request_limit_diagnostics(last_error, model=getattr(judges_cfg[0], "model", None),
+                        request_budget_report=item_dict.get("request_budget_report"))
+                    if limit_error:
+                        field = ("context_limit_error" if limit_error["code"] in {
+                            "context_limit_exceeded", "context_budget_exceeded"} else "request_limit_error")
+                        report = limit_error.get("request_budget_report")
+                        diagnostic_status = {"input_diagnostic_status": "blocked",
+                            "image_warning_count": max(1, int(item_dict.get("image_warning_count") or 0)),
+                            "image_blocking_count": max(1, int(item_dict.get("image_blocking_count") or 0))}
+                        res.update(error_type=limit_error["code"], retry_allowed=False,
+                            warning=limit_error["reason"], **diagnostic_status, **{field: limit_error})
+                        item_dict.update(retry_allowed=False, **diagnostic_status, **{field: limit_error})
+                        task.items[idx].update(retry_allowed=False, **diagnostic_status, **{field: limit_error})
+                        if report:
+                            res["request_budget_report"] = report
+                            item_dict["request_budget_report"] = report
+                            task.items[idx]["request_budget_report"] = report
+                        await task.publish("input_diagnostics", {"item_index": idx,
+                            "retry_allowed": False, field: limit_error, **diagnostic_status,
+                            "request_budget_report": report})
                     if is_screenshot and any(
                         (item_dict.get(f"screenshot_meta{n}") or {}).get("split_status") == "risky"
                         for n in range(1, _compare_product_count(item_dict) + 1)
@@ -691,7 +729,11 @@ def _make_item_evaluator(
                         request_id=request_id,
                     )
             res["index"] = idx
+            res["request_id"] = request_id
             if task.mode == "compare":
+                if res.get("request_budget_report"):
+                    item_dict["request_budget_report"] = res["request_budget_report"]
+                    task.items[idx]["request_budget_report"] = res["request_budget_report"]
                 for field in DIAGNOSTIC_FIELDS:
                     if field in item_dict:
                         res[field] = item_dict[field]
@@ -809,6 +851,10 @@ _PREPARED_ITEM_FIELDS = {
     "video_name", "video1_path", "video2_path", "video3_path",
     "video_source", "video_source1", "video_source2", "video_source3",
     "duration", "duration1", "duration2", "duration3",
+    "aux_frames1", "aux_frames2", "aux_frames3",
+    "aux_frame_meta1", "aux_frame_meta2", "aux_frame_meta3",
+    "aux_frame_count", "screenshot_frame_count", "joint_evidence_version",
+    "request_budget_report", "context_limit_error", "request_limit_error", "retry_allowed",
 }
 from ..conversation import DIAGNOSTIC_FIELDS as _CONVERSATION_FIELDS
 _PREPARED_ITEM_FIELDS.update(_CONVERSATION_FIELDS | {"conversation_assets", "screenshot1", "screenshot2", "screenshot3"})
@@ -878,6 +924,12 @@ async def run_resume(task: Task, cfg: AppConfig) -> None:
             for turn, index in enumerate(indexes, 1):
                 result = latest.get(index) or {}
                 if index in targets:
+                    if result.get("retry_allowed") is False or task.items[index].get("retry_allowed") is False:
+                        attempt["skipped"] = attempt.get("skipped", 0) + 1
+                        attempt["completed"] = attempt.get("completed", 0) + 1
+                        if index in pending:
+                            pending.remove(index)
+                        continue
                     if task.pause_requested:
                         break
                     item = copy.deepcopy(task.items[index])
@@ -971,6 +1023,9 @@ async def run_retry(task: Task, cfg: AppConfig, retry_id: str) -> None:
         if res.get("error"):
             retry["failed"] = int(retry.get("failed", 0)) + 1
             item_state.update({"status": "failed", "error": res.get("error")})
+            for field in ("request_budget_report", "context_limit_error", "request_limit_error", "retry_allowed", "error_type"):
+                if field in res:
+                    item_state[field] = res[field]
         else:
             current = latest_results_by_index(task).get(idx)
             may_replace_success = reasons.get(idx) == "session_dependency"
@@ -1027,6 +1082,10 @@ async def run_retry(task: Task, cfg: AppConfig, retry_id: str) -> None:
             group_indexes.sort(key=lambda i: task.items[i].get("turn_index", 0))
 
         async def run_one(idx: int, prior_summary: str = "") -> dict:
+            previous = latest_results_by_index(task).get(idx) or {}
+            if previous.get("retry_allowed") is False or task.items[idx].get("retry_allowed") is False:
+                await mark_dependency_skipped([idx], "request_limit_nonretryable")
+                return previous or {"error": "request_limit_nonretryable", "retry_allowed": False}
             working = copy.deepcopy(task.items[idx])
             base_ctx = _base_context(working)
             if prior_summary and task.mode != "compare":
@@ -1187,6 +1246,27 @@ async def _run_update_batch_body(
         for turn_no, (idx, item_dict) in enumerate(batch, 1):
             if task.pause_requested:
                 break
+            if item_dict.get("retry_allowed") is False or task.items[idx].get("retry_allowed") is False:
+                skipped = {"index": idx, "item_id": item_dict.get("id"), "reason": "request_limit_nonretryable"}
+                record = task.execution_control.get("update_batches", {}).get(batch_id)
+                if record is not None:
+                    record["remaining"] = [index for index in record["remaining"] if index != idx]
+                    record.setdefault("skipped", []).append(skipped)
+                task.execution_control.setdefault("update_batch_skips", []).append({**skipped, "batch_id": batch_id})
+                pending = task.execution_control.get("pending_indexes", [])
+                if idx in pending:
+                    pending.remove(idx)
+                attempts = task.execution_control.get("resumes", [])
+                if attempts and attempts[-1].get("status") == "running":
+                    attempts[-1]["skipped"] = attempts[-1].get("skipped", 0) + 1
+                    attempts[-1]["completed"] = attempts[-1].get("completed", 0) + 1
+                if task.mode != "compare":
+                    prior_summary += f"【第{turn_no}轮】（评测因请求限制失败，未重试）\n"
+                    if record is not None:
+                        record["prior_summary"] = prior_summary
+                await task.publish("update_batch_skipped", {"batch_id": batch_id, **skipped})
+                _persist_task(task)
+                continue
             current = (idx, item_dict)
             if prior_summary and task.mode != "compare":
                 base_ctx = _base_context(item_dict)
@@ -1301,6 +1381,9 @@ def _write_eval_error(
             "error": f"{type(error).__name__}: {error}" if error else "unknown",
             "traceback": "".join(traceback.format_exception(error)) if error else "",
         }
+        for field in ("request_budget_report", "context_limit_error", "request_limit_error", "retry_allowed", "evidence_mode"):
+            if field in item:
+                record[field] = item[field]
         raw_output = getattr(error, "raw_output", None)
         repair_output = getattr(error, "repair_output", None)
         if raw_output is not None or repair_output is not None:
@@ -1329,6 +1412,7 @@ async def _eval_one(
     category_display=None,
     conversation_input=None,
     evidence_callback=None,
+    image_limits=None,
 ) -> dict:
     t0 = time.perf_counter()
     item = _to_evalitem(item_dict, idx)
@@ -1418,10 +1502,15 @@ async def _eval_one(
             ),
             product_count=product_count,
             **({
-                "evidence_mode": "long_screenshot",
+                "evidence_mode": item_dict["evidence_mode"],
                 "evidence_callback": evidence_callback,
                 "screenshot_metas": [item_dict[f"screenshot_meta{n}"] for n in range(1, product_count + 1)],
-            } if item_dict.get("evidence_mode") == "long_screenshot" else {}),
+            } if item_dict.get("evidence_mode") in {"long_screenshot", "long_screenshot_with_video"} else {}),
+            **({
+                "aux_frame_groups": [item_dict.get(f"aux_frames{n}") or [] for n in range(1, product_count + 1)],
+                "aux_frame_metas": [item_dict.get(f"aux_frame_meta{n}") or [] for n in range(1, product_count + 1)],
+                "image_limits": image_limits,
+            } if item_dict.get("evidence_mode") == "long_screenshot_with_video" else {}),
         )
         out.update(compare_result)
         log_event(

@@ -1,4 +1,4 @@
-import { createApp, ref, computed, onMounted, onUnmounted, nextTick, selectEvidenceMode } from "./compare-data.js?v=20260920_audit";
+import { createApp, ref, computed, onMounted, onUnmounted, nextTick, selectEvidenceMode } from "./compare-data.js?v=20261010_joint";
 
 createApp({
   setup() {
@@ -375,7 +375,7 @@ createApp({
     });
     const failedResultIndexes = computed(() =>
       results.value
-        .filter((result) => result && result.error && Number.isInteger(Number(result.index)))
+        .filter((result) => result && result.error && result.retry_allowed !== false && Number.isInteger(Number(result.index)))
         .map((result) => Number(result.index))
     );
 
@@ -415,8 +415,36 @@ createApp({
       return selectedRetryIndexes.value.includes(Number(index));
     }
 
+    function requestDiagnosticText(result) {
+      const report = result.request_budget_report || {};
+      const limits = report.effective_limits || report;
+      const parts = [];
+      if (report.actual_image_count != null) parts.push(`请求图片 ${report.actual_image_count} 张`);
+      if (report.request_payload_bytes != null) parts.push(`请求体 ${report.request_payload_bytes} 字节`);
+      if (report.estimated_input_tokens != null) parts.push(`估算输入 ${report.estimated_input_tokens} Token`);
+      if (limits.max_input_tokens != null) parts.push(`输入上限 ${limits.max_input_tokens} Token`);
+      if (report.output_reserve_tokens != null) parts.push(`输出预留 ${report.output_reserve_tokens} Token`);
+      if (limits.context_window != null) parts.push(`上下文窗口 ${limits.context_window} Token`);
+      return parts.join(' · ');
+    }
+
+    function contextLimitReason(result) {
+      const detail = result.context_limit_error || result.request_limit_error;
+      if (!detail) return '';
+      return typeof detail === 'string' ? detail : detail.reason || detail.message || result.error || '输入或上下文超过限制';
+    }
+
+    function diagnosticJson(result) {
+      return JSON.stringify({task_id:taskId.value,item_index:result.index,item_id:result.item_id,
+        evidence_mode:result.evidence_mode || items.value[result.index]?.evidence_mode,
+        retry_allowed:result.retry_allowed,context_limit_error:result.context_limit_error,
+        request_limit_error:result.request_limit_error,
+        request_budget_report:result.request_budget_report,image_findings:result.image_findings},null,2);
+    }
+
     function toggleRetryIndex(index) {
       const value = Number(index);
+      if (results.value.some(result => Number(result.index) === value && result.retry_allowed === false)) return;
       selectedRetryIndexes.value = retryIndexSelected(value)
         ? selectedRetryIndexes.value.filter((item) => item !== value)
         : [...selectedRetryIndexes.value, value];
@@ -433,7 +461,7 @@ createApp({
     const formatHint = computed(
       () =>
         ({
-          compare: "支持文字题与图文题混合导入：query_images 可选填一张提问图片路径；product_count 为2或3。每题优先使用全产品长截图，否则回退全产品录屏；无法统一证据的题目在导入时拒绝。",
+          compare: "支持文字题与图文题混合导入：query_images 可选填一张提问图片路径；product_count 为2或3。默认优先全产品长截图，否则回退全产品录屏；单轮选择长截图＋录屏补充时，所有产品都需提供两类证据。多轮仍仅使用当前轮长截图。",
           rich_content: "可逐题上传，也可导入 JSON / JSONL / CSV：query、context(可选)、video_path、category/answer_text/task_start_time/task_end_time(均可选)；sessionid 等额外字段会保留到 Excel 导出。普通图片不算挂卡，回答区域蓝色文字按 Superlink 统计。",
         }[mode.value])
     );
@@ -805,8 +833,9 @@ createApp({
         if (!matchesScoreFilters(r)) return false;
         if (failedOnly.value && !r.error) return false;
         if (turnFilter.value && String(r.turn_index) !== turnFilter.value) return false;
-        if (diagnosticFilter.value==='warning' && !r.image_warning_count) return false;
+        if (diagnosticFilter.value==='warning' && !r.image_warning_count && !r.request_budget_report?.warnings?.length && !r.request_budget_report?.blocked && !r.context_limit_error && !r.request_limit_error) return false;
         if (diagnosticFilter.value==='blocked' && r.input_diagnostic_status!=='blocked') return false;
+        if (diagnosticFilter.value==='context_limit' && !r.context_limit_error) return false;
         const modality = r.input_modality || ((items.value[r.index]?.query_images || []).length ? "text_image" : "text");
         if (modalityFilter.value && modality !== modalityFilter.value) return false;
         if (q && !`${r.session_id || ""} ${r.turn_index || ""} ${r.item_id || ""} ${r.query || ""} ${r.context || ""} ${r.answer_text || ""} ${r.answer1 || ""} ${r.answer2 || ""} ${r.answer3 || ""} ${(r.card_contents || []).join(" ")} ${(r.superlink_texts || []).join(" ")} ${reasonSearchText(r)}`.toLowerCase().includes(q)) return false;
@@ -1062,7 +1091,8 @@ createApp({
         const report = {filename: file.name || '', accepted: (parsed.items || []).length,
           rejected: parsed.rejected_count ?? importErrors.length,
           screenshots: parsed.evidence_counts?.long_screenshot ?? (parsed.items || []).filter(it => it.evidence_mode === 'long_screenshot').length,
-          videos: parsed.evidence_counts?.video_frames ?? (parsed.items || []).filter(it => it.evidence_mode === 'video_frames').length};
+          videos: parsed.evidence_counts?.video_frames ?? (parsed.items || []).filter(it => it.evidence_mode === 'video_frames').length,
+          joint: parsed.evidence_counts?.long_screenshot_with_video ?? (parsed.items || []).filter(it => it.evidence_mode === 'long_screenshot_with_video').length};
         if (!(parsed.items || []).length) {
           importReport.value = report;
           errors.value = importErrors.length ? importErrors : ["文件中没有可导入的数据"];
@@ -1170,8 +1200,9 @@ createApp({
           const productCount = Number(it.productCount) === 3 ? 3 : 2;
           item.product_count = productCount;
           item.evidence_mode = selectEvidenceMode(it);
-          const evidencePrefix = item.evidence_mode === 'long_screenshot' ? 'screenshot' : 'video';
-          for (let n = 1; n <= productCount; n++) {
+          const evidencePrefixes = item.evidence_mode === 'long_screenshot_with_video'
+            ? ['screenshot', 'video'] : [item.evidence_mode === 'long_screenshot' ? 'screenshot' : 'video'];
+          for (const evidencePrefix of evidencePrefixes) for (let n = 1; n <= productCount; n++) {
             item[`${evidencePrefix}${n}`] = it[`${evidencePrefix}${n}Path`].trim();
           }
           item.context1 = (it.context1 || "").trim();
@@ -1299,7 +1330,8 @@ createApp({
       if (!taskId.value || retrySubmitting.value || loadingTaskId.value) return;
       const retryTaskId = taskId.value;
       const viewVersion = historyLoadVersion;
-      const selected = indexes == null ? null : [...new Set(indexes.map(Number))];
+      const selected = indexes == null ? null : [...new Set(indexes.map(Number))]
+        .filter(index => !results.value.some(result => Number(result.index) === index && result.retry_allowed === false));
       if (selected && !selected.length) return;
       retrySubmitting.value = true;
       runError.value = "";
@@ -2095,7 +2127,7 @@ createApp({
       const index = Number(result && result.index);
       if (!taskId.value || !Number.isInteger(index) || index < 0) return "";
       const item = items.value[index] || {};
-      if (format === 'video' && (item.evidence_mode === 'long_screenshot' || item.screenshot1)) return "";
+      if (format === 'video' && item.evidence_mode !== 'long_screenshot_with_video' && (item.evidence_mode === 'long_screenshot' || item.screenshot1)) return "";
       return `/api/eval/${taskId.value}/items/${index}/export?format=${encodeURIComponent(format)}`;
     }
 
@@ -2148,6 +2180,7 @@ createApp({
       executionControl, controlSubmitting, resumeConcurrency, resumeFailed, isPausing, canPauseTask, canResumeTask, controlTask,
       repairStatus, retryStatusLabel, retrySubmitting, selectedRetryIndexes, activeRetry,
       failedResultIndexes, retryIndexSelected, toggleRetryIndex, retryFailedCases,
+      requestDiagnosticText, contextLimitReason, diagnosticJson,
       itemProgress, progressEvents, expandedProgressLogs, pagedProgressRows, progressStages,
       comparisonTaskIds, exportComparisonXlsx, historyItems, historyNoteDrafts, historyNoteEditing, loadingHistory, pageSize,
       historyPage, historyTotal, historyPageSize, historyPageCount, historyError,

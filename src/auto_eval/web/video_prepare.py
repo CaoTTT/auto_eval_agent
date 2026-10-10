@@ -450,3 +450,88 @@ def prepare_session_long_screenshot_item(
         prepared["frame_count"] += meta["split_count"]
         prepared["media"].append(meta["original_path"])
     return prepared
+
+
+def _frame_metadata(frames: list[str], source: dict) -> list[dict]:
+    """Bind each supplementary image to its sampled time and original video bytes."""
+    if not frames:
+        return []
+    metadata_path = Path(frames[0]).parent / "keyframes.json"
+    selected = {}
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        selected = {int(record["index"]): record for record in payload["selected"]}
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        raise ValueError(f"视频抽帧元数据缺失或无效：{metadata_path}") from exc
+    records = []
+    for position, raw_path in enumerate(frames, 1):
+        check_preparation()
+        path = Path(raw_path)
+        match = re.fullmatch(r"kf_(\d+)", path.stem)
+        sample = selected.get(int(match[1]) if match else position, {})
+        timestamp = sample.get("time")
+        if (isinstance(timestamp, bool) or not isinstance(timestamp, Real)
+                or not math.isfinite(timestamp) or timestamp < 0):
+            raise ValueError(f"视频帧时间戳无效：{path.name}")
+        if records and timestamp < records[-1]["time_s"]:
+            raise ValueError("视频帧时间戳必须按时间递增")
+        records.append({
+            "index": position, "path": str(path), "time_s": float(timestamp),
+            "source": sample.get("source", "unknown"),
+            "keep_reason": sample.get("keep_reason", ""),
+            "sha256": _file_sha256(path),
+            "source_video_path": source.get("path", ""),
+            "source_video_sha256": source.get("sha256", ""),
+            "algorithm_version": payload.get("algorithm_version", ""),
+        })
+    return records
+
+
+def prepare_session_joint_evidence_item(
+    item: dict,
+    *,
+    profile: VisualModeProfile,
+    session_name: str,
+    item_index: int,
+    total_items: int,
+    base_dir: Path = PROJECT_ROOT,
+    runs_dir: Path = RUNS_DIR,
+    probe_fn: Callable = probe_duration,
+    extract_fn: Callable = extract_scene_keyframes,
+) -> dict:
+    """Prepare single-turn screenshots and supplementary video frames without overwriting either."""
+    from .parse_input import compare_evidence_mode
+
+    count, mode = compare_evidence_mode(item)
+    if mode != "long_screenshot_with_video":
+        raise ValueError("联合证据准备只接受 long_screenshot_with_video")
+    common = dict(profile=profile, session_name=session_name, item_index=item_index,
+                  total_items=total_items, base_dir=base_dir, runs_dir=runs_dir)
+    primary = prepare_session_long_screenshot_item({**item, "evidence_mode": "long_screenshot"}, **common)
+    supplemental = prepare_session_visual_compare_item(item, **common, probe_fn=probe_fn, extract_fn=extract_fn)
+    prepared = {**primary, "evidence_mode": mode,
+                "joint_evidence_version": "single-turn-joint-v1",
+                "screenshot_frame_count": primary["frame_count"],
+                "aux_frame_count": 0,
+                "frame_count": primary["frame_count"],
+                "media": primary["media"] + supplemental["media"],
+                "video_name": supplemental["video_name"],
+                "duration": supplemental["duration"]}
+    for number in range(1, count + 1):
+        for prefix in ("video_source", "duration"):
+            prepared[f"{prefix}{number}"] = supplemental[f"{prefix}{number}"]
+        prepared[f"video{number}_path"] = supplemental[f"video{number}_path"]
+        frames = supplemental[f"frames{number}"]
+        records = _frame_metadata(frames, supplemental[f"video_source{number}"])
+        # The existing extractor retains the recording's terminal frame even
+        # after an explicit task end; supplementary evidence must stay in scope.
+        start, end = item.get("task_start_time", 0), item.get("task_end_time")
+        records = [record for record in records if record["time_s"] >= start
+                   and (end is None or record["time_s"] <= end)]
+        if not records:
+            raise ValueError(f"视频{number}在声明的任务时间范围内没有可用补充帧")
+        prepared[f"aux_frames{number}"] = [record["path"] for record in records]
+        prepared[f"aux_frame_meta{number}"] = records
+        prepared["aux_frame_count"] += len(records)
+        prepared["frame_count"] += len(records)
+    return prepared

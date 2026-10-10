@@ -1,7 +1,7 @@
 import {createApp as vueCreateApp, ref, computed, watch, onMounted, onUnmounted, nextTick} from "https://unpkg.com/vue@3/dist/vue.esm-browser.js";
-import {CompareCaseList, fromDatasetItem, caseMedia, caseEvidenceMode, selectEvidenceMode} from "./compare-cases.js?v=20260920_audit";
+import {CompareCaseList, fromDatasetItem, caseMedia, caseEvidenceMode, selectEvidenceMode} from "./compare-cases.js?v=20261010_joint";
 import {HumanComparePanel} from "./human-compare.js?v=20260916_human_answers";
-import {ScreenshotEvidence} from "./screenshot-evidence.js?v=20260920_audit";
+import {ScreenshotEvidence} from "./screenshot-evidence.js?v=20261010_joint";
 export {ref, computed, onMounted, onUnmounted, nextTick};
 export {selectEvidenceMode};
 
@@ -61,6 +61,7 @@ export const CompareDatasetPanel = {
     const counts=items=>({image:items.filter(i=>i.queryImages?.length).length,
       shots:items.filter(i=>caseEvidenceMode(i)==='long_screenshot').length,
       videos:items.filter(i=>caseEvidenceMode(i)==='video_frames').length,
+      joint:items.filter(i=>caseEvidenceMode(i)==='long_screenshot_with_video').length,
       invalid:items.filter(i=>!caseEvidenceMode(i)).length});
     return {historyOpen,historyRows,historyPage,historyTotal,search,historyLoading,historyError,preview,previewItems,previewLoading,
       previewPanel,currentPanel,fileIssues,fileChecked,fileChecking,fileError,loadDatasets,toggleHistory,closePreview,previewDataset,checkFiles,counts,
@@ -73,7 +74,7 @@ export const CompareDatasetPanel = {
         <button @click="toggleHistory" :aria-expanded="historyOpen" :disabled="busy">{{historyOpen?'收起历史数据':'选择历史数据'}}</button>
         <span v-if="busy" class="hint">正在解析…</span>
       </div>
-      <details class="dataset-format-help"><summary>JSON / JSONL · 查看格式与证据选择规则</summary><p>JSON 支持数组或单个对象，JSONL 每行一个 Case。可同时填写 screenshot1/2 与 video1/2；所有产品长截图齐全时优先使用长截图，否则只有所有产品录屏齐全才回退录屏。无法统一证据层的 Case 拒绝导入，其余 Case 正常载入。可选 query_images 单张提问原图；三产品填写 product_count: 3 及产品3字段。证据选择按路径字段是否完整判断，文件可用性可在下方检查。相对路径以服务器项目目录为基准。自定义字段会保留到 Excel 导出。</p></details>
+      <details class="dataset-format-help"><summary>JSON / JSONL · 查看格式与证据选择规则</summary><p>JSON 支持数组或单个对象，JSONL 每行一个 Case。默认所有产品长截图齐全时优先使用长截图，否则只有所有产品录屏齐全才回退录屏。单轮同时使用两类证据时，填写 evidence_mode: "long_screenshot_with_video"，且每个产品必须提供 screenshotN 与 videoN；多轮仍只支持当前轮长截图。无法统一证据的 Case 拒绝导入，其余 Case 正常载入。可选 query_images 单张提问原图；三产品填写 product_count: 3 及产品3字段。证据选择按路径字段是否完整判断，文件可用性可在下方检查。相对路径以服务器项目目录为基准。自定义字段会保留到 Excel 导出。</p></details>
       <section v-if="historyOpen" class="dataset-history">
         <div class="dataset-toolbar"><strong>历史测评数据</strong><input v-model="search" placeholder="搜索文件名、备注或任务编号" @keyup.enter="loadDatasets(1)" aria-label="搜索历史数据"><button @click="loadDatasets(1)">搜索 / 刷新</button></div>
         <p class="hint">复用该次任务提交的数据；同名文件的不同任务分别保留，不会覆盖原结果。</p>
@@ -84,7 +85,7 @@ export const CompareDatasetPanel = {
         <div class="pagination" v-if="historyTotal>10"><span>共 {{historyTotal}} 份 · 每页 10 份</span><button @click="loadDatasets(historyPage-1)" :disabled="historyPage<=1 || historyLoading">上一页</button><span>{{historyPage}} / {{Math.ceil(historyTotal/10)}}</span><button @click="loadDatasets(historyPage+1)" :disabled="historyPage>=Math.ceil(historyTotal/10) || historyLoading">下一页</button></div>
         <section v-if="preview" class="dataset-preview" ref="previewPanel">
           <div class="dataset-toolbar"><strong>预览：{{preview.dataset_name || '未命名数据'}}</strong><button @click="closePreview">关闭预览</button></div>
-          <p class="hint">来源：{{time(preview.created_at)}} · {{preview.task_id}}</p><p class="hint">{{previewItems.length}} 条 · 图文 {{counts(previewItems).image}} · 文字 {{previewItems.length-counts(previewItems).image}} · 长截图 {{counts(previewItems).shots}} · 录屏 {{counts(previewItems).videos}}</p>
+          <p class="hint">来源：{{time(preview.created_at)}} · {{preview.task_id}}</p><p class="hint">{{previewItems.length}} 条 · 图文 {{counts(previewItems).image}} · 文字 {{previewItems.length-counts(previewItems).image}} · 长截图 {{counts(previewItems).shots}} · 录屏 {{counts(previewItems).videos}} · 联合证据 {{counts(previewItems).joint}}</p>
           <compare-case-list :key="preview.task_id" :items="previewItems" readonly title="预览 Case"></compare-case-list>
           <button class="primary" @click="$emit('use',preview)" :disabled="!preview.items.length || busy">使用这份数据，新建评测</button>
         </section>
@@ -93,11 +94,12 @@ export const CompareDatasetPanel = {
         <p v-if="items.some(it=>it.sessionId)" class="hint">多轮：{{new Set(items.filter(it=>it.sessionId).map(it=>it.sessionId)).size}} 个会话 · {{items.filter(it=>it.sessionId).length}} 轮。共享逐轮问题和题图；每张长截图只含当前轮。每轮使用完整原始历史独立评分，开始时自动检查图片与请求预算。</p>
         <strong>当前数据：{{datasetName || '手动录入'}}</strong><span class="dataset-tag">{{sourceTaskId?'历史复用':'新上传 / 手动录入'}}</span>
         <p class="hint" v-if="sourceTaskId">来源任务：{{sourceTaskId}}</p>
-        <p class="hint">共 {{items.length}} 条 · 图文 {{counts(items).image}} · 文字 {{items.length-counts(items).image}} · 长截图 {{counts(items).shots}} · 录屏 {{counts(items).videos}} · 证据不齐全 {{counts(items).invalid}}。开始评估时提交全部 Case。</p>
+        <p class="hint">共 {{items.length}} 条 · 图文 {{counts(items).image}} · 文字 {{items.length-counts(items).image}} · 长截图 {{counts(items).shots}} · 录屏 {{counts(items).videos}} · 联合证据 {{counts(items).joint}} · 证据不齐全 {{counts(items).invalid}}。开始评估时提交全部 Case。</p>
+        <p v-if="counts(items).joint" class="hint">联合证据增加图片与输入 Token。每个 Case 在调用前检查完整请求预算，超过限制会标记原因并停止该 Case；模型返回上下文超限时不重试。</p>
       </div>
       <div v-if="importReport" class="dataset-import-report" role="status">
         <strong>{{importReport.filename}}：接受 {{importReport.accepted}} 条，拒绝 {{importReport.rejected}} 条</strong>
-        <p v-if="importReport.accepted" class="hint">已载入：长截图 {{importReport.screenshots}} 条，录屏 {{importReport.videos}} 条。拒绝的 Case 已从本次导入中剔除，不会参与评测。</p>
+        <p v-if="importReport.accepted" class="hint">已载入：长截图 {{importReport.screenshots}} 条，录屏 {{importReport.videos}} 条，联合证据 {{importReport.joint || 0}} 条。拒绝的 Case 已从本次导入中剔除，不会参与评测。</p>
         <p v-else class="err">本文件没有可评测的 Case，当前输入数据未被替换。</p>
       </div>
       <details v-if="errors?.length" class="dataset-import-errors" open><summary class="err">{{errors.length}} 条拒绝原因（对应 Case 未载入）</summary><pre>{{errors.join('\\n')}}</pre></details>

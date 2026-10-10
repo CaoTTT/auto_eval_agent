@@ -8,6 +8,10 @@ judges:
     base_url: https://api.siliconflow.cn/v1
     api_key_env: SILICON_FLOW_API_KEY
     model: Qwen/Qwen3.5-397B-A17B
+    # 平台保守请求上限；实际网关限制仍由服务端错误识别兜底。
+    # 调整模型或网关时请重新核对，不能把这些值视为官方已核验额度。
+    max_input_tokens: 260096
+    context_window: 262144
     temperature: 0            # SiliconFlow Qwen 支持低温采样且复跑逐字一致（探针实测）
     seed: 42                  # 固定种子 + temperature=0 → 可复现，消除"时好时坏"
     persona: end_user
