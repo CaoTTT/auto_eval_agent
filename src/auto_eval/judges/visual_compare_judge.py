@@ -389,6 +389,9 @@ class VisualCompareJudge:
                                                "frame_no": frame_no, "ref_path": path})
                 else:
                     user_images.extend(encoded_frames)
+                    image_metadata.extend({"image_role": "product_answer", "product_no": product_no,
+                                           "frame_no": frame_no, "ref_path": path}
+                                          for frame_no, path in enumerate(frames, 1))
                 user_image_refs.extend(frames)
 
             return user_images, user_image_refs, content_parts, image_metadata
@@ -407,16 +410,23 @@ class VisualCompareJudge:
 
         started = time.perf_counter()
         audit = None
-        if is_screenshot:
+        if is_screenshot or evidence_callback:
             from ..evidence_audit import capture_request
-            preprocessing = ([{"product_no": n, "source_turn": turn["turn_index"],
-                               "metadata": turn[f"screenshot_meta{n}"]}
-                              for turn in conversation_input["turns"]
-                              for n in range(1, actual_product_count + 1)] if conversation_input else
-                             [{"product_no": n, "metadata": meta} for n, meta in enumerate(metas, 1)])
-            audit = await run_preparation(capture_request, system, content_parts, image_metadata,
+            preprocessing = []
+            if is_screenshot:
+                preprocessing = ([{"product_no": n, "source_turn": turn["turn_index"],
+                                   "metadata": turn[f"screenshot_meta{n}"]}
+                                  for turn in conversation_input["turns"]
+                                  for n in range(1, actual_product_count + 1)] if conversation_input else
+                                 [{"product_no": n, "metadata": meta} for n, meta in enumerate(metas, 1)])
+            request_parts = content_parts if is_screenshot or query_metas else [
+                {"type": "text", "text": user},
+                *({"type": "image_url", "image_url": {"url": url}} for url in user_images),
+            ]
+            audit = await run_preparation(capture_request, system, request_parts, image_metadata,
                                           preprocessing, self.protocol.public_metadata(), timeout=60)
             audit["judge_model"] = getattr(self.client, "model", None)
+            audit["evidence_mode"] = evidence_mode
             if evidence_callback:
                 evidence_callback(audit)
         request_views = []
@@ -425,13 +435,13 @@ class VisualCompareJudge:
             for metadata, view in zip(image_metadata, request_views, strict=True):
                 metadata.update(view)
                 metadata.setdefault("image_role", "product_answer")
+        if is_screenshot and conversation_input is None:
+            check_context_budget(system, [p["text"] for p in content_parts if p["type"] == "text"], metas, self.profile.long_screenshot)
+        if audit is not None:
+            audit["record_status"] = "model_call_started"
+            if evidence_callback:
+                evidence_callback(audit)
         if is_screenshot or query_metas:
-            if is_screenshot and conversation_input is None:
-                check_context_budget(system, [p["text"] for p in content_parts if p["type"] == "text"], metas, self.profile.long_screenshot)
-            if audit is not None:
-                audit["record_status"] = "model_call_started"
-                if evidence_callback:
-                    evidence_callback(audit)
             raw_output = await self.client.complete(
                 system, user, stream_callback=stream_callback,
                 content_parts=content_parts, image_metadata=image_metadata,

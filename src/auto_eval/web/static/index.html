@@ -404,6 +404,7 @@
       <button @click="exportJson" :disabled="!taskId || !!loadingTaskId">导出 JSON</button>
       <button @click="exportXlsx()" :disabled="!taskId || !!loadingTaskId || !!exportingTaskId">{{ exportingTaskId === taskId ? '正在生成 Excel…' : (exportIncludeImages ? '导出 XLSX（含原图）' : '导出 XLSX（不含原图）') }}</button>
       <button v-if="isVideoMode" @click="exportFrames" :disabled="!taskId || !!loadingTaskId">导出视觉证据 ZIP</button>
+      <button @click="exportModelInputEvidence" :disabled="!taskId || !!loadingTaskId" title="导出本任务全部成功评测实际发送给裁判的图片，含多轮历史图片；失败 Case 跳过，不受结果筛选影响">导出裁判输入图片 ZIP（整任务）</button>
       <a v-if="taskId && items.some(it=>it.evidence_mode==='long_screenshot' || it.screenshot_meta1)" :href="'/api/eval/'+encodeURIComponent(taskId)+'/export?format=screenshot_evidence'">下载长截图输入证据 ZIP</a>
       <span v-if="loadingTaskId">正在加载任务，请稍候…</span>
       <button v-if="summary && summary.failed && selectedTaskStatus === 'done'" @click="retryFailedCases(null)" :disabled="retrySubmitting || ['queued','running'].includes(repairStatus)">
@@ -644,6 +645,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20260923_result_filters"></script>
+  <script type="module" src="/static/app.js?v=20261012_model_input_evidence"></script>
 </body>
 </html>

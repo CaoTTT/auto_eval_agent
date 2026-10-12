@@ -491,13 +491,18 @@ def _make_item_evaluator(
                 )
                 last_error = None
                 res = None
+                request_evidence = None
                 conversation_input = None
                 item_dict.pop("screenshot_evidence", None)
                 task.items[idx].pop("screenshot_evidence", None)
                 def save_evidence(record):
-                    item_dict["screenshot_evidence"] = copy.deepcopy(record)
-                    task.items[idx]["screenshot_evidence"] = item_dict["screenshot_evidence"]
-                    _persist_task(task)
+                    nonlocal request_evidence
+                    request_evidence = copy.deepcopy(record)
+                    request_evidence["request_id"] = request_id
+                    if record.get("evidence_mode") == "long_screenshot":
+                        item_dict["screenshot_evidence"] = request_evidence
+                        task.items[idx]["screenshot_evidence"] = request_evidence
+                        _persist_task(task)
                 if conversation_preparer is not None and item_dict.get("session_id"):
                     try:
                         conversation_input = await run_preparation(conversation_preparer.prepare, item_dict,
@@ -611,6 +616,7 @@ def _make_item_evaluator(
                 if last_error is None:
                     for attempt in range(2):
                         check_pause()
+                        request_evidence = None
                         try:
                             if attempt:
                                 log_event(
@@ -691,6 +697,16 @@ def _make_item_evaluator(
                         request_id=request_id,
                     )
             res["index"] = idx
+            if (not res.get("error") and request_evidence
+                    and request_evidence.get("record_status") == "model_response_received"):
+                # Bind evidence to this successful result, not to mutable prepared
+                # input. Retries/updates cannot replace an older result's images.
+                res["model_input_evidence"] = {
+                    "version": "model-input-evidence-1", "record_status": "evaluation_succeeded",
+                    "request_id": request_id,
+                    **{key: request_evidence.get(key) for key in
+                       ("request_sha256", "judge_model", "evidence_mode", "images")},
+                }
             if task.mode == "compare":
                 for field in DIAGNOSTIC_FIELDS:
                     if field in item_dict:
@@ -1352,6 +1368,7 @@ async def _eval_one(
             context=(item.context or "").strip(),
             answer_text=answer_text,
             frames=frames,
+            **({"evidence_callback": evidence_callback} if evidence_callback else {}),
         )
         out.update(visual)
         log_event(
@@ -1417,9 +1434,9 @@ async def _eval_one(
                 else None
             ),
             product_count=product_count,
+            **({"evidence_callback": evidence_callback} if evidence_callback else {}),
             **({
                 "evidence_mode": "long_screenshot",
-                "evidence_callback": evidence_callback,
                 "screenshot_metas": [item_dict[f"screenshot_meta{n}"] for n in range(1, product_count + 1)],
             } if item_dict.get("evidence_mode") == "long_screenshot" else {}),
         )

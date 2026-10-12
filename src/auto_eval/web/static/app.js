@@ -2091,6 +2091,10 @@ createApp({
       if (loadingTaskId.value) return;
       window.open(`/api/eval/${taskId.value}/export?format=frames_zip`);
     }
+    function exportModelInputEvidence() {
+      if (!taskId.value || loadingTaskId.value) return;
+      window.open(`/api/eval/${encodeURIComponent(taskId.value)}/export?format=model_input_evidence`);
+    }
     function itemArtifactUrl(result, format) {
       const index = Number(result && result.index);
       if (!taskId.value || !Number.isInteger(index) || index < 0) return "";
@@ -2163,7 +2167,7 @@ createApp({
       evidenceImages, evidenceImageErrors, evidenceExpanded, setEvidenceExpanded, setPageEvidenceExpanded,
       skillTabs, filteredResults, pagedResults, pageCount, resultTableWidth,
       formatHint, resultCols, opItems, pagedOpItems, opPreparing, canSubmit,
-      switchMode, onOpManifestFile, submit, cell, columnWidth, exportCsv, exportJson, exportXlsx, exportFrames, itemArtifactUrl, addOpItem, removeOpItem, onOpVideo, onOpDrop,
+      switchMode, onOpManifestFile, submit, cell, columnWidth, exportCsv, exportJson, exportXlsx, exportFrames, exportModelInputEvidence, itemArtifactUrl, addOpItem, removeOpItem, onOpVideo, onOpDrop,
       loadHistory, loadQueue, cancelQueuedTask, reprioritizeQueuedTask, loadHistoryTask, delHistory, editHistoryNote, cancelHistoryNote, saveHistoryNote, formatTime,
       selectSkill, resetResultPage, changePage,
       changeProgressPage, changeOpPage, changeResultPageSize, paginationPages, setTablePage, jumpTablePage,

@@ -1,4 +1,4 @@
-"""Exact, Base64-free screenshot request records for replay and inspection."""
+"""Freeze the exact encoded request images without retaining Base64 in snapshots."""
 from copy import deepcopy
 import base64
 import hashlib

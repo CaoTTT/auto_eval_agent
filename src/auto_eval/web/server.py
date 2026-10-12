@@ -1243,6 +1243,21 @@ def _export_snapshot(task_id: str, format: str, data: dict):
     if format == "screenshot_evidence":
         return _screenshot_evidence_zip(task_id, data)
 
+    if format == "model_input_evidence":
+        from .model_input_evidence import EvidenceUnavailable, write_model_input_zip
+        directory = RUNS_DIR / "exports"
+        path = directory / f"model-input-{uuid.uuid4().hex}.zip"
+        try:
+            write_model_input_zip(data, path)
+        except EvidenceUnavailable as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        basename = str(data.get("dataset_name") or task_id).replace("\\", "/").rsplit("/", 1)[-1]
+        filename = _download_stem(Path(basename).stem, "测评数据") + "_裁判输入图片.zip"
+        return FileResponse(path, media_type="application/zip", filename=filename,
+                            background=BackgroundTask(path.unlink, missing_ok=True))
+
     if format in {"frames", "frames_zip"}:
         export_dir = RUNS_DIR / "exports"
         export_dir.mkdir(parents=True, exist_ok=True)
