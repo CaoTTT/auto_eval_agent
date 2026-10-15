@@ -95,7 +95,7 @@ def test_mixed_normalization_and_untrusted_metadata():
 @pytest.mark.parametrize("standard,revision,score_max", [
     ("0.2-simplified", "0.2.1", 5),
     ("0.3", "0.3.1", 3),
-    ("0.2-simplified-calibrated", "0.2.2", 5),
+    ("0.2-simplified-calibrated", "0.2.3", 5),
     ("0.2-simplified-thinking-exposure", "0.2.3", 5),
 ])
 @pytest.mark.parametrize("count", [2, 3])
@@ -113,7 +113,7 @@ async def test_compare_protocol_input_combinations(setup_images, standard, revis
     system, user, sent = client.calls[0]
     assert len(client.calls) == 1
     assert ("【思考暴露（内部过程信息泄露）】" in system) == (
-        standard == "0.2-simplified-thinking-exposure"
+        standard in {"0.2-simplified-thinking-exposure", "0.2-simplified-calibrated"}
     )
     assert result["standard_version"] == standard
     assert result["evaluation_profile"] == f"qa_competitor_compare@{standard}"

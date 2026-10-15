@@ -16,7 +16,7 @@ from urllib.parse import quote
 
 from dotenv import load_dotenv
 from PIL import Image
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import Request, FastAPI, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -34,10 +34,10 @@ from ..judges.compare_protocols import (
 from ..media import probe_duration
 from ..paths import RUNS_DIR
 from ..query_images import normalize_query_input, PREPARED_FIELDS, prepare_query_images, QueryImageError
+from ..conversation import normalize_turn, validate_conversations, is_conversation, DIAGNOSTIC_FIELDS
 from ..preparation import run_preparation
 from .parse_input import Mode, normalize_compare_evidence, parse_csv, parse_jsonl, parse_text
 from .history import (
-    write_xlsx,
     delete_snapshot,
     export_rows,
     list_snapshots,
@@ -58,7 +58,7 @@ from .video_prepare import (
 from .runner import run_eval, run_retry, run_resume, finish_pause, run_update_batch, spawn_background, snapshot_item_progress
 from .execution_control import resume_indexes
 from .scheduler import EvalScheduler
-from .exports import XlsxExports, xlsx_download_name
+from .exports import XlsxExports
 from .dataset_media import DatasetMedia, file_hash
 from .human_baselines import HumanStore
 from .human_compare import HumanComparisons
@@ -194,6 +194,11 @@ def _protocol_manifest(protocol, app_cfg, options: dict, resolved_judges=None) -
         for judge in (resolved_judges if resolved_judges is not None else app_cfg.judges)
         if resolved_judges is not None or judge.name in selected
     ]
+    if visual_profile is not None:
+        from ..image_limits import resolve_image_limits
+        candidates = resolved_judges if resolved_judges is not None else [j for j in app_cfg.judges if j.name in selected]
+        if candidates:
+            manifest["image_limits"] = resolve_image_limits(candidates[0], visual_profile)
     return manifest
 
 
@@ -229,7 +234,7 @@ def _resolve_operation_video_path(raw_path: str) -> Path:
     return resolve_operation_video_path(raw_path, base_dir=BASE_DIR)
 
 
-def _validate_eval_request(req: EvalReq, app_cfg) -> None:
+def _validate_eval_request(req: EvalReq, app_cfg, *, previous_items=None) -> None:
     """提交前校验：compare 模式支持完整的2或3产品同类视觉证据。"""
     selected = req.options.get("judges") or (
         [app_cfg.judges[0].name] if app_cfg.judges else []
@@ -243,6 +248,18 @@ def _validate_eval_request(req: EvalReq, app_cfg) -> None:
     invalid: list[str] = []
     for index, item in enumerate(req.items, 1):
         try:
+            if not is_conversation(item):
+                # Preserve legacy metadata, but don't let it activate the runner's
+                # conversation path after request validation.
+                if "session_id" in item or "turn_index" in item:
+                    item.setdefault("source_data", {key: value for key, value in item.items() if key != "source_data"})
+                for field in ("session_id", "turn_index", "session_group"):
+                    item.pop(field, None)
+            item.update(normalize_turn(item, external=True))
+            for field in DIAGNOSTIC_FIELDS - {"session_id", "session_group", "turn_index", "input_schema_version"}:
+                item.pop(field, None)
+            item.pop("conversation_assets", None)
+            item.pop("screenshot_evidence", None)
             item.update(normalize_query_input(item))
             for field in PREPARED_FIELDS:
                 item.pop(field, None)
@@ -259,6 +276,10 @@ def _validate_eval_request(req: EvalReq, app_cfg) -> None:
             item.update(normalized)
         except ValueError as exc:
             invalid.append(f"第{index}条 {exc}")
+    try:
+        validate_conversations([*(previous_items or []), *req.items])
+    except ValueError as exc:
+        invalid.append(str(exc))
     if invalid:
         preview = "；".join(invalid[:8])
         suffix = "……" if len(invalid) > 8 else ""
@@ -348,6 +369,44 @@ def api_parse(req: ParseReq):
             "rejected_count": len(errs),
             "evidence_counts": {mode: sum(item.get("evidence_mode") == mode for item in items)
                                 for mode in ("long_screenshot", "video_frames")}}
+
+
+@app.post("/api/compare/preflight")
+async def api_compare_preflight(req: EvalReq):
+    from ..image_limits import resolve_image_limits
+    from ..judges.conversation_prompt import assemble_conversation
+    from .conversation_prepare import ConversationPreparation
+    if req.mode != "compare":
+        raise HTTPException(422, "多轮预检查仅支持 compare")
+    app_cfg = cfg()
+    _validate_eval_request(req, app_cfg)
+    _, judges = _new_judge_runtime(app_cfg, req.options)
+    profile = app_cfg.visual_modes["rich_content"]
+    protocol = _compare_protocol_or_422(req.evaluation_profile)
+    limits = resolve_image_limits(judges[0], profile)
+    def inspect():
+        prepared = ConversationPreparation(req.items, "preflight-" + uuid.uuid4().hex, profile, limits)
+        rows, findings = [], {}
+        for item in sorted((it for it in req.items if it.get("session_id")), key=lambda it: (it["session_id"], it["turn_index"])):
+            error = None
+            try:
+                bundle = prepared.prepare(item)
+                system = protocol.system_template.render(persona=judges[0].persona,
+                    product_count=item.get("product_count", 2), evidence_mode="long_screenshot")
+                assemble_conversation(system, bundle, protocol)
+            except Exception as exc:
+                error = str(exc)
+            rows.append({"id": item["id"], "error": error,
+                **{k: item[k] for k in DIAGNOSTIC_FIELDS if k in item and k != "image_findings"}})
+            for finding in item.get("image_findings", []):
+                saved = findings.setdefault(finding["finding_id"], {**finding, "target_turns": []})
+                saved["target_turns"].append(item["turn_index"])
+        return {"input_schema_version": "2.0", "accepted_session_count": len(prepared.index.groups),
+            "accepted_turn_count": len(rows), "rejected_sessions": [], "warning_count": len(findings),
+            "blocked_turn_count": sum(bool(r["error"]) for r in rows), "findings": list(findings.values()),
+            "turns": rows, "limits_profile_version": limits["limits_profile_version"],
+            "preflight_status": "completed", "model": judges[0].model}
+    return await asyncio.to_thread(inspect)
 
 
 @app.get("/api/request-pacing")
@@ -562,7 +621,7 @@ async def api_retry_failed(task_id: str, req: RetryReq):
     # 会话中某轮失败会影响后续上下文；从最早目标轮起成组补跑。
     groups: dict[str, list[int]] = {}
     for index, item in enumerate(task.items):
-        if item.get("session_group"):
+        if item.get("session_group") and task.mode != "compare":
             groups.setdefault(str(item["session_group"]), []).append(index)
     for indexes in groups.values():
         indexes.sort(key=lambda i: task.items[i].get("turn_index", 0))
@@ -686,7 +745,7 @@ async def api_eval_items(req: EvalItemsReq):
             old = old_items.get(item.get("id"), {})
             if old.get("query_images") and "query_images" not in item:
                 raise HTTPException(422, "替换图文题必须显式提交 query_images；移除图片请传 []")
-        if any(item.get("query_images") for item in req.items) and task.protocol_manifest.get("input_schema_version") != "1.1":
+        if any(item.get("query_images") for item in req.items) and task.protocol_manifest.get("input_schema_version") not in {"1.1", "2.0"}:
             raise HTTPException(422, "旧任务实现不支持提问图片，请新建任务")
     if not created and requested_profile and requested_profile != task.evaluation_profile:
         raise HTTPException(
@@ -708,7 +767,17 @@ async def api_eval_items(req: EvalItemsReq):
         options=req.options,
         evaluation_profile=protocol.id if protocol else None,
     )
-    _validate_eval_request(validated_request, app_cfg)
+    previous_conversations = []
+    if not created and mode == "compare" and any(is_conversation(it) for it in [*task.items, *req.items]):
+        if any(key in req.options and req.options[key] != task.options.get(key) for key in ("product_names", "product_mapping")):
+            raise HTTPException(422, "多轮产品映射不可修改；请新建任务")
+        if task.active_runs or task.status in {"pending", "queued", "running"}:
+            raise HTTPException(409, "多轮任务运行中不能修改或追加输入")
+        existing = {it.get("id"): it for it in task.items}
+        if any(it.get("id") in existing and (is_conversation(it) or is_conversation(existing[it["id"]])) for it in req.items):
+            raise HTTPException(422, "多轮原始输入不可原地覆盖；修订后请新建任务")
+        previous_conversations = [it.copy() for it in task.items]
+    _validate_eval_request(validated_request, app_cfg, previous_items=previous_conversations)
     req.items = validated_request.items
     if created:
         task = new_task(
@@ -932,6 +1001,10 @@ async def api_stream(task_id: str, compact: bool = False):
             for progress_item in ([] if compact else list(snapshot_item_progress(task).values())):
                 yield _sse("item_progress", progress_item)
             # 先回放已有结果（断线重连不丢已完成的）
+            for index, item in enumerate(task.items):
+                if item.get("session_id") and item.get("input_diagnostic_status"):
+                    yield _sse("input_diagnostics", {"item_index": index,
+                        **{key: item[key] for key in DIAGNOSTIC_FIELDS if key in item}})
             for r in ([] if compact else list(task.results)):
                 yield _sse("result", {"progress": task.done_total, "total": len(task.items), "result": r})
             # 终态判定叠加 active_runs（R4）：更新批 manage_status=False 全程
@@ -1003,7 +1076,8 @@ async def api_dataset(task_id: str):
         raise HTTPException(422, "仅支持复用垂域视觉对比数据")
     fields = {"id", "query", "question", "context", "category", "product_count", "evidence_mode",
               "query_images", "query_image_meta", "source_data", "source_line", "session_group", "turn_index",
-              "task_start_time", "task_end_time"}
+              "task_start_time", "task_end_time", "session_id", "screenshot_scope", "conversation_mode"}
+    fields.update(f"screenshot_scope{n}" for n in (1, 2, 3))
     fields.update(f"{name}{n}" for name in ("video", "screenshot", "answer", "context", "screenshot_meta", "video_source")
                   for n in range(1, 4))
     return {"task_id": task.id, "dataset_name": task.dataset_name, "created_at": task.created_at,
@@ -1120,8 +1194,21 @@ async def api_history_note(task_id: str, req: HistoryNoteReq):
 
 
 @app.post("/api/eval/{task_id}/exports", status_code=202)
-async def api_prepare_xlsx(task_id: str):
-    return XLSX_EXPORTS.create(task_id)
+async def api_prepare_xlsx(task_id: str, request: Request, include_images: bool = False):
+    return XLSX_EXPORTS.create(task_id, base_url=str(request.base_url), include_images=include_images)
+
+
+class ComparisonExportReq(BaseModel):
+    task_ids: list[str] = Field(min_length=2, max_length=2)
+
+
+@app.post("/api/exports/comparison", status_code=202)
+async def api_prepare_comparison_xlsx(req: ComparisonExportReq, request: Request):
+    if any(not task_id.strip() for task_id in req.task_ids):
+        raise HTTPException(422, "任务ID不能为空")
+    if req.task_ids[0] == req.task_ids[1]:
+        raise HTTPException(422, "请选择两个不同的任务")
+    return XLSX_EXPORTS.create(req.task_ids[0], req.task_ids[1], base_url=str(request.base_url))
 
 
 @app.get("/api/exports/{export_id}")
@@ -1131,22 +1218,20 @@ async def api_xlsx_status(export_id: str):
 
 @app.get("/api/exports/{export_id}/download")
 async def api_xlsx_download(export_id: str):
-    state = XLSX_EXPORTS.view(export_id)
-    if state["status"] != "ready":
-        raise HTTPException(409, state.get("error") or "Excel 尚未生成完成")
-    return FileResponse(
-        XLSX_EXPORTS.jobs[export_id]["path"],
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        filename=state["filename"],
-    )
+    return XLSX_EXPORTS.download(export_id)
 
 
 @app.get("/api/eval/{task_id}/export")
-async def api_export(task_id: str, format: str = "json"):
+async def api_export(task_id: str, format: str = "json", request: Request = None, include_images: bool = False):
+    if format == "xlsx":
+        state = XLSX_EXPORTS.create(task_id, base_url=str(request.base_url) if request else "",
+                                    include_images=include_images)
+        return await XLSX_EXPORTS.wait_for_download(state["export_id"])
     task = await peek_task_async(task_id)
     if task is None:
         raise HTTPException(404, "task not found")
     data = copy.deepcopy(task_to_snapshot(task))
+    data["export_base_url"] = str(request.base_url) if request else ""
     return await asyncio.to_thread(_export_snapshot, task_id, format, data)
 
 
@@ -1155,22 +1240,23 @@ def _export_snapshot(task_id: str, format: str, data: dict):
     if format == "json":
         return JSONResponse(snapshot_payload(data))
 
-    if format == "xlsx":
-        # 保留原 GET 下载入口，改为文件响应；新页面使用有状态的后台导出。
-        export_dir = RUNS_DIR / "exports"
-        export_dir.mkdir(parents=True, exist_ok=True)
-        archive_path = export_dir / f".xlsx-{uuid.uuid4().hex}.xlsx"
+    if format == "screenshot_evidence":
+        return _screenshot_evidence_zip(task_id, data)
+
+    if format == "model_input_evidence":
+        from .model_input_evidence import EvidenceUnavailable, write_model_input_zip
+        directory = RUNS_DIR / "exports"
+        path = directory / f"model-input-{uuid.uuid4().hex}.zip"
         try:
-            write_xlsx(data, archive_path)
-        except Exception:
-            archive_path.unlink(missing_ok=True)
-            raise
-        return FileResponse(
-            archive_path,
-            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            filename=xlsx_download_name(data.get("dataset_name", ""), task_id),
-            background=BackgroundTask(archive_path.unlink, missing_ok=True),
-        )
+            write_model_input_zip(data, path)
+        except EvidenceUnavailable as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        basename = str(data.get("dataset_name") or task_id).replace("\\", "/").rsplit("/", 1)[-1]
+        filename = _download_stem(Path(basename).stem, "测评数据") + "_裁判输入图片.zip"
+        return FileResponse(path, media_type="application/zip", filename=filename,
+                            background=BackgroundTask(path.unlink, missing_ok=True))
 
     if format in {"frames", "frames_zip"}:
         export_dir = RUNS_DIR / "exports"
@@ -1217,6 +1303,8 @@ def api_export_item(task_id: str, item_index: int, format: str):
     if item_index < 0 or item_index >= len(items):
         raise HTTPException(404, "item not found")
     item = items[item_index]
+    if format == "screenshot_evidence":
+        return _screenshot_evidence_zip(task_id, data, {item_index})
     raw_id = str(item.get("id") or f"q{item_index + 1}")
     stem = _download_stem(
         f"{item_index + 1:03d}_{raw_id}",
@@ -1289,7 +1377,7 @@ def api_item_screenshot(task_id: str, item_index: int, product_no: int, download
     meta = item.get(f"screenshot_meta{product_no}") or {}
     raw = meta.get("original_path") or item.get(f"screenshot{product_no}") or source.get(f"screenshot{product_no}")
     count = item.get("product_count") or (3 if item.get("screenshot3") or source.get("screenshot3") else 2)
-    if not raw or product_no > count or item.get("evidence_mode") == "video_frames":
+    if not raw or product_no > count:
         raise HTTPException(404, "该产品没有回答长截图")
     path = Path(raw).expanduser()
     path = (path if path.is_absolute() else BASE_DIR / path).resolve()
@@ -1316,6 +1404,52 @@ def api_item_screenshot(task_id: str, item_index: int, product_no: int, download
     return FileResponse(path, media_type=mime,
                         filename=f"{stem}_product{product_no}_original{path.suffix.lower()}" if download else None,
                         headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+
+
+def _screenshot_evidence_zip(task_id: str, data: dict, indexes: set[int] | None = None):
+    from .screenshot_evidence import write_evidence_zip
+    directory = RUNS_DIR / "exports"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"evidence-{uuid.uuid4().hex}.zip"
+    try:
+        write_evidence_zip(data, path, indexes)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return FileResponse(path, media_type="application/zip",
+                        filename=f"{_download_stem(task_id, 'task')}_screenshot_evidence.zip",
+                        background=BackgroundTask(path.unlink, missing_ok=True))
+
+
+def _screenshot_record(task_id: str, item_index: int):
+    from .screenshot_evidence import evidence_records
+    task = peek_task(task_id, touch=False)
+    data = task_to_snapshot(task) if task else load_snapshot(task_id)
+    if not data:
+        raise HTTPException(404, "任务不存在")
+    records = evidence_records(data, {item_index})
+    if not records:
+        raise HTTPException(404, "该题没有长截图证据")
+    return records[0]
+
+
+@app.get("/api/eval/{task_id}/items/{item_index}/screenshot-evidence")
+def api_screenshot_evidence(task_id: str, item_index: int):
+    return _screenshot_record(task_id, item_index)
+
+
+@app.get("/api/eval/{task_id}/items/{item_index}/screenshot-evidence/{image_no}")
+def api_screenshot_evidence_image(task_id: str, item_index: int, image_no: int):
+    from .screenshot_evidence import evidence_bytes
+    from fastapi.responses import Response
+    record = _screenshot_record(task_id, item_index)
+    image = next((im for im in record["images"] if im["image_no"] == image_no), None)
+    if image is None:
+        raise HTTPException(404, "证据图片不存在")
+    try:
+        raw, mime = evidence_bytes(image)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return Response(raw, media_type=mime, headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
 
 
 @app.get("/")

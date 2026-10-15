@@ -205,6 +205,16 @@ def prepare_long_screenshot(
             "original_data_url_bytes": encoded_size, "original_mime": mime,
             "limits": cfg.model_dump(),
             "has_overlap": False, "overlap_pixels": 0, "boundaries": [],
+            "processing": {"split_direction": "vertical", "full_width": True,
+                "resize": False, "pixel_stitching": False, "slice_format": "PNG",
+                "boundary_detection": "geometry_without_ocr", "boundary_preview_max_width": 512,
+                "risk_weights": dict(RISK_WEIGHTS), "composition": "top_to_bottom",
+                "selection": "minimum_parts_then_risk_then_height_variance_then_later_boundaries",
+                "boundary_thresholds": {"foreground_delta": 14, "horizontal_delta": 18,
+                    "blank_foreground_fraction": 0.005, "blank_texture_std": 3,
+                    "crossed_transitions_max": 2, "crossed_fraction_min": 0.1,
+                    "fallback_horizontal_edges_max": 2, "fallback_std_max": 12,
+                    "blank_clearance_cap": 32}},
         }
         if _fits(width, height, encoded_size, cfg):
             paths, cuts, sizes = [path], [0, height], [encoded_size]
@@ -215,6 +225,7 @@ def prepare_long_screenshot(
                 raise ValueError("超限 CMYK JPEG 无法无损切成 PNG；请提供 RGB JPEG 或 PNG 长截图")
             min_height = max(cfg.min_edge, math.ceil(width / cfg.max_aspect_ratio))
             max_height = min(cfg.max_pixels // width, math.floor(width * cfg.max_aspect_ratio))
+            meta["processing"].update(min_slice_height=min_height, max_slice_height=max_height)
             if max_height < min_height:
                 raise ValueError("原始宽度无法在单图限制内进行全宽水平切片")
             statuses, risks = boundary_signals(image)
@@ -263,6 +274,7 @@ def prepare_long_screenshot(
                 "fallback" if "fallback" in status_set else "safe")
         check_preparation()
         meta["split_count"] = len(paths)
+        meta["was_split"] = meta["split_status"] != "original"
         meta["slices"] = [
             {"path": str(part_path), "start_y": start, "end_y": end,
              "width": width, "height": end - start, "pixels": width * (end - start),

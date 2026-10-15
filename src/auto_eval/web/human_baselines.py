@@ -82,6 +82,7 @@ class ImportMapping(StrictModel):
     query_hashes: str = ""
     category: str = ""
     session_group: str = ""
+    history_prefix_sha256: str = ""
     turn_index: str = ""
     products: list[Product] = Field(min_length=2, max_length=3)
     labels: list[LabelColumn] = Field(min_length=1, max_length=21)

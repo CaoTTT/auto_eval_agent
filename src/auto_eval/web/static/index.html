@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <title>auto_eval 评估台</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260917_pause_dispatch">
+  <link rel="stylesheet" href="/static/style.css?v=20260923_result_filters">
   <style>
     .op-cards { display:flex; flex-direction:column; gap:12px; }
     .op-card { border:1px solid #e2e8f0; border-radius:8px; padding:12px; background:#fafbfc; }
@@ -80,13 +80,22 @@
   <details class="history-section">
     <summary>历史记录（{{ historyTotal }}）<button @click.stop="loadHistory()" :disabled="loadingHistory" style="margin-left:8px">刷新</button></summary>
     <p class="hint">历史结果保存在本地 runs/web_history，服务重启后仍可加载；运行中断时会保留已完成的题目。</p>
+    <div class="actions">
+      <button @click="exportComparisonXlsx()" :disabled="comparisonTaskIds.length !== 2 || !!exportingTaskId">合并对比导出 Excel（{{ comparisonTaskIds.length }}/2）</button>
+      <button @click="comparisonTaskIds = []" :disabled="!comparisonTaskIds.length">清空选择</button>
+    </div>
+    <p class="hint">选择同一测试数据的两个任务，可跨页选择；先选为 A，后选为 B。同一评分维度并排展示，差异标黄。输入内容和顺序须一致。</p>
+    <p v-if="comparisonTaskIds.length" class="hint">{{ comparisonTaskIds.map((id, i) => `${i === 0 ? 'A' : 'B'}：${id}`).join('；') }}</p>
+    <label class="export-image-option"><input type="checkbox" v-model="exportIncludeImages" :disabled="!!exportingTaskId">单任务 Excel 包含原图（可选，文件较大）</label>
+    <p class="hint">默认不含原图，保留评分、统计及原图查看链接；合并对比 Excel 始终不嵌入原图。</p>
     <p v-if="historyError" class="err" role="alert">{{ historyError }}</p>
     <p v-if="loadingHistory" class="hint" role="status">正在读取历史记录…</p>
     <div class="table-scroll" v-if="historyItems.length" :aria-busy="loadingHistory">
       <table class="grid history-table auto-table">
-        <thead><tr><th>时间</th><th>数据集</th><th>模式</th><th>评测标准</th><th>裁判模型 / 思考</th><th>状态</th><th class="history-progress-cell">进度</th><th>任务总耗时</th><th>预览</th><th>操作</th><th>批跑备注</th></tr></thead>
+        <thead><tr><th>对比</th><th>时间</th><th>数据集</th><th>模式</th><th>评测标准</th><th>裁判模型 / 思考</th><th>状态</th><th class="history-progress-cell">进度</th><th>任务总耗时</th><th>预览</th><th>操作</th><th>批跑备注</th></tr></thead>
         <tbody>
           <tr v-for="h in historyItems" :key="h.task_id">
+            <td><input type="checkbox" v-model="comparisonTaskIds" :value="h.task_id" :aria-label="'选择对比任务 ' + h.task_id" :disabled="!!exportingTaskId || (comparisonTaskIds.length >= 2 && !comparisonTaskIds.includes(h.task_id))">{{ comparisonTaskIds.includes(h.task_id) ? (comparisonTaskIds.indexOf(h.task_id) === 0 ? 'A' : 'B') : '' }}</td>
             <td>{{ formatTime(h.updated_at || h.created_at) }}</td>
             <td>{{ h.dataset_name || '未记录' }}</td>
             <td>{{ modeLabel(h.mode) }}</td>
@@ -270,6 +279,12 @@
     <span v-else-if="running" class="running">评估中… {{ progress }}/{{ total }}</span>
     <span v-if="queueNotice" class="queue-notice">{{ queueNotice }}</span>
     <p v-if="runError" class="run-error">{{ runError }}</p>
+    <section v-if="conversationPreflight" class="query-image-panel">
+      <strong>多轮图片预检查 · {{conversationPreflight.model}}</strong>
+      <p>{{conversationPreflight.accepted_session_count}} 个会话 · {{conversationPreflight.accepted_turn_count}} 轮 · {{conversationPreflight.warning_count}} 项图片诊断 · {{conversationPreflight.blocked_turn_count}} 轮阻断。图片策略：原图 / 原分辨率无损切片。</p>
+      <details v-if="conversationPreflight.findings.length" open><summary>查看诊断</summary><p v-for="finding in conversationPreflight.findings" :key="finding.finding_id">{{finding.session_id}} · {{finding.asset_id || '模型配置'}} · 来源第 {{finding.source_turn}} 轮 · {{finding.message || finding.metric}} {{finding.observed}} / {{finding.limit}} {{finding.unit}} · {{finding.limit_kind}} · {{finding.status}}</p></details>
+      <p v-for="turn in conversationPreflight.turns.filter(t=>t.error)" :key="turn.id" class="err">{{turn.id}}：{{turn.error}}</p>
+    </section>
     <div v-if="taskId" class="task-duration-panel">
       <div class="task-duration-heading"><span>任务总耗时</span><strong>{{ selectedTaskStatus === 'queued' ? '尚未开始' : formatTaskDuration(selectedTaskTiming) }}</strong><small v-if="selectedTaskTiming && selectedTaskTiming.running">计时中</small></div>
       <p class="hint">累计实际执行时间，包含处理与等待；不含任务排队和暂停时长，失败补跑单独记录。</p>
@@ -383,12 +398,14 @@
     </div>
   </section>
 
-  <section v-if="results.length || summary">
+  <section v-if="results.length || summary" class="result-section">
     <h2>③ 结果
       <button @click="exportCsv" :disabled="!taskId || !!loadingTaskId">导出 CSV</button>
       <button @click="exportJson" :disabled="!taskId || !!loadingTaskId">导出 JSON</button>
-      <button @click="exportXlsx()" :disabled="!taskId || !!loadingTaskId || !!exportingTaskId">{{ exportingTaskId === taskId ? '正在生成 Excel…' : '导出 XLSX（完整）' }}</button>
+      <button @click="exportXlsx()" :disabled="!taskId || !!loadingTaskId || !!exportingTaskId">{{ exportingTaskId === taskId ? '正在生成 Excel…' : (exportIncludeImages ? '导出 XLSX（含原图）' : '导出 XLSX（不含原图）') }}</button>
       <button v-if="isVideoMode" @click="exportFrames" :disabled="!taskId || !!loadingTaskId">导出视觉证据 ZIP</button>
+      <button @click="exportModelInputEvidence" :disabled="!taskId || !!loadingTaskId" title="导出本任务全部成功评测实际发送给裁判的图片，含多轮历史图片；失败 Case 跳过，不受结果筛选影响">导出裁判输入图片 ZIP（整任务）</button>
+      <a v-if="taskId && items.some(it=>it.evidence_mode==='long_screenshot' || it.screenshot_meta1)" :href="'/api/eval/'+encodeURIComponent(taskId)+'/export?format=screenshot_evidence'">下载长截图输入证据 ZIP</a>
       <span v-if="loadingTaskId">正在加载任务，请稍候…</span>
       <button v-if="summary && summary.failed && selectedTaskStatus === 'done'" @click="retryFailedCases(null)" :disabled="retrySubmitting || ['queued','running'].includes(repairStatus)">
         {{ retrySubmitting ? '提交中…' : '重跑全部失败项' }}
@@ -398,7 +415,14 @@
       </button>
       <span v-if="retryStatusLabel(repairStatus)" class="running">{{ retryStatusLabel(repairStatus) }}</span>
     </h2>
+    <label class="export-image-option"><input type="checkbox" v-model="exportIncludeImages" :disabled="!!exportingTaskId">单任务 Excel 包含原图（可选，文件较大）</label>
+    <p class="hint">默认不嵌入回答截图和提问图片，评分、统计、图片明细及原图查看链接仍保留。</p>
     <human-compare-panel v-if="mode==='compare' && taskId && !loadingTaskId" :key="taskId" :task-id="taskId"></human-compare-panel>
+    <details v-for="group in conversationGroups" :key="group.id" class="query-image-panel">
+      <summary>会话 {{group.id}} · {{group.turns.length}} 轮结果</summary>
+      <button v-for="turn in group.turns" :key="turn.index" @click="resultQuery=turn.item_id; resetResultPage()">第 {{turn.turn_index}} 轮 · {{turn.error?'失败':'完成'}} · {{turn.image_warning_count || 0}} 项图片诊断</button>
+    </details>
+    <details v-if="running && Object.keys(liveInputDiagnostics).length" class="query-image-panel" open><summary>运行中图片检查</summary><p v-for="row in liveInputDiagnostics" :key="row.item_index">{{row.session_id}} · 第 {{row.turn_index}} 轮 · {{row.input_diagnostic_status}} · {{row.image_warning_count}} 项诊断</p></details>
     <div class="summary" v-if="summary">
       <span v-if="summary.input_modality_counts">文字题 {{ summary.input_modality_counts.text }} · 图文题 {{ summary.input_modality_counts.text_image }}</span>
       <span>样本量 {{ summary.total }}</span>
@@ -421,16 +445,68 @@
         </button>
       </div>
       <div class="result-filters">
+        <button :class="{primary:!failedOnly}" :aria-pressed="!failedOnly" @click="selectFailureFilter(false)">全部 Case</button>
+        <button :class="{primary:failedOnly}" :aria-pressed="failedOnly" @click="selectFailureFilter(true)">仅看失败（{{ failedCaseCount }}）</button>
         <input v-model="resultQuery" @input="resetResultPage" placeholder="搜索题号、query、context、回答或理由">
         <select v-if="mode==='compare'" v-model="modalityFilter" @change="resetResultPage"><option value="">全部题型</option><option value="text">文字题</option><option value="text_image">图文题</option></select>
-        <span class="result-count">共 {{ filteredResults.length }} 条</span>
+        <input v-if="conversationGroups.length" v-model="turnFilter" @input="resetResultPage" placeholder="筛选轮次，如 3" style="max-width:130px">
+        <select v-if="conversationGroups.length" v-model="diagnosticFilter" @change="resetResultPage"><option value="">全部输入状态</option><option value="warning">含图片警示</option><option value="blocked">被阻断</option></select>
+        <button @click="resetResultFilters">重置全部筛选</button>
+        <span class="result-count" role="status">筛选后 {{ filteredResults.length }} / {{ results.length }} 条</span>
         <template v-if="pagedResults.some(r => evidenceImages(r).length)">
           <span class="hint">当前页图片</span>
           <button @click="setPageEvidenceExpanded(false)">全部折叠图片</button>
           <button @click="setPageEvidenceExpanded(true)">全部展开图片</button>
         </template>
       </div>
+      <div v-if="mode==='compare'" class="score-filter-panel">
+        <div class="score-filter-toolbar">
+          <strong>按评分筛选 Case</strong>
+          <button @click="addScoreRule">添加评分条件</button>
+          <label v-if="scoreRules.length > 1">条件之间
+            <select v-model="scoreRuleJoin" @change="resetResultPage" aria-label="评分条件组合">
+              <option value="all">全部满足（AND）</option><option value="any">任一满足（OR）</option>
+            </select>
+          </label>
+          <button v-if="scoreRules.length" @click="clearScoreRules">清空评分条件</button>
+        </div>
+        <p class="hint">选择维度与产品，可筛选通过 / 不通过、具体分数、低分或两产品分差。分差 = |产品 A 分数 − 产品 B 分数|。</p>
+        <div v-for="(rule, ruleIndex) in scoreRules" :key="rule.id" class="score-filter-rule">
+          <span class="score-rule-number">条件 {{ ruleIndex + 1 }}</span>
+          <label>维度
+            <select v-model="rule.dimension" @change="changeScoreDimension(rule)" :aria-label="'条件 '+(ruleIndex+1)+' 维度'">
+              <option v-for="dim in scoreDimensions" :key="dim.key" :value="dim.key">{{ dim.label }}</option>
+            </select>
+          </label>
+          <label>判断
+            <select v-model="rule.operator" @change="resetResultPage" :aria-label="'条件 '+(ruleIndex+1)+' 判断'">
+              <option v-for="op in scoreOperators(rule)" :key="op.key" :value="op.key">{{ op.label }}</option>
+            </select>
+          </label>
+          <label v-if="scoreRuleNeedsNumber(rule)">N
+            <input v-model="rule.value" type="number" min="0" step="any" placeholder="输入 N" @input="resetResultPage" :aria-label="'条件 '+(ruleIndex+1)+' 数值'">
+          </label>
+          <div class="score-rule-products" role="group" :aria-label="'条件 '+(ruleIndex+1)+' 产品'">
+            <label v-for="product in filterProducts" :key="product"><input v-model="rule.products" type="checkbox" :value="product" @change="resetResultPage" :aria-label="'条件 '+(ruleIndex+1)+' 产品 '+product">产品 {{ product }}</label>
+          </div>
+          <select v-if="rule.operator!=='diff_lte'" v-model="rule.productJoin" @change="resetResultPage" :aria-label="'条件 '+(ruleIndex+1)+' 产品组合'">
+            <option value="all">所选产品同时满足（&amp;）</option><option value="any">所选产品任一满足（|）</option>
+          </select>
+          <span v-else class="hint">选择两个产品计算分差</span>
+          <button @click="removeScoreRule(rule.id)" :aria-label="'删除条件 '+(ruleIndex+1)">删除</button>
+        </div>
+        <p v-if="scoreFilterError" class="err" role="alert">{{ scoreFilterError }}</p>
+        <p v-if="scoreRules.length" class="hint">仅比较有效分数，N/A 不作 0 分；无评分项可用“N/A”筛选。评测失败的 Case 不参与评分筛选。</p>
+      </div>
+      <div class="result-reason-toolbar">
+        <span>评分理由</span>
+        <button @click="setAllReasonsExpanded(true)">展开全部理由</button>
+        <button @click="setAllReasonsExpanded(false)">收起全部理由</button>
+        <span class="hint">各维度可单独展开；筛选仅影响页面，统计和导出保留完整任务结果。</span>
+      </div>
+      <p v-if="!filteredResults.length" class="result-empty" role="status">{{ scoreFilterError ? '请先完成评分筛选条件。' : '没有符合条件的 Case，可调整条件或重置全部筛选。' }}</p>
       <div class="result-table-wrap">
+        <details v-if="summary?.conversation_statistics"><summary>多轮会话统计与覆盖</summary><div v-for="table in summary.conversation_statistics" :key="table.title"><h3>{{table.title}}</h3><table class="grid"><thead><tr><th v-for="header in table.headers" :key="header">{{header}}</th></tr></thead><tbody><tr v-for="(row,i) in table.rows" :key="i"><td v-for="(value,j) in row" :key="j">{{value ?? '—'}}</td></tr></tbody></table></div></details>
         <details v-if="summary && summary.by_input_modality">
           <summary>按题型查看汇总（沿用任务统一标准）</summary>
           <div v-for="(sub, key) in summary.by_input_modality" :key="key" class="query-image-panel">
@@ -469,13 +545,21 @@
                 <td
                   v-for="c in resultCols"
                   :key="c.key"
-                  @mouseenter="c.key !== 'latency_s' && showCellTooltip($event, cell(r, c))"
+                  @mouseenter="c.key !== 'latency_s' && !reasonOnlyColumn(c) && showCellTooltip($event, cell(r, c))"
                   @mouseleave="scheduleHideCellTooltip"
                 >
                   <div
+                    v-if="!reasonOnlyColumn(c)"
                     class="cell-clamp"
                     :class="{'cell-center': ['card_presence','superlink_presence','card_count','superlink_count','answer_coverage','needs_review','problem_solved','card_suitability','superlink_suitability','has_conflict','relevance','safety','content_quality','need_closure','personalization','latency_s'].includes(c.key)}"
                   >{{ cell(r, c) }}</div>
+                  <template v-if="cellReasons(r, c).length">
+                    <button class="reason-toggle" :aria-expanded="reasonsExpanded(r, c)" @click="toggleCellReasons(r, c)">{{ reasonsExpanded(r, c) ? '收起理由' : '展开理由' }}</button>
+                    <div v-if="reasonsExpanded(r, c)" class="cell-reasons">
+                      <p v-for="(reason, reasonIndex) in cellReasons(r, c)" :key="reasonIndex"><strong>{{ reason.label }}</strong><span>{{ reason.text }}</span></p>
+                    </div>
+                  </template>
+                  <span v-else-if="reasonOnlyColumn(c)" class="hint">无理由记录</span>
                   <details v-if="c.key === 'latency_s' && r.timings" class="timing-details">
                     <summary>耗时分解</summary>
                     <dl><template v-for="entry in timingEntries(r.timings)" :key="entry.key"><dt>{{ entry.label }}</dt><dd>{{ entry.seconds.toFixed(1) }} 秒</dd></template><dt>已发送调用</dt><dd>{{ r.timings.attempts }} 次</dd></dl>
@@ -509,6 +593,18 @@
                     </figure>
                   </div>
                 </div>
+              </td></tr>
+              <tr v-if="taskId && (r.evidence_mode==='long_screenshot' || items[r.index]?.screenshot1 || items[r.index]?.screenshot_meta1)"><td colspan="99" class="query-image-panel">
+                <screenshot-evidence :key="taskId+':'+r.index+':'+(evidenceRevisions[r.index] || 0)" :task-id="taskId" :item-index="Number(r.index)"></screenshot-evidence>
+              </td></tr>
+              <tr v-if="r.session_id"><td colspan="99" class="query-image-panel">
+                <strong>会话 {{r.session_id}} · 第 {{r.turn_index}} 轮</strong> · 使用前 {{r.history_turn_count}} 轮原始历史 · {{r.effective_input_modality==='text_image'?'含历史/当前题图':'文字输入'}}
+                <details><summary>历史证据与图片诊断 · {{r.image_warning_count || 0}} 项警示 · {{r.input_diagnostic_status}}</summary>
+                  <details v-for="turn in conversationHistory(r)" :key="turn.turn"><summary>历史第 {{turn.turn}} 轮 · {{turn.query}}</summary><p v-for="picture in turn.images" :key="picture.key"><a :href="picture.previewUrl" target="_blank" rel="noopener">{{picture.label}} · 查看原图</a></p></details>
+                  <p v-for="asset in r.conversation_asset_manifest" :key="asset.asset_id">{{asset.source_turn===r.turn_index?'当前评分对象':'历史上下文'}} · {{asset.asset_id}} · 来源第 {{asset.source_turn}} 轮</p>
+                  <p v-for="finding in r.image_findings" :key="finding.finding_id" :class="finding.status==='blocked'?'err':'hint'">{{finding.asset_id}} · 来源第 {{finding.source_turn}} 轮 · {{finding.limit_kind==='local_guardrail'?'平台保护限制':finding.limit_kind==='effective_vision'?'视觉缩放风险':finding.limit_kind==='official_hard'?'官方输入限制':'输入诊断'}} · {{finding.metric || finding.code}}：{{finding.observed}} / {{finding.limit}} {{finding.unit}} · {{finding.status==='resolved_by_lossless_split'?'已通过无损切片解决':finding.message || finding.status}}</p>
+                  <p v-if="r.request_budget_report">请求图片 {{r.request_budget_report.actual_image_count}} 张 · 请求体 {{r.request_budget_report.request_payload_bytes}} 字节 · 保守估算 {{r.request_budget_report.estimated_input_tokens}} Token</p>
+                </details>
               </td></tr>
               <tr v-if="r.error" class="result-error-detail"><td colspan="99">评估失败：{{ r.error }}</td></tr>
             </template>
@@ -549,6 +645,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20260917_history_pagination"></script>
+  <script type="module" src="/static/app.js?v=20261012_model_input_evidence"></script>
 </body>
 </html>

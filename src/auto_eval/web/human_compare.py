@@ -116,6 +116,11 @@ def _binding(item: dict, result: dict, n: int) -> tuple[str, list[str]]:
 
 def _identity(case: dict, item: dict, pid: str, n: int):
     left, right = case, case_identity(item)
+    if item.get("session_id"):
+        if not case.get("history_prefix_sha256") or not item.get("history_prefix_sha256"):
+            return "history_unverified", ["多轮人工基准缺少完整原始历史指纹；不能仅凭题号或相同问题对齐"]
+        if case["history_prefix_sha256"] != item["history_prefix_sha256"]:
+            return "content_mismatch", ["多轮原始历史版本不同"]
     reasons = []
     for field in ("query","context"):
         if field == "context" and (case.get("context_origin") != "source" or not case.get("context_known",True)):

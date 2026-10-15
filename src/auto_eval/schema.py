@@ -28,7 +28,8 @@ class EvalItem(BaseModel):
 
     id: str
     question: str
-    query_images: list[str] = Field(default_factory=list, max_length=1)
+    query_images: list[str] = Field(default_factory=list)
+    session_id: str | None = None
     input_modality: Literal["text", "text_image"] = "text"
     context: str | None = None  # 可选背景/多模态描述
     category: str = "default"  # 垂域（分组展示用）
@@ -37,6 +38,8 @@ class EvalItem(BaseModel):
 
     @model_validator(mode="after")
     def normalize_question_images(self):
+        if len(self.query_images) > 1 and not self.session_id:
+            raise ValueError("旧单轮输入最多支持一张提问图片")
         if any(not path.strip() for path in self.query_images):
             raise ValueError("提问图片路径不能为空")
         modality = "text_image" if self.query_images else "text"

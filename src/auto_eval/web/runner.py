@@ -225,6 +225,7 @@ def _to_evalitem(item: dict, idx: int) -> EvalItem:
     return EvalItem(
         id=item.get("id", f"q{idx}"),
         question=item["query"],
+        session_id=item.get("session_id"),
         query_images=item.get("query_images") or [],
         input_modality="text_image" if item.get("query_images") else "text",
         context=item.get("context"),
@@ -399,6 +400,16 @@ def _make_item_evaluator(
         )
         _persist_task(task)
 
+    from ..conversation import DIAGNOSTIC_FIELDS, VERSION
+    from ..image_limits import resolve_image_limits
+    from .conversation_prepare import ConversationPreparation
+    conversation_preparer = None
+    if task.mode == "compare" and any(it.get("session_id") for it in task.items):
+        if task.protocol_manifest.get("conversation_adapter_version", VERSION) != VERSION:
+            raise ValueError("不支持该多轮适配器版本，请使用原版本恢复")
+        limits = task.protocol_manifest.get("image_limits") or resolve_image_limits(judges_cfg[0], rich_profile)
+        task.protocol_manifest.update(image_limits=limits, input_schema_version="2.0", conversation_adapter_version=VERSION)
+        conversation_preparer = ConversationPreparation(task.items, task.session_name, rich_profile, limits)
     result_callback = on_result or _default_on_result
 
     async def finish(idx, res, started):
@@ -480,6 +491,28 @@ def _make_item_evaluator(
                 )
                 last_error = None
                 res = None
+                request_evidence = None
+                conversation_input = None
+                item_dict.pop("screenshot_evidence", None)
+                task.items[idx].pop("screenshot_evidence", None)
+                def save_evidence(record):
+                    nonlocal request_evidence
+                    request_evidence = copy.deepcopy(record)
+                    request_evidence["request_id"] = request_id
+                    if record.get("evidence_mode") == "long_screenshot":
+                        item_dict["screenshot_evidence"] = request_evidence
+                        task.items[idx]["screenshot_evidence"] = request_evidence
+                        _persist_task(task)
+                if conversation_preparer is not None and item_dict.get("session_id"):
+                    try:
+                        conversation_input = await run_preparation(conversation_preparer.prepare, item_dict,
+                            timeout=float(runtime_options.get("video_prepare_timeout_s") or 300))
+                    except Exception as exc:
+                        last_error = exc
+                    task.items[idx].update({key: item_dict[key] for key in DIAGNOSTIC_FIELDS if key in item_dict})
+                    _persist_task(task)
+                    await task.publish("input_diagnostics", {"item_index": idx,
+                        **{key: item_dict[key] for key in DIAGNOSTIC_FIELDS if key in item_dict}})
                 item_dict.pop("input_manifest_sha256", None)
                 is_screenshot = task.mode == "compare" and (
                     item_dict.get("evidence_mode") == "long_screenshot"
@@ -495,7 +528,7 @@ def _make_item_evaluator(
                     if task.mode == "compare"
                     else not item_dict.get("frames")
                 )
-                if needs_visual_prepare:
+                if needs_visual_prepare and not item_dict.get("session_id"):
                     try:
                         log_event(
                             "视觉证据准备" if is_screenshot else "视频准备",
@@ -562,7 +595,7 @@ def _make_item_evaluator(
                             progress_status="error",
                         )
                 check_pause()
-                if last_error is None and task.mode == "compare":
+                if last_error is None and task.mode == "compare" and not item_dict.get("session_id"):
                     try:
                         if item_dict.get("query_images"):
                             if rich_profile is None:
@@ -583,6 +616,7 @@ def _make_item_evaluator(
                 if last_error is None:
                     for attempt in range(2):
                         check_pause()
+                        request_evidence = None
                         try:
                             if attempt:
                                 log_event(
@@ -598,7 +632,9 @@ def _make_item_evaluator(
                                     task.mode, idx, item_dict,
                                     rich_judges=rich_judges,
                                     compare_judges=compare_judges,
+                                    evidence_callback=save_evidence,
                                     category_display=category_display,
+                                    **({"conversation_input": conversation_input} if conversation_input else {}),
                                 ),
                                 timeout=eval_timeout,
                             )
@@ -661,7 +697,21 @@ def _make_item_evaluator(
                         request_id=request_id,
                     )
             res["index"] = idx
+            if (not res.get("error") and request_evidence
+                    and request_evidence.get("record_status") == "model_response_received"):
+                # Bind evidence to this successful result, not to mutable prepared
+                # input. Retries/updates cannot replace an older result's images.
+                res["model_input_evidence"] = {
+                    "version": "model-input-evidence-1", "record_status": "evaluation_succeeded",
+                    "request_id": request_id,
+                    **{key: request_evidence.get(key) for key in
+                       ("request_sha256", "judge_model", "evidence_mode", "images")},
+                }
             if task.mode == "compare":
+                for field in DIAGNOSTIC_FIELDS:
+                    if field in item_dict:
+                        res[field] = item_dict[field]
+                        task.items[idx][field] = item_dict[field]
                 res.update(input_modality="text_image" if item_dict.get("query_images") else "text",
                            query_images=item_dict.get("query_images") or [],
                            evidence_mode=item_dict.get("evidence_mode", "video_frames"))
@@ -723,8 +773,8 @@ async def _run(task: Task, cfg: AppConfig) -> None:
     sessions: dict[str, list[int]] = {}
     standalone: list[int] = []
     for i, it in enumerate(task.items):
-        grp = it.get("session_group") if task.mode != "compare" else None
-        if task.mode == "rich_content" and grp:
+        grp = it.get("session_group")
+        if grp and (task.mode == "rich_content" or it.get("session_id")):
             sessions.setdefault(str(grp), []).append(i)
         else:
             standalone.append(i)
@@ -770,11 +820,14 @@ async def _run(task: Task, cfg: AppConfig) -> None:
 _PREPARED_ITEM_FIELDS = {
     "query_images", "input_modality", *PREPARED_FIELDS,
     "evidence_mode", "screenshot_meta1", "screenshot_meta2", "screenshot_meta3",
+    "screenshot_evidence",
     "frames", "frames1", "frames2", "frames3", "frame_count", "media",
     "video_name", "video1_path", "video2_path", "video3_path",
     "video_source", "video_source1", "video_source2", "video_source3",
     "duration", "duration1", "duration2", "duration3",
 }
+from ..conversation import DIAGNOSTIC_FIELDS as _CONVERSATION_FIELDS
+_PREPARED_ITEM_FIELDS.update(_CONVERSATION_FIELDS | {"conversation_assets", "screenshot1", "screenshot2", "screenshot3"})
 
 
 def _base_context(item: dict) -> str:
@@ -829,9 +882,11 @@ async def run_resume(task: Task, cfg: AppConfig) -> None:
         for index, item in enumerate(task.items):
             if index in batch_indexes:
                 continue
-            group = item.get("session_group") if task.mode == "rich_content" else None
+            group = item.get("session_group") if task.mode == "rich_content" or item.get("session_id") else None
             key = f"session:{group}" if group else f"item:{index}"
             groups.setdefault(key, []).append(index)
+        for indexes in groups.values():
+            indexes.sort(key=lambda i: task.items[i].get("turn_index", 0))
         latest = latest_results_by_index(task)
 
         async def run_group(indexes: list[int]) -> None:
@@ -843,7 +898,7 @@ async def run_resume(task: Task, cfg: AppConfig) -> None:
                         break
                     item = copy.deepcopy(task.items[index])
                     base = _base_context(item)
-                    item["context"] = (f"{base}\n\n" if base else "") + f"历史对话总结：\n{prior}" if prior else base
+                    item["context"] = (f"{base}\n\n" if base else "") + f"历史对话总结：\n{prior}" if prior and task.mode != "compare" else base
                     working_items[index] = item
                     result = await one(index, item)
                     if result.get("_paused"):
@@ -979,7 +1034,7 @@ async def run_retry(task: Task, cfg: AppConfig, retry_id: str) -> None:
         grouped: dict[str, list[int]] = {}
         standalone: list[int] = []
         for idx, item in enumerate(task.items):
-            group = item.get("session_group") if task.mode != "compare" else None
+            group = item.get("session_group") if task.mode != "compare" or item.get("session_id") else None
             if group:
                 grouped.setdefault(str(group), []).append(idx)
             elif idx in target_set:
@@ -1021,7 +1076,7 @@ async def run_retry(task: Task, cfg: AppConfig, retry_id: str) -> None:
                 res = await run_one(idx, prior_summary)
                 if res.get("_paused"):
                     break
-                if res.get("error"):
+                if res.get("error") and task.mode != "compare":
                     remaining = [
                         other for other in group_indexes[first_selected + position + 1:]
                         if other in target_set
@@ -1143,6 +1198,8 @@ async def _run_update_batch_body(
         # 整批一个串行会话：前轮总结在批次内本地链式注入，
         # 不从 task.results 读回，不受并行批次覆盖影响。
         prior_summary = task.execution_control.get("update_batches", {}).get(batch_id, {}).get("prior_summary", "")
+        if task.mode == "compare" and any(item.get("session_id") for _, item in batch):
+            batch = sorted(batch, key=lambda entry: (entry[1].get("session_id", ""), entry[1].get("turn_index", 0), entry[0]))
         for turn_no, (idx, item_dict) in enumerate(batch, 1):
             if task.pause_requested:
                 break
@@ -1286,6 +1343,8 @@ async def _eval_one(
     rich_judges=None,
     compare_judges=None,
     category_display=None,
+    conversation_input=None,
+    evidence_callback=None,
 ) -> dict:
     t0 = time.perf_counter()
     item = _to_evalitem(item_dict, idx)
@@ -1309,6 +1368,7 @@ async def _eval_one(
             context=(item.context or "").strip(),
             answer_text=answer_text,
             frames=frames,
+            **({"evidence_callback": evidence_callback} if evidence_callback else {}),
         )
         out.update(visual)
         log_event(
@@ -1356,6 +1416,7 @@ async def _eval_one(
             out[f"context{product_no}"] = contexts[product_no]
 
         compare_result = await compare_judges[0].evaluate(
+            **({"conversation_input": conversation_input} if conversation_input else {}),
             **({"query_image_meta": item_dict["query_image_meta"]} if item.query_images else {}),
             question=item.question,
             context=(item.context or "").strip(),
@@ -1373,6 +1434,7 @@ async def _eval_one(
                 else None
             ),
             product_count=product_count,
+            **({"evidence_callback": evidence_callback} if evidence_callback else {}),
             **({
                 "evidence_mode": "long_screenshot",
                 "screenshot_metas": [item_dict[f"screenshot_meta{n}"] for n in range(1, product_count + 1)],
@@ -1502,6 +1564,13 @@ def _summarize(task: Task, *, include_subsets: bool = True) -> dict:
     summary["conflict_yes"] = sum(1 for r in valid if r.get("has_conflict") == "yes")
     summary["conflict_no"] = sum(1 for r in valid if r.get("has_conflict") == "no")
     summary["conflict_unclear"] = sum(1 for r in valid if r.get("has_conflict") == "unclear")
+    if include_subsets and any(it.get("session_id") for it in task.items):
+        from .compare_statistics import conversation_statistics
+        snapshot = {"items": task.items, "protocol_manifest": task.protocol_manifest, "evaluation_profile": task.evaluation_profile}
+        latest = latest_results_by_index(task)
+        aligned = [{**latest[i], "评估状态": "评估失败" if latest[i].get("error") else "已完成"} if i in latest else {} for i in range(len(task.items))]
+        summary["conversation_statistics"] = [{"title": t.title, "headers": t.headers, "rows": t.rows}
+            for t in conversation_statistics(snapshot, aligned)]
     if include_subsets:
         from copy import copy
         summary["input_modality_counts"] = {}

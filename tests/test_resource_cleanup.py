@@ -188,7 +188,7 @@ async def test_export_jobs_release_loaded_task_and_workers(monkeypatch, tmp_path
         return task
     monkeypatch.setattr(exports, "peek_task_async", load)
     manager = exports.XlsxExports(tmp_path)
-    monkeypatch.setattr(manager, "_write", lambda snapshot, path: path.write_bytes(b"synthetic"))
+    monkeypatch.setattr(manager, "_write", lambda snapshot, path, **kwargs: path.write_bytes(b"synthetic"))
     for i in range(30):
         manager.create(str(i))
         await asyncio.gather(*list(manager.workers))

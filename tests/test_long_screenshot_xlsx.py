@@ -420,7 +420,11 @@ async def test_existing_export_endpoint_includes_original_images(tmp_path, monke
         return _task_from_snapshot(data, "task")
     monkeypatch.setattr(server, "peek_task_async", peek)
     monkeypatch.setattr(server, "RUNS_DIR", tmp_path)
-    response = await server.api_export("task", "xlsx")
+    from auto_eval.web import exports
+    monkeypatch.setattr(exports, "peek_task_async", peek)
+    manager = exports.XlsxExports(tmp_path / "exports")
+    monkeypatch.setattr(server, "XLSX_EXPORTS", manager)
+    response = await server.api_export("task", "xlsx", include_images=True)
     assert response.status_code == 200
     assert response.media_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     assert unquote(response.headers["content-disposition"]).endswith("测试数据_模型测评结果.xlsx")
@@ -428,4 +432,6 @@ async def test_existing_export_endpoint_includes_original_images(tmp_path, monke
     assert product_cells(archive, sheets["逐题结果"]) == {"P1:2": raw, "P2:2": raw}
     assert_result_only_images(archive, sheets)
     await response.background()
+    assert Path(response.path).exists()  # Shared exports stay available for other downloaders.
+    await manager.close()
     assert not Path(response.path).exists()

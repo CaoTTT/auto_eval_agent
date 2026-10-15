@@ -1,4 +1,4 @@
-import { createApp, ref, computed, onMounted, onUnmounted, nextTick, selectEvidenceMode } from "./compare-data.js?v=20260916_video_cache";
+import { createApp, ref, computed, onMounted, onUnmounted, nextTick, selectEvidenceMode } from "./compare-data.js?v=20260920_audit";
 
 createApp({
   setup() {
@@ -23,6 +23,7 @@ createApp({
     const opPreparing = ref(false);
     const errors = ref([]);
     const importReport = ref(null);
+    const conversationPreflight = ref(null);
     const judges = ref([]);
     const selectedJudges = ref([]);
     const visibleJudges = computed(() => judges.value);
@@ -110,6 +111,163 @@ createApp({
     const activeSkill = ref("");
     const resultQuery = ref("");
     const modalityFilter = ref("");
+    const failedOnly = ref(false);
+    const failedCaseCount = computed(() => results.value.filter(r => r.error).length);
+    function selectFailureFilter(value) {
+      failedOnly.value = value;
+      activeSkill.value = "";
+      resetResultPage();
+    }
+    const turnFilter = ref(''), diagnosticFilter = ref('');
+    const scoreDimensions = [
+      {key: 'response_gate', label: '响应体验', gate: true},
+      {key: 'safety_gate', label: '安全稳定', gate: true},
+      {key: 'understanding', label: '准确理解需求'},
+      {key: 'accuracy', label: '内容准确'},
+      {key: 'service_closure', label: '服务闭环'},
+      {key: 'scenario_fulfillment', label: '场景化满足'},
+      {key: 'intuitive_efficiency', label: '直观高效'},
+      {key: 'evidence_quality', label: '有理有据'},
+      {key: 'guided_recommendation', label: '引导推荐'},
+    ];
+    const scoreRules = ref([]), scoreRuleJoin = ref('all');
+    let scoreRuleSequence = 0;
+    const filterProducts = computed(() => results.value.some(r => Number(r.product_count) === 3)
+      || items.value.some(r => Number(r.product_count) === 3) ? [1, 2, 3] : [1, 2]);
+    function scoreOperators(rule) {
+      if (scoreDimensions.find(d => d.key === rule.dimension)?.gate) return [
+        {key: 'pass', label: '通过'}, {key: 'fail', label: '不通过'},
+        {key: 'unclear', label: '不清楚'}, {key: 'na', label: '无结果 / N/A'},
+      ];
+      return [{key: 'eq', label: '分数 ='}, {key: 'lt', label: '分数 <'},
+        {key: 'lte', label: '分数 ≤'}, {key: 'gt', label: '分数 >'}, {key: 'gte', label: '分数 ≥'},
+        {key: 'diff_lte', label: '两产品分差 ≤'}, {key: 'na', label: '无分数 / N/A'}];
+    }
+    function scoreRuleNeedsNumber(rule) {
+      return ['eq', 'lt', 'lte', 'gt', 'gte', 'diff_lte'].includes(rule.operator);
+    }
+    function addScoreRule() {
+      scoreRules.value.push({id: ++scoreRuleSequence, dimension: 'understanding', operator: 'lt',
+        value: '', products: [1, 2], productJoin: 'any'});
+      resetResultPage();
+    }
+    function changeScoreDimension(rule) {
+      rule.operator = scoreDimensions.find(d => d.key === rule.dimension)?.gate ? 'pass' : 'lt';
+      rule.value = '';
+      resetResultPage();
+    }
+    function removeScoreRule(id) {
+      scoreRules.value = scoreRules.value.filter(rule => rule.id !== id);
+      resetResultPage();
+    }
+    function clearScoreRules() {
+      scoreRules.value = [];
+      scoreRuleJoin.value = 'all';
+      resetResultPage();
+    }
+    function scoreRuleError(rule) {
+      if (!scoreDimensions.some(d => d.key === rule.dimension)
+          || !scoreOperators(rule).some(op => op.key === rule.operator)) return '请选择有效的维度和判断方式';
+      if (!rule.products.length) return '至少选择一个产品';
+      if (rule.operator === 'diff_lte' && rule.products.length !== 2) return '分差筛选需要恰好选择两个产品';
+      if (scoreRuleNeedsNumber(rule) && (String(rule.value ?? '').trim() === ''
+          || !Number.isFinite(Number(rule.value)) || Number(rule.value) < 0)) return '请输入大于或等于 0 的数值';
+      return '';
+    }
+    const scoreFilterError = computed(() => mode.value === 'compare'
+      ? scoreRules.value.map((rule, i) => scoreRuleError(rule) ? `条件 ${i + 1}：${scoreRuleError(rule)}` : '').filter(Boolean).join('；') : '');
+    function scoreValue(row, dimension, product) {
+      // Missing, inapplicable and unknown scores must never be coerced to zero.
+      if (row[`${dimension}_applicable`] === false) return null;
+      const raw = row[`answer${product}_${dimension}_score`];
+      if ((typeof raw !== 'number' && typeof raw !== 'string') || String(raw).trim() === '') return null;
+      return Number.isFinite(Number(raw)) ? Number(raw) : null;
+    }
+    function matchesScoreRule(row, rule) {
+      const count = Number(row.product_count || items.value[row.index]?.product_count || 2);
+      const present = product => Number(product) >= 1 && Number(product) <= count;
+      if (rule.operator === 'diff_lte') {
+        if (!rule.products.every(present)) return false;
+        const values = rule.products.map(product => scoreValue(row, rule.dimension, product));
+        return values.every(value => value !== null) && Math.abs(values[0] - values[1]) <= Number(rule.value);
+      }
+      const gate = scoreDimensions.find(d => d.key === rule.dimension)?.gate;
+      const matches = product => {
+        if (!present(product)) return false;
+        if (gate) {
+          const value = row[`answer${product}_${rule.dimension}`];
+          return rule.operator === 'na' ? value == null || value === '' || value === 'N/A' : value === rule.operator;
+        }
+        const value = scoreValue(row, rule.dimension, product);
+        if (rule.operator === 'na') return value === null;
+        if (value === null) return false;
+        const n = Number(rule.value);
+        return ({eq: () => value === n, lt: () => value < n, lte: () => value <= n,
+          gt: () => value > n, gte: () => value >= n})[rule.operator]?.() || false;
+      };
+      return rule.productJoin === 'all' ? rule.products.every(matches) : rule.products.some(matches);
+    }
+    function matchesScoreFilters(row) {
+      if (mode.value !== 'compare' || !scoreRules.value.length) return true;
+      if (row.error || scoreFilterError.value) return false;
+      const matches = rule => matchesScoreRule(row, rule);
+      return scoreRuleJoin.value === 'all' ? scoreRules.value.every(matches) : scoreRules.value.some(matches);
+    }
+    const allReasonsExpanded = ref(false), reasonExpansion = ref({});
+    function reasonOnlyColumn(column) {
+      return column.key === 'rationale' || column.key.endsWith('_reason');
+    }
+    function cellReasons(row, column) {
+      const entries = [];
+      const add = (label, value) => {
+        const text = Array.isArray(value) ? value.filter(Boolean).join('；') : String(value ?? '');
+        if (text.trim()) entries.push({label, text});
+      };
+      if (reasonOnlyColumn(column)) add(column.label, row[column.key]);
+      else if (['response_gate_summary', 'safety_gate_summary'].includes(column.key)) {
+        const dimension = column.key.replace('_summary', '');
+        for (let n = 1; n <= Number(row.product_count || items.value[row.index]?.product_count || 2); n++) {
+          add(`产品 ${n}`, row[`answer${n}_${dimension}_reason`]);
+        }
+      } else if (column.key.endsWith('_summary')) {
+        const dimension = column.key.replace('_summary', '');
+        add('评分理由', row[`${dimension}_reason`]);
+      } else if (column.key === 'has_conflict') add('冲突原因', row.conflict_reason);
+      else if (['needs_human_review', 'needs_review'].includes(column.key)) add('复核原因', row.review_reasons?.length ? row.review_reasons : row.review_reason);
+      return entries;
+    }
+    function reasonKey(row, column) { return `${taskId.value}:${row.index ?? row.item_id}:${column.key}`; }
+    function reasonsExpanded(row, column) {
+      return reasonExpansion.value[reasonKey(row, column)] ?? allReasonsExpanded.value;
+    }
+    function toggleCellReasons(row, column) {
+      reasonExpansion.value[reasonKey(row, column)] = !reasonsExpanded(row, column);
+      hideCellTooltip();
+    }
+    function setAllReasonsExpanded(expanded) {
+      allReasonsExpanded.value = expanded;
+      reasonExpansion.value = {};
+      hideCellTooltip();
+    }
+    function reasonSearchText(row) {
+      return Object.entries(row).filter(([key]) => key === 'rationale' || /_reason(s)?$/.test(key))
+        .map(([, value]) => Array.isArray(value) ? value.join(' ') : value || '').join(' ');
+    }
+    function resetResultFilters() {
+      activeSkill.value = ''; resultQuery.value = ''; failedOnly.value = false;
+      modalityFilter.value = ''; turnFilter.value = ''; diagnosticFilter.value = '';
+      clearScoreRules();
+    }
+    const liveInputDiagnostics = ref({});
+    const conversationGroups = computed(() => {
+      const groups = new Map();
+      for (const row of results.value) {
+        if (!row.session_id) continue;
+        if (!groups.has(row.session_id)) groups.set(row.session_id, []);
+        groups.get(row.session_id).push(row);
+      }
+      return [...groups].map(([id, turns]) => ({id, turns:turns.sort((a,b)=>a.turn_index-b.turn_index)}));
+    });
     const modalityCounts = computed(() => ({
       text: opItems.value.filter(it => !(it.queryImages || []).length).length,
       text_image: opItems.value.filter(it => (it.queryImages || []).length).length,
@@ -154,6 +312,11 @@ createApp({
       }
       return images;
     }
+    function conversationHistory(r) {
+      return items.value.map((item,index)=>({item,index})).filter(({item})=>item.session_id===r.session_id && item.turn_index<r.turn_index)
+        .sort((a,b)=>a.item.turn_index-b.item.turn_index).map(({item,index})=>({turn:item.turn_index, query:item.query,
+          images:evidenceImages(results.value.find(row=>row.index===index) || {index})}));
+    }
     const resultPage = ref(1);
     const resultPageSize = ref(10);
     const progressPage = ref(1);
@@ -171,6 +334,7 @@ createApp({
     const loadingHistory = ref(false);
     const loadingTaskId = ref("");
     const exportingTaskId = ref("");
+    const exportIncludeImages = ref(false);
     const exportMessage = ref("");
     const exportError = ref("");
     const exportDownloadUrl = ref("");
@@ -605,6 +769,7 @@ createApp({
 
     function columnWidth(c) {
       if (c.key === "latency_s") return 120;
+      if (reasonOnlyColumn(c)) return 200;
       const compact = [
         "latency_s", "card_presence", "card_count", "superlink_presence",
         "superlink_count", "answer_coverage", "needs_review", "problem_solved",
@@ -637,9 +802,14 @@ createApp({
     const filteredResults = computed(() => {
       const q = resultQuery.value.trim().toLowerCase();
       return skillResults.value.filter((r) => {
+        if (!matchesScoreFilters(r)) return false;
+        if (failedOnly.value && !r.error) return false;
+        if (turnFilter.value && String(r.turn_index) !== turnFilter.value) return false;
+        if (diagnosticFilter.value==='warning' && !r.image_warning_count) return false;
+        if (diagnosticFilter.value==='blocked' && r.input_diagnostic_status!=='blocked') return false;
         const modality = r.input_modality || ((items.value[r.index]?.query_images || []).length ? "text_image" : "text");
         if (modalityFilter.value && modality !== modalityFilter.value) return false;
-        if (q && !`${r.item_id || ""} ${r.query || ""} ${r.context || ""} ${r.answer_text || ""} ${r.answer1 || ""} ${r.answer2 || ""} ${r.answer3 || ""} ${(r.card_contents || []).join(" ")} ${(r.superlink_texts || []).join(" ")} ${r.rationale || ""}`.toLowerCase().includes(q)) return false;
+        if (q && !`${r.session_id || ""} ${r.turn_index || ""} ${r.item_id || ""} ${r.query || ""} ${r.context || ""} ${r.answer_text || ""} ${r.answer1 || ""} ${r.answer2 || ""} ${r.answer3 || ""} ${(r.card_contents || []).join(" ")} ${(r.superlink_texts || []).join(" ")} ${reasonSearchText(r)}`.toLowerCase().includes(q)) return false;
         return true;
       });
     });
@@ -769,6 +939,7 @@ createApp({
     function comparisonDraftRows(rows) {
       return rows.map(raw => {
         const item = {...(raw.source_data || {}), ...raw};
+        const conversation = raw.session_id && Number.isInteger(raw.turn_index) && raw.turn_index >= 1;
         return {...newOpItem(), id:item.id || '', query:item.query || item.question || '',
           context:item.context || '', category:item.category || '',
           queryImages:[...(item.query_images || [])], queryImageMeta:item.query_image_meta || [],
@@ -781,7 +952,8 @@ createApp({
             [`videoSource${n}`,item[`video_source${n}`] || {}],
           ])), taskStartTime:item.task_start_time ?? null, taskEndTime:item.task_end_time ?? null,
           sourceLine:item.source_line ?? null, sourceData:raw.source_data || null,
-          sessionGroup:item.session_group ?? null, turnIndex:item.turn_index ?? null};
+          sessionId:conversation ? raw.session_id : '', screenshotScope:conversation ? raw.screenshot_scope || '' : '',
+          sessionGroup:conversation ? raw.session_group ?? null : null, turnIndex:conversation ? raw.turn_index : null};
       });
     }
     function detachResultView() {
@@ -1026,6 +1198,7 @@ createApp({
         if (it.sourceData) item.source_data = it.sourceData;
         if (it.sessionGroup != null) item.session_group = it.sessionGroup;
         if (it.turnIndex != null) item.turn_index = it.turnIndex;
+        if (it.sessionId) {item.session_id = it.sessionId; item.screenshot_scope = it.screenshotScope;}
         return item;
       });
       const body = {
@@ -1047,6 +1220,14 @@ createApp({
       let r;
       submitting.value = true;
       try {
+        conversationPreflight.value = null;
+        if (submittedItems.some(item => item.session_id)) {
+          const checked = await fetch('/api/compare/preflight', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+          const report = await checked.json();
+          if (!checked.ok) throw Error(typeof report.detail === 'string' ? report.detail : '多轮预检查失败');
+          conversationPreflight.value = report;
+          if (report.blocked_turn_count) throw Error(`多轮预检查：${report.blocked_turn_count} 轮被阻断，请查看图片诊断。`);
+        }
         r = await fetch("/api/eval", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1077,9 +1258,8 @@ createApp({
       summary.value = null;
       progressEvents.value = {};
       expandedProgressLogs.value = {};
-      activeSkill.value = "";
-      resultQuery.value = "";
-      resultPage.value = 1;
+      resetResultFilters();
+      setAllReasonsExpanded(false);
       progress.value = 0;
       total.value = submittedItems.length;
       itemProgress.value = Object.fromEntries(
@@ -1287,6 +1467,11 @@ createApp({
         const d = JSON.parse(e.data);
         mergeItemProgress(d);
       });
+      es.addEventListener('input_diagnostics', e => {
+        if (!isSelected()) return;
+        const data=JSON.parse(e.data);liveInputDiagnostics.value[data.item_index]=data;
+        if(items.value[data.item_index]) Object.assign(items.value[data.item_index],data);
+      });
       es.addEventListener("progress_event", (e) => {
         if (!isSelected()) return;
         appendProgressEvent(JSON.parse(e.data));
@@ -1442,7 +1627,7 @@ createApp({
       if (c.key === "latency_s") return r.total_s != null ? r.total_s + "秒" : v != null ? v + "秒（旧记录）" : "";
       if (["input_status_summary", "response_gate_summary", "safety_gate_summary"].includes(c.key)) {
         const field = c.key.replace("_summary", "");
-        const labels = { complete: "完整", partial: "不完整", failed: "失败", pass: "通过", fail: "失败", unclear: "不清楚" };
+        const labels = { complete: "完整", partial: "不完整", failed: "失败", pass: "通过", fail: "不通过", unclear: "不清楚" };
         const count = Number(r.product_count || 2);
         return Array.from({ length: count }, (_, index) => {
           const productNo = index + 1;
@@ -1732,6 +1917,7 @@ createApp({
         results.value = [];
         summary.value = null;
       }
+      comparisonTaskIds.value = comparisonTaskIds.value.filter(value => value !== id);
       delete historyNoteDrafts.value[id];
       delete historyNoteEditing.value[id];
       await loadHistory();
@@ -1820,9 +2006,8 @@ createApp({
         selectedTaskStatus.value = d.status || "";
         running.value = ["pending", "queued", "running"].includes(selectedTaskStatus.value);
         queueNotice.value = selectedTaskStatus.value === "queued" ? "该任务正在等待前序任务完成。" : "";
-        activeSkill.value = "";
-        resultQuery.value = "";
-        resultPage.value = 1;
+        resetResultFilters();
+        setAllReasonsExpanded(false);
         progressPage.value = 1;
         if (mode.value !== "compare" && skillTabs.value.length) activeSkill.value = skillTabs.value[0].key;
         if (running.value || selectedActiveRuns.value || ["queued", "running"].includes(repairStatus.value)) connectSSE(taskId.value);
@@ -1848,20 +2033,29 @@ createApp({
       if (loadingTaskId.value) return;
       window.open(`/api/eval/${taskId.value}/export?format=json`);
     }
-    async function exportXlsx(requestedId = "") {
-      if (exportingTaskId.value || (!requestedId && loadingTaskId.value)) return;
-      const id = requestedId || taskId.value;
+    const comparisonTaskIds = ref([]);
+    async function exportComparisonXlsx() {
+      if (comparisonTaskIds.value.length !== 2) return;
+      await exportXlsx("", [...comparisonTaskIds.value]);
+    }
+    async function exportXlsx(requestedId = "", comparisonIds = null) {
+      if (exportingTaskId.value || (!requestedId && !comparisonIds && loadingTaskId.value)) return;
+      const id = comparisonIds ? comparisonIds.join(" / ") : requestedId || taskId.value;
       if (!id) return;
+      const includeImages = !comparisonIds && exportIncludeImages.value;
+      const exportLabel = `任务 ${id}（${includeImages ? '含原图' : '不含原图'}）`;
       exportingTaskId.value = id;
       exportError.value = "";
       exportDownloadUrl.value = "";
-      exportMessage.value = `正在为任务 ${id} 准备 Excel…`;
+      exportMessage.value = `正在为${exportLabel}准备 Excel…`;
       try {
-        const response = await fetch(`/api/eval/${encodeURIComponent(id)}/exports`, {method: "POST"});
+        const response = comparisonIds
+          ? await fetch("/api/exports/comparison", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({task_ids: comparisonIds})})
+          : await fetch(`/api/eval/${encodeURIComponent(id)}/exports?include_images=${includeImages}`, {method: "POST"});
         let data = await response.json();
         if (!response.ok) throw new Error(data.detail || "导出请求失败");
         while (!disposed && ["queued", "generating"].includes(data.status)) {
-          exportMessage.value = `任务 ${id}：${data.status === 'queued' ? '等待生成' : '正在生成 Excel'}…`;
+          exportMessage.value = `${exportLabel}：${data.status === 'queued' ? `等待生成${data.queue_position ? `（排队第 ${data.queue_position} 位）` : ''}` : '正在生成 Excel'}…`;
           await new Promise(resolve => window.setTimeout(resolve, 1000));
           if (disposed) return;
           const status = await fetch(`/api/exports/${encodeURIComponent(data.export_id)}`);
@@ -1871,7 +2065,7 @@ createApp({
         if (disposed) return;
         if (data.status !== "ready") throw new Error(data.error || "生成 Excel 失败");
         exportDownloadUrl.value = `/api/exports/${encodeURIComponent(data.export_id)}/download`;
-        exportMessage.value = `任务 ${id}：Excel 已生成。若未开始下载，请点击下方链接（30 分钟内有效）。`;
+        exportMessage.value = `${exportLabel}：Excel 已生成。若未开始下载，请点击下方链接（30 分钟内有效）。`;
         // Use a same-origin download link: no popup and no full-file blob in memory.
         const link = document.createElement("a");
         link.href = exportDownloadUrl.value;
@@ -1888,7 +2082,7 @@ createApp({
         }
       } catch (error) {
         exportMessage.value = "";
-        exportError.value = `任务 ${id} 导出失败：${error?.message || "网络错误"}。可再次点击导出重试。`;
+        exportError.value = `${exportLabel}导出失败：${error?.message || "网络错误"}。可再次点击导出重试。`;
       } finally {
         exportingTaskId.value = "";
       }
@@ -1896,6 +2090,10 @@ createApp({
     function exportFrames() {
       if (loadingTaskId.value) return;
       window.open(`/api/eval/${taskId.value}/export?format=frames_zip`);
+    }
+    function exportModelInputEvidence() {
+      if (!taskId.value || loadingTaskId.value) return;
+      window.open(`/api/eval/${encodeURIComponent(taskId.value)}/export?format=model_input_evidence`);
     }
     function itemArtifactUrl(result, format) {
       const index = Number(result && result.index);
@@ -1938,7 +2136,11 @@ createApp({
     });
 
     return {
-      modes, mode, modeLabel, isVideoMode, items, errors, importReport, judges, visibleJudges, selectedJudges, datasetName,
+      modes, mode, modeLabel, isVideoMode, items, errors, importReport, conversationPreflight, judges, visibleJudges, selectedJudges, datasetName,
+      turnFilter, diagnosticFilter, conversationGroups, conversationHistory, liveInputDiagnostics,
+      scoreDimensions, scoreRules, scoreRuleJoin, filterProducts, scoreOperators, scoreRuleNeedsNumber,
+      addScoreRule, changeScoreDimension, removeScoreRule, clearScoreRules, scoreFilterError, resetResultFilters,
+      reasonOnlyColumn, cellReasons, reasonsExpanded, toggleCellReasons, allReasonsExpanded, setAllReasonsExpanded,
       datasetSourceTaskId, datasetRevision, useComparisonDataset,
       evaluationProfiles, compareProfiles, selectedEvaluationProfile, evaluationProfileLabel,
       judgeModelProfiles, selectedJudgeModelProfile, selectedModelProfile, enableThinking, changeJudgeModel,
@@ -1951,19 +2153,21 @@ createApp({
       repairStatus, retryStatusLabel, retrySubmitting, selectedRetryIndexes, activeRetry,
       failedResultIndexes, retryIndexSelected, toggleRetryIndex, retryFailedCases,
       itemProgress, progressEvents, expandedProgressLogs, pagedProgressRows, progressStages,
-      historyItems, historyNoteDrafts, historyNoteEditing, loadingHistory, pageSize,
+      comparisonTaskIds, exportComparisonXlsx, historyItems, historyNoteDrafts, historyNoteEditing, loadingHistory, pageSize,
       historyPage, historyTotal, historyPageSize, historyPageCount, historyError,
-      loadingTaskId, exportingTaskId, exportMessage, exportError, exportDownloadUrl,
+      loadingTaskId, exportingTaskId, exportIncludeImages, exportMessage, exportError, exportDownloadUrl,
       opPage, opPageSize, opPageCount, opJumpPage,
       progressPage, progressPageCount, progressJumpPage,
       resultJumpPage,
       resultBrowser,
       activeSkill, resultQuery, resultPage, resultPageSize,
       modalityFilter, modalityCounts, queryImageMetas, onQueryImage, setQueryImagePath,
+      failedOnly, failedCaseCount, selectFailureFilter,
+      evidenceRevisions,
       evidenceImages, evidenceImageErrors, evidenceExpanded, setEvidenceExpanded, setPageEvidenceExpanded,
       skillTabs, filteredResults, pagedResults, pageCount, resultTableWidth,
       formatHint, resultCols, opItems, pagedOpItems, opPreparing, canSubmit,
-      switchMode, onOpManifestFile, submit, cell, columnWidth, exportCsv, exportJson, exportXlsx, exportFrames, itemArtifactUrl, addOpItem, removeOpItem, onOpVideo, onOpDrop,
+      switchMode, onOpManifestFile, submit, cell, columnWidth, exportCsv, exportJson, exportXlsx, exportFrames, exportModelInputEvidence, itemArtifactUrl, addOpItem, removeOpItem, onOpVideo, onOpDrop,
       loadHistory, loadQueue, cancelQueuedTask, reprioritizeQueuedTask, loadHistoryTask, delHistory, editHistoryNote, cancelHistoryNote, saveHistoryNote, formatTime,
       selectSkill, resetResultPage, changePage,
       changeProgressPage, changeOpPage, changeResultPageSize, paginationPages, setTablePage, jumpTablePage,

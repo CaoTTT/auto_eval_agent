@@ -30,6 +30,7 @@ from ..judges.compare_protocols import (
 from ..paths import PROJECT_ROOT, RUNS_DIR
 from .compare_statistics import SHEET_NAME as COMPARE_STATISTICS_SHEET, build_compare_statistics
 from .compare_statistics_xlsx import statistics_cell_styles, statistics_sheet_xml
+from .export_links import ExportLink, screenshot_links
 from .xlsx_images import CELL_IMAGE_REL, CellImage, OriginalImageError, WpsCellImages
 
 
@@ -508,6 +509,8 @@ def export_rows(snapshot: dict) -> dict[str, list[dict]]:
         "逐题结果": result_rows,
     }
     frame_rows = _frame_manifest_rows(snapshot)
+    from .screenshot_evidence import evidence_sheets
+    rows.update(evidence_sheets(snapshot))
     query_rows = _query_image_rows(snapshot)
     if query_rows:
         rows["提问图片清单"] = query_rows
@@ -527,6 +530,33 @@ def export_rows(snapshot: dict) -> dict[str, list[dict]]:
     items = snapshot.get("items") or []
     _append_extra_input_values(dataset_rows, items, extra_columns)
     _append_extra_input_values(result_rows, items, extra_columns)
+    if mode == "compare" and any(it.get("session_id") for it in items):
+        from .compare_statistics import conversation_statistics
+        checks = {}
+        for index, item in enumerate(items):
+            if not item.get("session_id"):
+                continue
+            result = aligned_results[index]
+            fields = {"会话ID": item["session_id"], "轮次": item["turn_index"],
+                "历史轮数": item["turn_index"] - 1,
+                "有效输入类型": result.get("effective_input_modality", item.get("effective_input_modality", "未检查")),
+                "历史前缀指纹": result.get("history_prefix_sha256", item.get("history_prefix_sha256", "")),
+                "图片警示数": result.get("image_warning_count", item.get("image_warning_count", 0)),
+                "图片检查状态": result.get("input_diagnostic_status", item.get("input_diagnostic_status", "未检查")),
+                "请求预算": result.get("request_budget_report", item.get("request_budget_report", {}))}
+            result_rows[index].update(fields)
+            dataset_rows[index].update(fields)
+            for finding in result.get("image_findings", item.get("image_findings", [])):
+                entry = checks.setdefault(finding["finding_id"], {**finding, "关联目标轮": []})
+                entry["关联目标轮"].append(item["turn_index"])
+        rows["图片检查明细"] = list(checks.values()) or [{"状态": "未发现图片警示；未检查与阻断请参见逐题结果"}]
+        tables = conversation_statistics(snapshot, aligned_results)
+        rows["多轮会话统计"] = [{"统计区块": table.title, **dict(zip(table.headers, row))}
+            for table in tables for row in table.rows]
+    for index, item in enumerate(items):
+        links = screenshot_links(snapshot, item, index)
+        dataset_rows[index].update(links)
+        result_rows[index].update(links)
     return rows
 
 
@@ -559,6 +589,10 @@ def _aligned_results(snapshot: dict, results: list[dict]) -> list[dict]:
 
     by_index: dict[int, dict] = {}
     by_item_id: dict[str, dict] = {}
+    item_id_counts: dict[str, int] = {}
+    for index, item in enumerate(items):
+        item_id = str(item.get("id") or f"q{index}")
+        item_id_counts[item_id] = item_id_counts.get(item_id, 0) + 1
     for result in results:
         try:
             index = int(result.get("index"))
@@ -567,7 +601,7 @@ def _aligned_results(snapshot: dict, results: list[dict]) -> list[dict]:
         if index >= 0:
             by_index[index] = result
         item_id = str(result.get("item_id") or "").strip()
-        if item_id:
+        if item_id and item_id_counts.get(item_id) == 1:
             by_item_id[item_id] = result
 
     aligned: list[dict] = []
@@ -603,6 +637,7 @@ def _aligned_results(snapshot: dict, results: list[dict]) -> list[dict]:
 
 
 _RUNTIME_ITEM_FIELDS = {
+    "screenshot_evidence",
     "evidence_mode", "screenshot_meta1", "screenshot_meta2", "screenshot_meta3",
     "frames",
     "frames1",
@@ -727,6 +762,7 @@ _QUERY_EXPORT_FIELDS = {
     "题型", "提问图片", "提问图片元数据", "输入指纹", "输入图片原图",
     "query_image_meta", "input_manifest_sha256", "error",
     "产品1原图", "产品2原图", "产品3原图",
+    *(f"产品{n}长截图查看链接" for n in (1, 2, 3)),
 }
 
 
@@ -1531,20 +1567,20 @@ def _original_screenshot_rows(snapshot: dict, images: WpsCellImages) -> list[dic
     return rows
 
 
-def build_xlsx(snapshot: dict) -> bytes:
-    """原图只嵌入逐题结果，保留 WPS 单元格图片和原始字节。"""
+def build_xlsx(snapshot: dict, *, include_images: bool = True) -> bytes:
+    """可选嵌入逐题原图；默认保留 WPS 单元格图片和原始字节。"""
     buf = BytesIO()
-    write_xlsx(snapshot, buf)
+    write_xlsx(snapshot, buf, include_images=include_images)
     return buf.getvalue()
 
 
-def write_xlsx(snapshot: dict, destination) -> None:
+def write_xlsx(snapshot: dict, destination, *, include_images: bool = True) -> None:
     """直接写入文件/二进制流，线上下载不把完整工作簿缓存在内存中。"""
     with _xlsx_slot:
-        _write_xlsx(snapshot, destination)
+        _write_xlsx(snapshot, destination, include_images=include_images)
 
 
-def _write_xlsx(snapshot: dict, destination) -> None:
+def _write_xlsx(snapshot: dict, destination, *, include_images: bool = True) -> None:
     sheets = {name: rows for name, rows in export_rows(snapshot).items() if rows}
     statistics = (
         build_compare_statistics(snapshot, _aligned_results(snapshot, _results_with_identity(snapshot)))
@@ -1569,20 +1605,33 @@ def _write_xlsx(snapshot: dict, destination) -> None:
 
     with zipfile.ZipFile(destination, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         images = WpsCellImages(zf)
-        screenshot_rows = _original_screenshot_rows(snapshot, images)
-        query_rows = _query_image_rows(snapshot)
+        # Skip image loading/embedding entirely; textual evidence and URLs stay
+        # in export_rows, including when the original files are unavailable.
+        screenshot_rows = _original_screenshot_rows(snapshot, images) if include_images else []
+        query_rows = _query_image_rows(snapshot) if include_images else []
         query_cells: list[CellImage | str] = [""] * len(snapshot.get("items", []))
+        extra_query_cells = {}
+        query_counts = {}
         if query_rows:
             for row in query_rows:
                 try:
                     original = images.add(row.get("original_path", ""), row.get("original_sha256"))
                 except OriginalImageError as exc:
                     original = str(exc)
-                query_cells[row["数据集序号"] - 1] = original
+                index = row["数据集序号"] - 1
+                number = query_counts.get(index, 0)
+                query_counts[index] = number + 1
+                if number == 0:
+                    query_cells[index] = original
+                else:
+                    extra_query_cells.setdefault(number + 1, [""] * len(query_cells))[index] = original
         if screenshot_rows:
             sheets["逐题结果"] = _insert_screenshot_columns(sheets["逐题结果"], screenshot_rows)
         if query_rows and "逐题结果" in sheets:
             sheets["逐题结果"] = _insert_query_image_column(sheets["逐题结果"], query_cells, "题目")
+            for number, cells in sorted(extra_query_cells.items()):
+                for row, cell in zip(sheets["逐题结果"], cells):
+                    row[f"输入图片原图{number}"] = cell
         if statistics:
             sheets[COMPARE_STATISTICS_SHEET] = []
         images.write_parts()
@@ -1598,6 +1647,14 @@ def _write_xlsx(snapshot: dict, destination) -> None:
                 escape_text=_xlsx_text, column_name=_col,
             ) if name == COMPARE_STATISTICS_SHEET else _sheet_xml(rows)
             zf.writestr(f"xl/worksheets/sheet{i}.xml", xml)
+            links = _sheet_hyperlinks(rows)
+            if links:
+                relationships = ''.join(
+                    f'<Relationship Id="link{n}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="{escape(url, quote=True)}" TargetMode="External"/>'
+                    for n, (_, url) in enumerate(links, 1))
+                zf.writestr(f"xl/worksheets/_rels/sheet{i}.xml.rels",
+                    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                    + relationships + '</Relationships>')
 
 
 def _insert_query_image_column(rows: list[dict], images: list[CellImage | str], query_header: str) -> list[dict]:
@@ -1745,6 +1802,14 @@ def _styles_xml(picture_sheet: bool = False, *, statistics: bool = False) -> str
     )
 
 
+def _sheet_hyperlinks(rows: list[dict]) -> list[tuple[str, str]]:
+    headers = _headers(rows)
+    return [(f"{_col(column)}{number}", str(row[header]))
+            for number, row in enumerate(rows, 2)
+            for column, header in enumerate(headers, 1)
+            if isinstance(row.get(header), ExportLink)]
+
+
 def _sheet_xml(rows: list[dict], *, picture_sheet: bool = False) -> str:
     headers = _headers(rows)
     table = [headers] + [[row.get(h) for h in headers] for row in rows]
@@ -1783,10 +1848,15 @@ def _sheet_xml(rows: list[dict], *, picture_sheet: bool = False) -> str:
         '<selection pane="bottomRight" activeCell="D2" sqref="D2"/>'
         '</sheetView></sheetViews>'
     ) if picture_sheet else ""
+    links = _sheet_hyperlinks(rows)
+    hyperlinks = ('<hyperlinks>' + ''.join(
+        f'<hyperlink ref="{ref}" r:id="link{n}"/>' for n, (ref, _) in enumerate(links, 1)
+    ) + '</hyperlinks>') if links else ''
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'
-        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
-        f"{views}<cols>{cols}</cols><sheetData>{''.join(rows_xml)}</sheetData>"
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        f"{views}<cols>{cols}</cols><sheetData>{''.join(rows_xml)}</sheetData>{hyperlinks}"
         "</worksheet>"
     )
 

@@ -119,6 +119,7 @@ class RichContentJudge:
         answer_text: str,
         frames: list[str],
         stream_callback=None,
+        evidence_callback=None,
     ) -> dict[str, Any]:
         extraction = self.profile.extraction
         system = self._system_template.render(
@@ -145,6 +146,18 @@ class RichContentJudge:
 
         user_images = await run_preparation(prepare_images, timeout=60)
         started = time.perf_counter()
+        audit = None
+        if evidence_callback:
+            from ..evidence_audit import capture_request
+            parts = [{"type": "text", "text": user},
+                     *({"type": "image_url", "image_url": {"url": url}} for url in user_images)]
+            metadata = [{"image_role": "product_answer", "frame_no": n, "ref_path": path}
+                        for n, path in enumerate(frames, 1)]
+            audit = await run_preparation(capture_request, system, parts, metadata, [],
+                                          {"mode": "rich_content"}, timeout=60)
+            audit.update(record_status="model_call_started", evidence_mode="video_frames",
+                         judge_model=getattr(self.client, "model", None))
+            evidence_callback(audit)
         raw_output = await self.client.complete(
             system,
             user,
@@ -152,6 +165,9 @@ class RichContentJudge:
             user_images=user_images or None,
             user_image_refs=frames or None,
         )
+        if audit is not None:
+            audit["record_status"] = "model_response_received"
+            evidence_callback(audit)
         data = parse_json_loose(raw_output)
         repaired = ""
         if data is None:
