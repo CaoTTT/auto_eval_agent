@@ -16,7 +16,7 @@ export const HumanComparePanel = {
     const statsDimension=ref('understanding'),statsScope=ref('own');
     const visibleScores=computed(()=>scoreRows.value.filter(r=>r.dimension_id===statsDimension.value&&r.scope===statsScope.value));
     const visiblePairs=computed(()=>pairRows.value.filter(r=>r.dimension_id===statsDimension.value&&r.scope===statsScope.value));
-    const standards=[['0.2-simplified','V0.2 简化版（1—5）'],['0.2-simplified-calibrated','V0.2 校准版（1—5）'],['0.2-simplified-thinking-exposure','V0.2 过程泄露实验版（1—5）'],['0.3','V0.3（0—3）']];
+    const standards=[['0.2-simplified','V0.2 简化版（1—5）'],['0.2-simplified-plus','V0.2 简化版（稳定plus）（1—5）'],['0.2-simplified-calibrated','V0.2 校准版（1—5）'],['0.2-simplified-thinking-exposure','V0.2 过程泄露实验版（1—5）'],['0.3','V0.3（0—3）']];
     const templateStandard=ref('0.2-simplified');
     let generation=0,controllers=new Set(),timer=null,disposed=false,rowGeneration=0,pollGeneration=0;
     async function api(url,options={}) {

@@ -16,6 +16,10 @@ from .visual_compare_prompt_v02_simplified import (
     VISUAL_COMPARE_SYSTEM as V02_SYSTEM,
     VISUAL_COMPARE_USER as V02_USER,
 )
+from .visual_compare_prompt_v02_simplified_plus import (
+    VISUAL_COMPARE_SYSTEM as V02_PLUS_SYSTEM,
+    VISUAL_COMPARE_USER as V02_PLUS_USER,
+)
 from .visual_compare_prompt_v03 import (
     VISUAL_COMPARE_SYSTEM as V03_SYSTEM,
     VISUAL_COMPARE_USER as V03_USER,
@@ -32,6 +36,7 @@ from .visual_compare_prompt_v02_thinking_exposure_r023 import (
 
 STANDARD_ID = "qa_competitor_compare"
 DEFAULT_COMPARE_PROTOCOL_ID = f"{STANDARD_ID}@0.2-simplified"
+V02_PLUS_COMPARE_PROTOCOL_ID = f"{STANDARD_ID}@0.2-simplified-plus"
 V03_COMPARE_PROTOCOL_ID = f"{STANDARD_ID}@0.3"
 V02_CALIBRATED_COMPARE_PROTOCOL_ID = f"{STANDARD_ID}@0.2-simplified-calibrated"
 V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID = f"{STANDARD_ID}@0.2-simplified-thinking-exposure"
@@ -118,6 +123,7 @@ class CompareProtocol:
             "score_range": [self.score_min, self.score_max],
             "modes": ["compare"],
             "input_modalities": ["text"] if self.bundle_revision in {"0.2.0", "0.3.0"} else ["text", "text_image"],
+            "conversation_adapter_version": None if self.bundle_revision in {"0.2.0", "0.3.0"} else "compare-conversation-1",
         }
 
 
@@ -131,6 +137,20 @@ _PROTOCOLS = {
         status="stable",
         system_template=V02_SYSTEM,
         user_template=V02_USER,
+        observation_model=VisualCompareObservationV02,
+        require_response_pass=True,
+        score_min=1,
+        score_max=5,
+    ),
+    V02_PLUS_COMPARE_PROTOCOL_ID: CompareProtocol(
+        id=V02_PLUS_COMPARE_PROTOCOL_ID,
+        standard_id=STANDARD_ID,
+        standard_version="0.2-simplified-plus",
+        bundle_revision="0.2.1",
+        display="V0.2 简化版（稳定plus）·1-5分",
+        status="stable",
+        system_template=V02_PLUS_SYSTEM,
+        user_template=V02_PLUS_USER,
         observation_model=VisualCompareObservationV02,
         require_response_pass=True,
         score_min=1,
