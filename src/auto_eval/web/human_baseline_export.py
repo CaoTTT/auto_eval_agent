@@ -9,7 +9,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from .compare_statistics import DIMENSION_NAMES
+from .human_baselines import baseline_protocol, human_dimension_names
 
 
 def _text(value: str) -> str:
@@ -38,6 +38,9 @@ def export_baseline_answers(baseline: dict) -> bytes:
     ws = wb.active
     ws.title = "人工基准答案"
     products = baseline["products"]
+    protocol = baseline_protocol(baseline)
+    dimension_names = baseline.get("dimension_names") or human_dimension_names(protocol)
+    chat = protocol.standard_id == "qa_chat_compare"
     labels = {(r["case_key"], r["product_id"], r["dimension_id"]): r
               for r in baseline["labels"]}
     states = {r["case_key"]: r for r in baseline["states"]}
@@ -45,11 +48,15 @@ def export_baseline_answers(baseline: dict) -> bytes:
     for n, _ in enumerate(products, 1):
         headers.extend(f"{field}_产品{n}" for field in
                        ("产品名称", "源回答", "源背景", "采集ID", "源摘要", "证据引用"))
-        for name in DIMENSION_NAMES.values():
+        for name in dimension_names.values():
             headers.extend(f"{field}_产品{n}_{name}" for field in
-                           ("人工分", "人工评分状态", "人工批注", "人工标注阶段", "人工评分来源"))
+                           (("人工分", "人工评分状态", "人工批注", "人工标注阶段", "人工评分来源", "人工是否适用", "人工核验状态") if chat else
+                            ("人工分", "人工评分状态", "人工批注", "人工标注阶段", "人工评分来源")))
         headers.extend((f"人工响应Gate_产品{n}", f"人工安全Gate_产品{n}"))
-    headers.extend(f"人工是否适用_{name}" for name in DIMENSION_NAMES.values())
+        if chat:
+            headers.append(f"人工输入状态_产品{n}")
+    if not chat:
+        headers.extend(f"人工是否适用_{name}" for name in dimension_names.values())
     _append(ws, headers)
     for case in baseline["cases"]:
         case_key = case["case_key"]
@@ -63,16 +70,21 @@ def export_baseline_answers(baseline: dict) -> bytes:
             row.append(product["display_name"])
             row.extend(response.get(field, "") for field in
                        ("answer", "context", "response_id", "sha256", "evidence"))
-            for dimension in DIMENSION_NAMES:
+            for dimension in dimension_names:
                 label = labels.get((case_key, pid, dimension), {})
                 status = label.get("score_status", "unlabeled")
                 score = label.get("score") if status == "scored" else (
-                    None if status == "unlabeled" else "N/A")
+                    None if chat or status == "unlabeled" else "N/A")
                 row.extend((score, status, label.get("reason"), label.get("annotation_stage"),
                             _json(label["source"]) if label.get("source") else None))
+                if chat:
+                    row.extend((label.get("applicable"), label.get("verification_status")))
             gates = state.get("gates", {}).get(pid, {})
             row.extend((gates.get("response"), gates.get("safety")))
-        row.extend(state.get("applicability", {}).get(dimension) for dimension in DIMENSION_NAMES)
+            if chat:
+                row.append(state.get("inputs", {}).get(pid))
+        if not chat:
+            row.extend(state.get("applicability", {}).get(dimension) for dimension in dimension_names)
         _append(ws, row)
     ws.freeze_panes = "C2"
     ws.auto_filter.ref = ws.dimensions
@@ -86,21 +98,24 @@ def export_baseline_answers(baseline: dict) -> bytes:
 
     notes = wb.create_sheet("填写说明")
     metadata = dict(answer_export_version="human-answers-1.0", products=products,
-                    human_standard_version=baseline["human_standard_version"])
+                    human_standard_version=baseline["human_standard_version"], human_standard_id=protocol.standard_id,
+                    human_bundle_revision=protocol.bundle_revision, dimensions=list(dimension_names),
+                    dimension_names=dimension_names, score_range=[protocol.score_min, protocol.score_max])
     note_rows = [
         ["项目", "说明"],
         ["模板元信息", _json(metadata)],
         ["人工基准", baseline["name"]],
         ["基准编号", baseline["baseline_id"]],
         ["基准版本", baseline["version"]],
-        ["人工标准", baseline["human_standard_version"]],
+        ["人工标准", protocol.id + " / " + protocol.bundle_revision],
         ["人工口径", baseline.get("human_policy_note", "")],
         ["用途", baseline.get("purpose", "")],
         ["产品映射", _json(products)],
         ["答案范围", "该版本已保存的全部 Case 与已接受标签；不包含导入时被排除的评分。"],
-        ["分数规则", "数字为最终有效人工分（复核优先，保留 0）；N/A 按评分状态区分原因；未标注分数留空，不补 0。"],
-        ["人工评分状态", "scored=已评分；not_applicable=不适用；unverifiable=无法核验；gate_blocked=Gate阻断；unlabeled=未标注；na_unspecified=NA原因未知。"],
-        ["Gate/适用性", "保留已保存的显式状态；空白代表未提供。内容准确性人工数字标签仅留档，不计人机数字一致率。"],
+        ["分数规则", "数字为最终有效人工分（复核优先），只接受1—5严格整数；空分保持空白，原因保存在独立评分状态列，不补0。" if chat else "数字为最终有效人工分（复核优先，保留 0）；N/A 按评分状态区分原因；未标注分数留空，不补 0。"],
+        ["人工评分状态", "scored=已评分；not_applicable=不适用；unverifiable=无法核验；gate_blocked=Gate阻断；" +
+                         ("input_failed=输入失败；" if chat else "") + "unlabeled=未标注；na_unspecified=NA原因未知。"],
+        ["Gate/适用性", "保留每产品适用性、核验与输入状态；空白代表未提供。" if chat else "保留已保存的显式状态；空白代表未提供。内容准确性人工数字标签仅留档，不计人机数字一致率。"],
         ["人工标签摘要", baseline.get("labels_sha256", "")],
         ["题目目录摘要", baseline.get("case_catalog_sha256", "")],
         ["源文件摘要", baseline.get("source_file_sha256", "")],

@@ -7,9 +7,10 @@ import re
 from xml.sax.saxutils import escape
 import zipfile
 
-from .compare_statistics import DIMENSION_NAMES, StatisticsTable
+from .compare_statistics import StatisticsTable
 from .compare_statistics_xlsx import statistics_sheet_xml
 from .history import _col, _sheet_xml, _styles_xml, _xlsx_text, judge_runtime_summary
+from .human_baselines import baseline_protocol, human_dimension_names
 
 
 def tables_workbook(sheets: dict[str,list[StatisticsTable]], *, plain: bool=False) -> bytes:
@@ -63,6 +64,7 @@ def case_comparison_tables(report: dict) -> tuple[StatisticsTable, StatisticsTab
     source=report["rows"]
     tasks=report.get("task_ids") or list(dict.fromkeys(row["task_id"] for row in source))
     dimensions=report["config"]["dimensions"]
+    dimension_names = report["baseline"].get("dimension_names") or human_dimension_names(baseline_protocol(report["baseline"]))
     runtime_metadata = _report_runtime_metadata(report)
     products=report["baseline"]["products"]
     cases={}
@@ -84,8 +86,12 @@ def case_comparison_tables(report: dict) -> tuple[StatisticsTable, StatisticsTab
                    ("排除原因","exclusion"),("匹配ID","match_id"),("证据引用","evidence"),
                    ("人工适用性","human_applicable"),("模型适用性","model_applicable"),
                    ("人工Gate","human_gates"),("模型Gate","model_gates"),("模型输入状态","model_input_status")]
+    if report["baseline"].get("human_standard_id") == "qa_chat_compare":
+        detail_fields.extend((("人工输入状态", "human_input_status"), ("人工核验状态", "human_verification_status"),
+                              ("模型核验状态", "model_verification_status"), ("模型证据", "model_evidence"),
+                              ("模型标准家族", "model_standard_id"), ("模型评分状态", "model_score_status")))
     groups=[(task,p["product_id"],dimension,
-             f'{DIMENSION_NAMES.get(dimension,dimension)}\n{p["display_name"]} [{p["product_id"]}]\n任务 {task}')
+             f'{dimension_names.get(dimension,dimension)}\n{p["display_name"]} [{p["product_id"]}]\n任务 {task}')
             for dimension in dimensions for p in products for task in tasks]
     headers=("题号","问题","分类")
     scores=StatisticsTable("逐题评分对比",headers+tuple(f"{title}\n{label}" for *_,title in groups for label,_ in score_fields))
@@ -116,19 +122,23 @@ def case_comparison_tables(report: dict) -> tuple[StatisticsTable, StatisticsTab
 
 def export_report(report: dict) -> bytes:
     baseline=report["baseline"]
+    protocol = baseline_protocol(baseline)
+    dimension_names = baseline.get("dimension_names") or human_dimension_names(protocol)
+    chat = protocol.standard_id == "qa_chat_compare"
     names={p["product_id"]:p["display_name"] for p in baseline["products"]}
     def product(pid):return names.get(pid,pid)
-    def dim(d):return DIMENSION_NAMES.get(d,d)
+    def dim(d):return dimension_names.get(d,d)
     def scope(s):return "共同样本" if s=="common" else "各自样本"
     summary=StatisticsTable("人工基准与冻结任务",("项目","内容"),rows=[
         ["报告",report["report_id"]],["人工基准",f'{baseline["name"]} v{baseline["version"]}'],
-        ["人工标准",baseline["human_standard_version"]],["人工口径",baseline["human_policy_note"]],
+        ["人工标准",protocol.id + " / " + protocol.bundle_revision],["人工口径",baseline["human_policy_note"]],
         ["兼容模式",report["compatibility_mode"]],["用途",baseline["purpose"]],
         ["模型协议",json.dumps(report.get("model_protocols",[]),ensure_ascii=False)],
         ["裁判模型与思考模式",json.dumps(_report_runtime_metadata(report),ensure_ascii=False)],
-        ["内容准确性人工数字标签（仅留档）",report.get("accuracy_label_count",0)],
         ["任务与快照",json.dumps(report["frozen_at"],ensure_ascii=False)],["信息缺失", "；".join(report["warnings"])],
         ["范围外人工题号",json.dumps(report["out_of_scope"],ensure_ascii=False)]])
+    if not chat:
+        summary.rows.append(["内容准确性人工数字标签（仅留档）",report.get("accuracy_label_count",0)])
     coverage=StatisticsTable("题号匹配覆盖",("任务","范围题数","匹配题数","题号匹配率"),
         ("text","count","count","percent"),
         [[t,r["case_count"],r["matched_case_count"],r["case_match_rate"]] for t,r in report["metrics"]["overview"].items()])
@@ -148,16 +158,16 @@ def export_report(report: dict) -> bytes:
     ranking=StatisticsTable("三产品单维排名（保留平局）",("任务","维度","口径","样本数","一致数","一致率"),
                             ("text","text","text","count","count","percent"),
                             [[r["task_id"],dim(r["dimension_id"]),scope(r["scope"]),r["n"],r["exact_n"],r["agreement"]] for r in report["metrics"]["ranks"]])
-    states=StatisticsTable("人工明确状态一致性",("任务","产品","维度","指标","有效数","一致率"),
-                           ("text","text","text","text","count","percent"),
-                           [[r["task_id"],product(r["product_id"]),dim(r["dimension_id"]),r["kind"],r["n"],r["agreement"]] for r in report["metrics"]["states"]])
+    states=StatisticsTable("人工明确状态一致性",("任务","产品","维度","指标","有效数","一致率","输入失败排除数","人工输入失败数","模型输入失败数"),
+                           ("text","text","text","text","count","percent","count","count","count"),
+                           [[r["task_id"],product(r["product_id"]),dim(r["dimension_id"]),r["kind"],r["n"],r["agreement"],r.get("input_failed_n"),r.get("human_input_failed_n"),r.get("model_input_failed_n")] for r in report["metrics"]["states"]])
     detail,matches=case_comparison_tables(report)
     policy=StatisticsTable("统计口径",("项目","定义"),rows=[
         ["指标版本",report["metrics"]["metric_version"]],["覆盖率", "可比标签数 / 范围内人工有效数字标签数；模型失败不补0"],
         ["一致率 / MAE / 偏差","同一有效集合上的 M=H 比例 / mean(abs(M-H)) / mean(M-H)"],
         ["产品配对","人工 A/B 与模型 A/B 四分均有效的同一题集；分位值=mean(A)/mean(B)"],
         ["共同样本","所选任务每产品维度/产品对的有效题集交集；空集合不排名"],
-        ["空值","零分母为 —；NA 与未标注不计数字一致率；内容准确性仅留档"],
+        ["空值","零分母为 —；NA、未标注、无法核验、输入失败和Gate阻断不补0、不计数字一致率" if chat else "零分母为 —；NA 与未标注不计数字一致率；内容准确性仅留档"],
         ["逐题核对","首表每行一个 Case；维度、产品、任务按列展开，模型评分 / 人工评分 / 分差相邻。分差=模型－人工；不符合统计口径时留空，不补0。"],
         ["样本列","纳入各自样本 / 纳入共同样本直接取冻结统计的样本ID。先筛选为“是”再核对均分、一致率和误差；产品配对指标还需两产品同题均纳入。"],
         ["范围与映射",json.dumps(report["config"],ensure_ascii=False)],

@@ -70,7 +70,7 @@ def assemble_conversation(system: str, bundle: dict, protocol, evaluation_dateti
     if report["blocked"]:
         bundle["diagnostics"]["input_diagnostic_status"] = "blocked"
         raise QueryImageError("conversation_request_budget_exceeded", "完整历史请求超过平台保护预算：" + ", ".join(report["blocking_reasons"]))
-    manifest = digest({"prefix": bundle["diagnostics"]["history_prefix_sha256"], "protocol": protocol.public_metadata(),
+    manifest = digest({"prefix": bundle["diagnostics"]["history_prefix_sha256"], "protocol": protocol.request_metadata(),
                        "system": system, "roles": [p["text"] for i, p in enumerate(parts) if p["type"] == "text" and i != 1],
                        "images": [{k: m.get(k) for k in ("asset_id", "sha256", "request_role")} for m in metadata],
                        "limits": limits, "adapter": VERSION})

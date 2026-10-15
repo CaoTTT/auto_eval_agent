@@ -174,6 +174,9 @@ def install_human_routes(app, service_getter, peek):
                 values=[r for r in values if r["difference"] is not None and (r["difference"]>0 if direction=="higher" else r["difference"]<0)]
             if state_mismatch:
                 values=[r for r in values if (r["human_score"] is None)!=(r["model_score"] is None) or
+                        r.get("model_score_status") in ("scored", "not_applicable", "unverifiable", "gate_blocked", "input_failed") and
+                        r.get("human_status") in ("scored", "not_applicable", "unverifiable", "gate_blocked", "input_failed") and
+                        r["human_status"] != r["model_score_status"] or
                         r["human_applicable"] is not None and r["model_applicable"] is not None and r["human_applicable"]!=r["model_applicable"]]
             return dict(total=len(values),items=values[(page-1)*page_size:page*page_size])
         return await asyncio.to_thread(read)
