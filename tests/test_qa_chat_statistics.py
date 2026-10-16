@@ -287,7 +287,7 @@ def test_merge_retains_stable_plus_legacy_thresholds_and_dimension_set():
     protocol = resolve_compare_protocol("qa_competitor_compare@0.2-simplified-plus")
     assert protocol.status == "stable"
     assert protocol.require_response_pass is True
-    assert protocol.bundle_revision == "0.2.1"
+    assert protocol.bundle_revision == "0.2.2"
     assert {row[0] for row in table(tables, "B2．").rows} == {
         protocol.dimension_names[key] for key in protocol.score_dimensions}
     performance = record(tables, "B2．", 维度="理解需求", 产品="产品1")
@@ -318,7 +318,7 @@ def test_merge_stable_plus_preserves_legacy_gate_policy(gate, value, expected_pa
 
 @pytest.mark.parametrize("standard,revisions", [
     ("0.2-simplified", ("0.2.0", "0.2.1")),
-    ("0.2-simplified-plus", ("0.2.1",)),
+    ("0.2-simplified-plus", ("0.2.1", "0.2.2")),
     ("0.2-simplified-calibrated", ("0.2.2", "0.2.3")),
     ("0.2-simplified-thinking-exposure", ("0.2.3", "0.2.4")),
     ("0.3", ("0.3.0", "0.3.1")),

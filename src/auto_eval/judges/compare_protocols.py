@@ -190,7 +190,7 @@ _PROTOCOLS = {
         id=V02_PLUS_COMPARE_PROTOCOL_ID,
         standard_id=STANDARD_ID,
         standard_version="0.2-simplified-plus",
-        bundle_revision="0.2.1",
+        bundle_revision="0.2.2",
         display="V0.2 简化版（稳定plus）·1-5分",
         status="stable",
         system_template=V02_PLUS_SYSTEM,
@@ -290,6 +290,18 @@ def resolve_compare_protocol(protocol_id: str | None, bundle_revision: str | Non
     try:
         protocol = _PROTOCOLS[selected]
         if bundle_revision and bundle_revision != protocol.bundle_revision:
+            if selected == V02_PLUS_COMPARE_PROTOCOL_ID and bundle_revision == "0.2.1":
+                # Preserve the frozen rubric for historical stable-plus tasks.
+                from .visual_compare_prompt_v02_simplified_plus_r021 import (
+                    VISUAL_COMPARE_SYSTEM as legacy_system,
+                    VISUAL_COMPARE_USER as legacy_user,
+                )
+                return replace(
+                    protocol,
+                    bundle_revision=bundle_revision,
+                    system_template=legacy_system,
+                    user_template=legacy_user,
+                )
             if selected == V02_CALIBRATED_COMPARE_PROTOCOL_ID and bundle_revision == "0.2.2":
                 # Keep pre-fusion calibrated tasks bound to their original templates.
                 from .visual_compare_prompt_v02_calibrated_r022 import (
