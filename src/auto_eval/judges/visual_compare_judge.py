@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from ..config import VisualModeProfile
 from ..query_images import encode_query_image, check_request_budget, input_manifest
@@ -23,6 +23,7 @@ from ..schema import VisualCompareObservation
 from .base import JudgeClient, JudgeOutputParseError
 from .prompts import parse_json_loose
 from .query_image_prompt import QUERY_IMAGE_INSTRUCTIONS
+from .qa_chat_schema import QA_CHAT_STANDARD_ID, QAChatObservation, finalize_qa_chat_observation
 from .compare_protocols import (
     CompareProtocol,
     DIMENSIONS,
@@ -221,7 +222,7 @@ def _finalize_observation(
 
 
 def visual_compare_result_fields(
-    observation: VisualCompareObservation,
+    observation: BaseModel,
     protocol: CompareProtocol | str | None = None,
 ) -> dict[str, Any]:
     """返回扁平结果；新增字段可直接被 Excel 导出，旧字段继续存在。"""
@@ -229,7 +230,12 @@ def visual_compare_result_fields(
         resolve_compare_protocol(protocol) if isinstance(protocol, str)
         else protocol or resolve_compare_protocol(None)
     )
-    _finalize_observation(observation, selected_protocol)
+    if selected_protocol.standard_id == QA_CHAT_STANDARD_ID:
+        if not isinstance(observation, QAChatObservation):
+            raise ValueError("问答闲聊协议需要独立QAChatObservation结果模型")
+        finalize_qa_chat_observation(observation, selected_protocol)
+    else:
+        _finalize_observation(observation, selected_protocol)
     result = observation.model_dump()
     result["evaluation_profile"] = selected_protocol.id
     result["bundle_revision"] = selected_protocol.bundle_revision

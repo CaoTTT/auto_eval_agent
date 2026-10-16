@@ -14,9 +14,8 @@ import zipfile
 from openpyxl import load_workbook
 from openpyxl.utils import column_index_from_string, get_column_letter
 
-from ..judges.compare_protocols import resolve_compare_protocol
-from .compare_statistics import DIMENSION_NAMES, SCORE_DIMENSIONS
-from .human_baselines import HumanError, HumanScoreLabel, ImportMapping, digest
+from .human_baselines import (HumanError, HumanScoreLabel, ImportMapping, digest, human_protocol,
+                              human_dimensions, human_dimension_names, CHAT_NAMES)
 
 MAX_UPLOAD = 20 * 1024 * 1024
 MAX_ROWS = 20000
@@ -61,12 +60,16 @@ def _blank(value) -> bool:
 
 def suggest_mapping(headers: list[str], sheet_name: str, header_row: int = 1, metadata: dict | None = None) -> dict:
     metadata = metadata or {}
+    protocol = human_protocol(metadata.get("human_standard_version") or "0.2-simplified", metadata.get("human_standard_id", ""), metadata.get("human_bundle_revision") or None)
+    dimension_names = human_dimension_names(protocol)
+    if not metadata.get("human_standard_version"):
+        dimension_names = {**dimension_names, **CHAT_NAMES}
     cols = {h: get_column_letter(i + 1) for i, h in enumerate(headers) if headers.count(h) == 1}
     products = metadata.get("products") or [{"product_id": "product1", "display_name": "产品1"},
                                           {"product_id": "product2", "display_name": "产品2"}]
     if any("产品3_" in h for h in headers) and len(products) == 2:
         products.append({"product_id": "product3", "display_name": "产品3"})
-    labels, responses, gates = [], {}, {}
+    labels, responses, gates, inputs = [], {}, {}, {}
     for n, product in enumerate(products, 1):
         pid = product["product_id"]
         responses[pid] = {field: cols[name] for field, name in (
@@ -75,10 +78,14 @@ def suggest_mapping(headers: list[str], sheet_name: str, header_row: int = 1, me
             ("evidence", f"证据引用_产品{n}")) if name in cols}
         gates[pid] = {g: cols[f"人工{label}Gate_产品{n}"] for g, label in (("response", "响应"), ("safety", "安全"))
                       if f"人工{label}Gate_产品{n}" in cols}
-        for dim, label in DIMENSION_NAMES.items():
+        if f"人工输入状态_产品{n}" in cols:
+            inputs[pid] = cols[f"人工输入状态_产品{n}"]
+        for dim, label in dimension_names.items():
             mapping = {field: cols[name] for field, name in (
                 ("score", f"人工分_产品{n}_{label}"), ("review", f"人工复核分_产品{n}_{label}"),
-                ("status", f"人工评分状态_产品{n}_{label}"), ("reason", f"人工批注_产品{n}_{label}")) if name in cols}
+                ("status", f"人工评分状态_产品{n}_{label}"), ("reason", f"人工批注_产品{n}_{label}"),
+                ("applicable", f"人工是否适用_产品{n}_{label}"),
+                ("verification_status", f"人工核验状态_产品{n}_{label}")) if name in cols}
             if any(mapping.get(k) for k in ("score", "review", "status")):
                 labels.append(dict(product_id=pid, dimension_id=dim, **mapping))
     # The legacy adapter is only suggested when its physical headers still look human-authored.
@@ -86,7 +93,7 @@ def suggest_mapping(headers: list[str], sheet_name: str, header_row: int = 1, me
               ("service_closure", "BU", "BV", "", ""), ("scenario_fulfillment", "CF", "CG", "", ""),
               ("intuitive_efficiency", "CU", "CV", "CZ", "DA"),
               ("evidence_quality", "DK", "DM", "DR", "DS"), ("guided_recommendation", "ED", "EE", "", "")]
-    if not labels and sheet_name == "合并标注结果-review后":
+    if protocol.standard_id == "qa_competitor_compare" and not labels and sheet_name == "合并标注结果-review后":
         addresses = [c for spec in legacy for c in spec[1:] if c]
         if all(column_index_from_string(c) <= len(headers) and
                re.search(r"人工|review|复核", headers[column_index_from_string(c) - 1], re.I) for c in addresses):
@@ -102,11 +109,12 @@ def suggest_mapping(headers: list[str], sheet_name: str, header_row: int = 1, me
                 query_hashes=cols.get("提问原图摘要", ""), category=cols.get("场景", ""), products=products,
                 session_group=cols.get("会话ID", ""), turn_index=cols.get("轮次", ""),
                 history_prefix_sha256=cols.get("历史前缀指纹", ""),
-                labels=labels, responses=responses, gates=gates,
-                applicability={d: cols[f"人工是否适用_{name}"] for d, name in DIMENSION_NAMES.items() if f"人工是否适用_{name}" in cols},
+                labels=labels, responses=responses, gates=gates, inputs=inputs,
+                applicability={d: cols[f"人工是否适用_{name}"] for d, name in dimension_names.items() if f"人工是否适用_{name}" in cols},
                 answer_text_origin="source" if metadata.get("template_version") else "unknown",
                 context_origin="source" if metadata.get("template_version") else "unknown",
                 na_status="na_unspecified", human_standard_version=metadata.get("human_standard_version", ""),
+                human_standard_id=metadata.get("human_standard_id", ""), human_bundle_revision=metadata.get("human_bundle_revision", ""),
                 policy_note="", purpose="regression", header_signature=digest(headers))
 
 
@@ -148,7 +156,8 @@ def _number(value, minimum: int, maximum: int) -> int:
 
 
 def parse_human_labels(path: Path, mapping: ImportMapping) -> dict:
-    protocol = resolve_compare_protocol("qa_competitor_compare@" + mapping.human_standard_version)
+    protocol = human_protocol(mapping.human_standard_version, mapping.human_standard_id, mapping.human_bundle_revision or None)
+    chat = protocol.standard_id == "qa_chat_compare"
     catalog = "catalog_" + uuid.uuid4().hex[:16]
     cases, labels, states, issues = [], [], [], []
     all_ids = []
@@ -163,9 +172,9 @@ def parse_human_labels(path: Path, mapping: ImportMapping) -> dict:
             raise HumanError("表头已改变，不能复用原列地址；请重新映射", 409)
         physical_columns = [mapping.case_id, mapping.query, mapping.context, mapping.query_hashes, mapping.category,
                             mapping.session_group, mapping.turn_index, mapping.history_prefix_sha256,
-                            *mapping.applicability.values()]
+                            *mapping.applicability.values(), *mapping.inputs.values()]
         for label in mapping.labels:
-            physical_columns.extend(getattr(label, k) for k in ("score", "review", "status", "reason"))
+            physical_columns.extend(getattr(label, k) for k in ("score", "review", "status", "reason", "applicable", "verification_status"))
         for fields in (*mapping.responses.values(), *mapping.gates.values()):
             physical_columns.extend(fields.values())
         for col in filter(None, physical_columns):
@@ -229,7 +238,7 @@ def parse_human_labels(path: Path, mapping: ImportMapping) -> dict:
             except (ValueError, TypeError) as exc:
                 issue(exc, mapping.case_id)
                 continue
-            shared, gates = {}, {}
+            shared, gates, inputs = {}, {}, {}
             try:
                 for dim, col in mapping.applicability.items():
                     v = get(col)
@@ -246,7 +255,13 @@ def parse_human_labels(path: Path, mapping: ImportMapping) -> dict:
                         if token not in ("pass", "fail", "unclear", "unknown"):
                             raise ValueError(f"{col}{row_no} Gate 值无效")
                         gates[pid][gate] = token
-                states.append(dict(case_key=case_key, applicability=shared, gates=gates,
+                for pid, col in mapping.inputs.items():
+                    value = get(col)
+                    token = str(value).strip().lower() if not _blank(value) else "unknown"
+                    if token not in ("complete", "partial", "failed", "unknown"):
+                        raise ValueError(f"{col}{row_no} 产品输入状态无效")
+                    inputs[pid] = token
+                states.append(dict(case_key=case_key, applicability=shared, gates=gates, inputs=inputs,
                                    source=dict(sheet=mapping.sheet_name, row=row_no,
                                                applicability=mapping.applicability, gates=mapping.gates)))
             except ValueError as exc:
@@ -266,11 +281,13 @@ def parse_human_labels(path: Path, mapping: ImportMapping) -> dict:
                         base = str(raw[column_index_from_string(col.score)-1].value)
                     value, chosen = (review, col.review) if use_review else (base, col.score)
                     status = "unlabeled" if _blank(value) else (mapping.na_status if str(value).strip().upper() in ("N/A", "NA") else "scored")
+                    if chat and status == "scored" and type(value) is not int:
+                        raise ValueError("问答闲聊人工分须为1—5严格整数，不接受文本或小数")
                     score = _number(value, protocol.score_min, protocol.score_max) if status == "scored" else None
                     if not _blank(explicit):
                         explicit = {"不适用": "not_applicable", "无法核验": "unverifiable", "Gate阻断": "gate_blocked",
-                                    "未标注": "unlabeled", "已评分": "scored"}.get(str(explicit).strip(), str(explicit).strip())
-                        if explicit not in ("scored", "not_applicable", "unverifiable", "gate_blocked", "unlabeled", "na_unspecified"):
+                                    "输入失败": "input_failed", "未标注": "unlabeled", "已评分": "scored"}.get(str(explicit).strip(), str(explicit).strip())
+                        if explicit not in ("scored", "not_applicable", "unverifiable", "gate_blocked", "input_failed", "unlabeled", "na_unspecified"):
                             raise ValueError("人工评分状态无效")
                         if (score is not None and explicit != "scored") or (score is None and explicit == "scored"):
                             raise ValueError("数字评分与显式状态冲突")
@@ -280,20 +297,47 @@ def parse_human_labels(path: Path, mapping: ImportMapping) -> dict:
                     pg = gates.get(col.product_id, {})
                     blocked = pg.get("response") == "fail" or (protocol.require_response_pass and pg.get("response") == "unclear") or (
                         not protocol.require_response_pass and pg.get("safety") == "fail")
-                    if score is not None and (shared.get(col.dimension_id) is False or blocked):
+                    applicable_raw = get(col.applicable)
+                    token = str(applicable_raw).strip().lower() if not _blank(applicable_raw) else "unknown"
+                    if token not in ("true", "false", "是", "否", "适用", "不适用", "unknown"):
+                        raise ValueError("产品适用性值无效")
+                    applicable = None if token == "unknown" else token in ("true", "是", "适用")
+                    if applicable is None and not col.applicable:
+                        applicable = shared.get(col.dimension_id)
+                    inferred = True if status == "scored" else False if status == "not_applicable" else None
+                    if applicable is not None and inferred is not None and applicable != inferred:
+                        raise ValueError("人工状态与产品适用性冲突")
+                    if applicable is None:
+                        applicable = inferred
+                    if chat and status == "unverifiable" and applicable is False:
+                        raise ValueError("无法核验状态不能明确不适用")
+                    verification_raw = get(col.verification_status)
+                    verification = str(verification_raw).strip().lower() if not _blank(verification_raw) else None
+                    if verification not in (None, "verified", "partial", "unverifiable", "not_required"):
+                        raise ValueError("人工核验状态无效")
+                    if chat and ((status == "scored" and verification == "unverifiable") or
+                                 (status == "not_applicable" and verification not in (None, "not_required")) or
+                                 (status == "unverifiable" and verification not in (None, "unverifiable"))):
+                        raise ValueError("人工评分状态与核验状态冲突")
+                    if score is not None and (applicable is False or blocked or inputs.get(col.product_id) == "failed"):
                         raise ValueError("人工数字分与适用性/Gate 冲突")
-                    if status == "not_applicable" and shared.get(col.dimension_id) is True:
+                    if not chat and status == "not_applicable" and shared.get(col.dimension_id) is True:
                         raise ValueError("不适用标签与共享适用性冲突")
+                    reason = str(get(col.reason) or "")
+                    if chat and use_review and str(review).strip().upper() in ("NA", "N/A") and not _blank(base) and not reason.strip():
+                        raise ValueError("复核NA覆盖初始评分必须填写原因")
                     source = dict(sheet=mapping.sheet_name, row=row_no, base_cell=f"{col.score}{row_no}" if col.score else "",
                                   review_cell=f"{col.review}{row_no}" if col.review else "", selected_cell=f"{chosen}{row_no}" if chosen else "",
-                                  base_raw=base, review_raw=review, formula=any(raw[column_index_from_string(c)-1].data_type == "f" for c in (col.score, col.review) if c))
+                                  base_raw=base, review_raw=review, applicable_cell=f"{col.applicable}{row_no}" if col.applicable else "",
+                                  applicable_raw=applicable_raw, verification_cell=f"{col.verification_status}{row_no}" if col.verification_status else "",
+                                  verification_raw=verification_raw, formula=any(raw[column_index_from_string(c)-1].data_type == "f" for c in (col.score, col.review) if c))
                     labels.append(HumanScoreLabel(case_key=case_key, product_id=col.product_id,
                         response_id=case["responses"][col.product_id].get("response_id") or digest([case_key, col.product_id])[:24],
-                        dimension_id=col.dimension_id, score_status=status, score=score,
-                        annotation_stage="review" if use_review else "base", reason=str(get(col.reason) or ""), source=source).model_dump())
+                        dimension_id=col.dimension_id, score_status=status, score=score, applicable=applicable, verification_status=verification,
+                        annotation_stage="review" if use_review else "base", reason=reason, source=source).model_dump())
                 except (ValueError, TypeError) as exc:
                     issue(exc, col.review or col.score or col.status, col.product_id, col.dimension_id)
-            for dim in DIMENSION_NAMES:
+            for dim in (() if chat else human_dimensions(protocol)):
                 group = [r for r in labels[start:] if r["dimension_id"] == dim]
                 if any(r["score_status"] == "not_applicable" for r in group) and any(r["score_status"] == "scored" for r in group):
                     for r in group:
@@ -318,7 +362,10 @@ def build_human_template(snapshot: dict, standard: str) -> bytes:
     from .human_compare import case_identity, response_identity
     from .human_report_export import tables_workbook
     from .compare_statistics import StatisticsTable
-    protocol = resolve_compare_protocol("qa_competitor_compare@" + standard)
+    protocol = human_protocol(standard)
+    dimensions = human_dimensions(protocol, scores=True)
+    names_by_dimension = human_dimension_names(protocol)
+    chat = protocol.standard_id == "qa_chat_compare"
     items = snapshot.get("items") or []
     count = max((int(i.get("product_count") or (3 if i.get("video3") or i.get("screenshot3") or i.get("answer3") else 2)) for i in items), default=2)
     names = (snapshot.get("options") or {}).get("product_names") or []
@@ -326,30 +373,42 @@ def build_human_template(snapshot: dict, standard: str) -> bytes:
     headers = ["case_id", "query", "公共背景", "提问原图摘要", "场景", "会话ID", "轮次", "历史前缀指纹"]
     for n in range(1, count+1):
         headers.extend(f"{name}_产品{n}" for name in ("源回答", "源背景", "采集ID", "源摘要", "证据引用"))
-        for dim in SCORE_DIMENSIONS:
-            headers.extend(f"{name}_产品{n}_{DIMENSION_NAMES[dim]}" for name in ("人工分", "人工复核分", "人工评分状态", "人工批注"))
+        for dim in dimensions:
+            headers.extend(f"{name}_产品{n}_{names_by_dimension[dim]}" for name in
+                           (("人工分", "人工复核分", "人工评分状态", "人工批注", "人工是否适用", "人工核验状态") if chat else
+                            ("人工分", "人工复核分", "人工评分状态", "人工批注")))
         headers.extend((f"人工响应Gate_产品{n}", f"人工安全Gate_产品{n}"))
-    headers.extend(f"人工是否适用_{DIMENSION_NAMES[d]}" for d in SCORE_DIMENSIONS)
+        if chat:
+            headers.append(f"人工输入状态_产品{n}")
+    if not chat:
+        headers.extend(f"人工是否适用_{names_by_dimension[d]}" for d in dimensions)
     table = StatisticsTable("人工标注模板", tuple(headers))
     for item in items:
         identity = case_identity(item)
         source = item.get("source_data") or {}
         row = [str(item.get("id") or source.get("query_id") or ""), identity["query"], identity["context"],
                json.dumps(identity["query_hashes"], ensure_ascii=False), item.get("category") or source.get("category") or "",
-               item.get("session_group",source.get("session_group","")),item.get("turn_index",source.get("turn_index","")), item.get("history_prefix_sha256", "")]
+               item.get("session_group") or item.get("session_id") or source.get("session_group") or source.get("session_id", ""),
+               item.get("turn_index",source.get("turn_index","")), item.get("history_prefix_sha256", "")]
         for n in range(1, count+1):
             response = response_identity(item, n)
             row.extend(response.get(k, "") for k in ("answer", "context", "response_id", "sha256", "evidence"))
-            row.extend([None] * (len(SCORE_DIMENSIONS)*4 + 2))
-        row.extend([None]*len(SCORE_DIMENSIONS))
+            row.extend([None] * (len(dimensions)*(6 if chat else 4) + (3 if chat else 2)))
+        if not chat:
+            row.extend([None]*len(dimensions))
         table.rows.append(row)
-    meta = dict(template_version="human-wide-1.0", products=products, human_standard_version=standard)
+    meta = dict(template_version="human-wide-1.0", products=products, human_standard_version=protocol.standard_version,
+                human_standard_id=protocol.standard_id, human_bundle_revision=protocol.bundle_revision,
+                evaluation_profile=protocol.id, dimensions=list(dimensions), dimension_names=names_by_dimension,
+                score_range=[protocol.score_min, protocol.score_max])
     notes = StatisticsTable("填写说明", ("项目", "说明"), rows=[
         ["模板元信息", json.dumps(meta, ensure_ascii=False)], ["人工标准", protocol.display],
         ["分值范围", f"{protocol.score_min}—{protocol.score_max} 的整数"],
         ["填写规则", "题号须为文本；留空=未标注；review 非空优先（包括 0 和 N/A）。N/A 默认原因未知。"],
-        ["状态可选值", "scored / not_applicable / unverifiable / gate_blocked / unlabeled / na_unspecified"],
+        ["状态可选值", "scored / not_applicable / unverifiable / gate_blocked / input_failed / unlabeled / na_unspecified"],
         ["身份核对", "请核对产品、题号和原始回答；缺失真实题号须先补充。填写说明中的产品 ID 可在导入映射中修正。"],
         ["Gate/适用性", "Gate：pass/fail/unclear；适用性：true/false；留空=未知。"],
+        ["标准隔离", "禁止将旧标准人工分或模型分复制为新标准标注；全部评分、理由、Gate与适用性栏初始为空。"],
+        ["核验/输入状态", "核验：verified/partial/unverifiable/not_required；输入：complete/partial/failed；留空=未知。"],
     ])
     return tables_workbook({"人工标注": [table], "填写说明": [notes]}, plain=True)

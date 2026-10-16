@@ -64,7 +64,7 @@ def _pair(a, b, keys):
 
 
 def build_human_statistics(rows: list[dict], task_ids: list[str], products: list[str], dimensions=None) -> dict:
-    dimensions = [d for d in (dimensions or SCORE_DIMENSIONS) if d in SCORE_DIMENSIONS]
+    dimensions = list(dimensions or SCORE_DIMENSIONS)
     grouped = defaultdict(list)
     for row in rows:
         grouped[row["task_id"], row["product_id"], row["dimension_id"]].append(row)
@@ -107,19 +107,32 @@ def build_human_statistics(rows: list[dict], task_ids: list[str], products: list
     # State metrics require explicit labels and valid identity. Unknown is never a pass.
     for task in task_ids:
         for dim in dimensions:
-            group = [r for r in rows if r["task_id"]==task and r["dimension_id"]==dim]
-            applicable = {r["case_key"]: r for r in group if r["identity_accepted"] and
-                          r.get("human_applicable") is not None and r.get("model_applicable") is not None}
-            values = list(applicable.values())
-            states.append(dict(task_id=task, dimension_id=dim, kind="applicability", product_id="", n=len(values),
-                               agreement=ratio(sum(r["human_applicable"]==r["model_applicable"] for r in values),len(values))))
+            for product in products:
+                group = [r for r in rows if r["task_id"]==task and r["dimension_id"]==dim and r["product_id"] == product]
+                applicable = {r["case_key"]: r for r in group if r["identity_accepted"] and r.get("compatible", True) and
+                              r.get("human_status") not in ("unlabeled", "na_unspecified") and
+                              r.get("human_applicable") is not None and r.get("model_applicable") is not None}
+                values = list(applicable.values())
+                states.append(dict(task_id=task, dimension_id=dim, kind="applicability", product_id=product, n=len(values),
+                                   agreement=ratio(sum(r["human_applicable"]==r["model_applicable"] for r in values),len(values))))
+                formal = {"scored", "not_applicable", "unverifiable", "gate_blocked", "input_failed"}
+                values = [r for r in group if r["identity_accepted"] and r.get("compatible", True) and
+                          r.get("human_status") in formal and r.get("model_score_status") in formal]
+                states.append(dict(task_id=task, dimension_id=dim, kind="score_status", product_id=product, n=len(values),
+                                   agreement=ratio(sum(r["human_status"]==r["model_score_status"] for r in values),len(values))))
         for product in products:
             for gate in ("response", "safety"):
                 group = {r["case_key"]: r for r in rows if r["task_id"]==task and r["product_id"]==product and
-                         r["identity_accepted"] and r.get("human_gates",{}).get(gate) in ("pass","fail","unclear") and
-                         r.get("model_gates",{}).get(gate) in ("pass","fail","unclear") and r.get("model_input_status") in ("complete","partial")}
+                         r["identity_accepted"] and r.get("compatible", True) and r.get("human_gates",{}).get(gate) in ("pass","fail","unclear") and
+                         r.get("model_gates",{}).get(gate) in ("pass","fail","unclear") and r.get("model_input_status") in ("complete","partial") and
+                         r.get("human_input_status") != "failed"}
                 values = list(group.values())
+                product_rows = [r for r in rows if r["task_id"] == task and r["product_id"] == product]
+                model_failed = {r["case_key"] for r in product_rows if r.get("model_input_status") == "failed"}
+                human_failed = {r["case_key"] for r in product_rows if r.get("human_input_status") == "failed"}
                 states.append(dict(task_id=task, dimension_id="", kind=gate+"_gate", product_id=product, n=len(values),
+                                   input_failed_n=len(model_failed | human_failed), model_input_failed_n=len(model_failed),
+                                   human_input_failed_n=len(human_failed),
                                    agreement=ratio(sum(r["human_gates"][gate]==r["model_gates"][gate] for r in values),len(values))))
     for row in scores:
         if row["scope"] == "common":

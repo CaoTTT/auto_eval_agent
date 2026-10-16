@@ -30,6 +30,8 @@ from ..judges import (
 )
 from ..judges.base import flush_web_trace_records
 from ..judges.compare_protocols import resolve_compare_protocol
+from ..conversation import is_conversation
+from .protocol_identity import require_snapshot_protocol
 from ..llm_stream import is_retriable_llm_error
 from ..long_screenshot import ContextBudgetExceeded, RISKY_REVIEW_REASON
 from ..observability import (
@@ -298,6 +300,15 @@ async def run_eval(task: Task, cfg: AppConfig) -> None:
             retire_task(task)
 
 
+def _runtime_conversation(item: dict) -> bool:
+    # Historical CSV bookkeeping used a zero-based turn without session_id.
+    # A business session_id alone also does not declare a conversation.
+    legacy = (not item.get("session_id") and item.get("session_group")
+              and item.get("turn_index") == 0 and not item.get("conversation_mode")
+              and item.get("input_schema_version") != "2.0")
+    return bool(not legacy and is_conversation(item))
+
+
 def _make_item_evaluator(
     task: Task,
     cfg: AppConfig,
@@ -315,10 +326,9 @@ def _make_item_evaluator(
     """
     runtime_options = options if options is not None else task.options
     compare_protocol = (
-        resolve_compare_protocol(
-            task.evaluation_profile or runtime_options.get("evaluation_profile"),
-            task.protocol_manifest.get("bundle_revision"),
-        )
+        require_snapshot_protocol(
+            {"mode": task.mode, "evaluation_profile": task.evaluation_profile or runtime_options.get("evaluation_profile"),
+             "protocol_manifest": task.protocol_manifest, "results": task.results, "options": task.options})
         if task.mode == "compare"
         else None
     )
@@ -404,12 +414,12 @@ def _make_item_evaluator(
     from ..image_limits import resolve_image_limits
     from .conversation_prepare import ConversationPreparation
     conversation_preparer = None
-    if task.mode == "compare" and any(it.get("session_id") for it in task.items):
+    if task.mode == "compare" and any(_runtime_conversation(it) for it in task.items):
         if task.protocol_manifest.get("conversation_adapter_version", VERSION) != VERSION:
             raise ValueError("不支持该多轮适配器版本，请使用原版本恢复")
         limits = task.protocol_manifest.get("image_limits") or resolve_image_limits(judges_cfg[0], rich_profile)
         task.protocol_manifest.update(image_limits=limits, input_schema_version="2.0", conversation_adapter_version=VERSION)
-        conversation_preparer = ConversationPreparation(task.items, task.session_name, rich_profile, limits)
+        conversation_preparer = ConversationPreparation([it for it in task.items if _runtime_conversation(it)], task.session_name, rich_profile, limits)
     result_callback = on_result or _default_on_result
 
     async def finish(idx, res, started):
@@ -503,7 +513,7 @@ def _make_item_evaluator(
                         item_dict["screenshot_evidence"] = request_evidence
                         task.items[idx]["screenshot_evidence"] = request_evidence
                         _persist_task(task)
-                if conversation_preparer is not None and item_dict.get("session_id"):
+                if conversation_preparer is not None and _runtime_conversation(item_dict):
                     try:
                         conversation_input = await run_preparation(conversation_preparer.prepare, item_dict,
                             timeout=float(runtime_options.get("video_prepare_timeout_s") or 300))
@@ -528,7 +538,7 @@ def _make_item_evaluator(
                     if task.mode == "compare"
                     else not item_dict.get("frames")
                 )
-                if needs_visual_prepare and not item_dict.get("session_id"):
+                if needs_visual_prepare and not (_runtime_conversation(item_dict) if task.mode == "compare" else item_dict.get("session_id")):
                     try:
                         log_event(
                             "视觉证据准备" if is_screenshot else "视频准备",
@@ -595,7 +605,7 @@ def _make_item_evaluator(
                             progress_status="error",
                         )
                 check_pause()
-                if last_error is None and task.mode == "compare" and not item_dict.get("session_id"):
+                if last_error is None and task.mode == "compare" and not _runtime_conversation(item_dict):
                     try:
                         if item_dict.get("query_images"):
                             if rich_profile is None:
@@ -774,7 +784,7 @@ async def _run(task: Task, cfg: AppConfig) -> None:
     standalone: list[int] = []
     for i, it in enumerate(task.items):
         grp = it.get("session_group")
-        if grp and (task.mode == "rich_content" or it.get("session_id")):
+        if grp and (task.mode == "rich_content" or _runtime_conversation(it)):
             sessions.setdefault(str(grp), []).append(i)
         else:
             standalone.append(i)
@@ -882,7 +892,7 @@ async def run_resume(task: Task, cfg: AppConfig) -> None:
         for index, item in enumerate(task.items):
             if index in batch_indexes:
                 continue
-            group = item.get("session_group") if task.mode == "rich_content" or item.get("session_id") else None
+            group = item.get("session_group") if task.mode == "rich_content" or _runtime_conversation(item) else None
             key = f"session:{group}" if group else f"item:{index}"
             groups.setdefault(key, []).append(index)
         for indexes in groups.values():
@@ -1034,7 +1044,7 @@ async def run_retry(task: Task, cfg: AppConfig, retry_id: str) -> None:
         grouped: dict[str, list[int]] = {}
         standalone: list[int] = []
         for idx, item in enumerate(task.items):
-            group = item.get("session_group") if task.mode != "compare" or item.get("session_id") else None
+            group = item.get("session_group") if task.mode != "compare" or _runtime_conversation(item) else None
             if group:
                 grouped.setdefault(str(group), []).append(idx)
             elif idx in target_set:
@@ -1198,7 +1208,7 @@ async def _run_update_batch_body(
         # 整批一个串行会话：前轮总结在批次内本地链式注入，
         # 不从 task.results 读回，不受并行批次覆盖影响。
         prior_summary = task.execution_control.get("update_batches", {}).get(batch_id, {}).get("prior_summary", "")
-        if task.mode == "compare" and any(item.get("session_id") for _, item in batch):
+        if task.mode == "compare" and any(_runtime_conversation(item) for _, item in batch):
             batch = sorted(batch, key=lambda entry: (entry[1].get("session_id", ""), entry[1].get("turn_index", 0), entry[0]))
         for turn_no, (idx, item_dict) in enumerate(batch, 1):
             if task.pause_requested:
@@ -1441,15 +1451,14 @@ async def _eval_one(
             } if item_dict.get("evidence_mode") == "long_screenshot" else {}),
         )
         out.update(compare_result)
+        result_protocol = getattr(compare_judges[0], "protocol", None) or resolve_compare_protocol(compare_result.get("evaluation_profile"))
         log_event(
             "结果聚合",
             "视觉对比完成",
             details={
                 "产品数": product_count,
-                "理解需求排名": compare_result.get("understanding_rank_groups"),
-                "服务闭环排名": compare_result.get("service_closure_rank_groups"),
-                "场景化满足排名": compare_result.get("scenario_fulfillment_rank_groups"),
-                "直观高效排名": compare_result.get("intuitive_efficiency_rank_groups"),
+                **{f"{result_protocol.dimension_names[dimension]}排名": compare_result.get(f"{dimension}_rank_groups")
+                   for dimension in result_protocol.score_dimensions},
                 "需要复核": compare_result.get("needs_human_review"),
                 "内容冲突": compare_result.get("has_conflict"),
             },
@@ -1470,6 +1479,12 @@ async def _eval_one(
 def _summarize(task: Task, *, include_subsets: bool = True) -> dict:
     if task.mode == "rich_content":
         return _summarize_rich_content(task)
+    from .protocol_identity import recover_protocol_identity
+    recovered = recover_protocol_identity({"mode": task.mode, "evaluation_profile": task.evaluation_profile,
+        "protocol_manifest": task.protocol_manifest, "results": task.results, "options": task.options})
+    if recovered["is_chat"] or recovered["diagnostics"]:
+        from .qa_chat_summary import summarize_chat
+        return summarize_chat(task, include_subsets=include_subsets)
     # compare：协议定义七维绝对分；准确性保留逐题输出但暂不参与汇总。
     res = [
         result for index, result in latest_results_by_index(task).items()
@@ -1564,7 +1579,7 @@ def _summarize(task: Task, *, include_subsets: bool = True) -> dict:
     summary["conflict_yes"] = sum(1 for r in valid if r.get("has_conflict") == "yes")
     summary["conflict_no"] = sum(1 for r in valid if r.get("has_conflict") == "no")
     summary["conflict_unclear"] = sum(1 for r in valid if r.get("has_conflict") == "unclear")
-    if include_subsets and any(it.get("session_id") for it in task.items):
+    if include_subsets and any(is_conversation(it) for it in task.items):
         from .compare_statistics import conversation_statistics
         snapshot = {"items": task.items, "protocol_manifest": task.protocol_manifest, "evaluation_profile": task.evaluation_profile}
         latest = latest_results_by_index(task)
