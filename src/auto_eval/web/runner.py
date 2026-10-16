@@ -686,6 +686,14 @@ def _make_item_evaluator(
                     }
                     if item_dict.get("context"):
                         res["context"] = item_dict["context"]
+                    # V2 structure failures retain their original output and key
+                    # pairs in the task, so retrying never erases the first audit.
+                    if getattr(last_error, "structural_diagnostics", None) is not None:
+                        res.update(_structure_error_audit(last_error))
+                        if compare_protocol is not None:
+                            res.update({key: getattr(compare_protocol, key) for key in
+                                        ("standard_id", "standard_version", "bundle_revision", "result_schema_version")})
+                            res["evaluation_profile"] = compare_protocol.id
                     if isinstance(last_error, (ContextBudgetExceeded, QueryImageError)):
                         res.update(
                             error_type=last_error.code, needs_human_review=True,
@@ -968,6 +976,8 @@ async def run_resume(task: Task, cfg: AppConfig) -> None:
 async def run_retry(task: Task, cfg: AppConfig, retry_id: str) -> None:
     """执行人工失败补跑；候选成功才写回原任务，失败仅进入 attempt 审计。"""
     retry = task.retry_runs[retry_id]
+    shared_chat_output = (task.evaluation_profile == "qa_chat_compare@1.1" or
+                          task.protocol_manifest.get("result_schema_version") == "qa-chat-result-2")
     retry["status"] = "running"
     retry["started_at"] = time.time()
     task.repair_status = "running"
@@ -990,6 +1000,8 @@ async def run_retry(task: Task, cfg: AppConfig, retry_id: str) -> None:
         if idx in pending:
             pending.remove(idx)
         item_state = retry["items"].setdefault(str(idx), {})
+        if shared_chat_output:
+            item_state["attempt_result"] = copy.deepcopy(res)
         retry["completed"] = int(retry.get("completed", 0)) + 1
         item_state["finished_at"] = time.time()
         item_state["latency_s"] = round(time.perf_counter() - started, 3)
@@ -1065,6 +1077,9 @@ async def run_retry(task: Task, cfg: AppConfig, retry_id: str) -> None:
             working_items[idx] = working
             task.in_flight_indexes.add(idx)
             retry["items"].setdefault(str(idx), {})["status"] = "running"
+            if shared_chat_output:
+                retry["items"][str(idx)].setdefault(
+                    "original_result", copy.deepcopy(latest_results_by_index(task).get(idx)))
             try:
                 return await one(idx, working)
             finally:
@@ -1304,6 +1319,15 @@ async def run_update_batch(
             retire_task(task)
 
 
+def _structure_error_audit(error: Exception) -> dict:
+    """Preserve V2 parse facts without changing legacy failure result shapes."""
+    fields = ("raw_output", "raw_model_output", "repair_output", "raw_key_pairs", "structural_diagnostics",
+              "duplicate_keys", "repair_key_pairs", "original_raw_key_pairs", "locally_repaired_key_pairs",
+              "repair_locally_repaired_key_pairs", "normalization_diagnostics",
+              "trusted_collection_metadata", "input_manifest_sha256", "judge", "model")
+    return {field: getattr(error, field) for field in fields if hasattr(error, field)}
+
+
 def _write_eval_error(
     task_id: str,
     idx: int,
@@ -1339,6 +1363,8 @@ def _write_eval_error(
                 "original_output_length": len(raw_output or ""),
                 "repair_output_length": len(repair_output or ""),
             })
+        if getattr(error, "structural_diagnostics", None) is not None:
+            record.update(_structure_error_audit(error))
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
     except Exception:
@@ -1355,6 +1381,7 @@ async def _eval_one(
     category_display=None,
     conversation_input=None,
     evidence_callback=None,
+    trusted_collection_metadata=None,
 ) -> dict:
     t0 = time.perf_counter()
     item = _to_evalitem(item_dict, idx)
@@ -1426,6 +1453,11 @@ async def _eval_one(
             out[f"context{product_no}"] = contexts[product_no]
 
         compare_result = await compare_judges[0].evaluate(
+            # Only a program caller may supply a collection conclusion. Imported
+            # columns, copied answers, and successful decoding do not prove it.
+            **({"trusted_collection_metadata": trusted_collection_metadata}
+               if trusted_collection_metadata is not None and
+               getattr(getattr(compare_judges[0], "protocol", None), "result_schema_version", None) == "qa-chat-result-2" else {}),
             **({"conversation_input": conversation_input} if conversation_input else {}),
             **({"query_image_meta": item_dict["query_image_meta"]} if item.query_images else {}),
             question=item.question,
@@ -1460,7 +1492,8 @@ async def _eval_one(
                 **{f"{result_protocol.dimension_names[dimension]}排名": compare_result.get(f"{dimension}_rank_groups")
                    for dimension in result_protocol.score_dimensions},
                 "需要复核": compare_result.get("needs_human_review"),
-                "内容冲突": compare_result.get("has_conflict"),
+                **({"内容冲突": compare_result.get("has_conflict")}
+                   if result_protocol.result_schema_version != "qa-chat-result-2" else {}),
             },
             progress=90,
             progress_message="垂域视觉对比评测完成",

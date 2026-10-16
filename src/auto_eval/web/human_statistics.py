@@ -124,7 +124,9 @@ def build_human_statistics(rows: list[dict], task_ids: list[str], products: list
             for gate in ("response", "safety"):
                 group = {r["case_key"]: r for r in rows if r["task_id"]==task and r["product_id"]==product and
                          r["identity_accepted"] and r.get("compatible", True) and r.get("human_gates",{}).get(gate) in ("pass","fail","unclear") and
-                         r.get("model_gates",{}).get(gate) in ("pass","fail","unclear") and r.get("model_input_status") in ("complete","partial") and
+                         r.get("model_gates",{}).get(gate) in ("pass","fail","unclear") and
+                         (r.get("model_input_status") in ("complete","partial") or
+                          r.get("model_result_schema_version") == "qa-chat-result-2" and r.get("model_input_status") is None) and
                          r.get("human_input_status") != "failed"}
                 values = list(group.values())
                 product_rows = [r for r in rows if r["task_id"] == task and r["product_id"] == product]

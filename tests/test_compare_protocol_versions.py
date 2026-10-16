@@ -9,6 +9,7 @@ from auto_eval.judges.compare_protocols import (
     V02_CALIBRATED_COMPARE_PROTOCOL_ID,
     V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID,
     QA_CHAT_COMPARE_PROTOCOL_ID,
+    QA_CHAT_V2_COMPARE_PROTOCOL_ID,
     VisualCompareObservationV02,
     list_compare_protocols,
     resolve_compare_protocol,
@@ -44,6 +45,7 @@ def test_registry_defaults_to_stable_v02_and_exposes_experimental_versions():
         V02_CALIBRATED_COMPARE_PROTOCOL_ID,
         V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID,
         QA_CHAT_COMPARE_PROTOCOL_ID,
+        QA_CHAT_V2_COMPARE_PROTOCOL_ID,
     }
     assert resolve_compare_protocol(V03_COMPARE_PROTOCOL_ID).status == "experimental"
     plus = resolve_compare_protocol(V02_PLUS_COMPARE_PROTOCOL_ID)
@@ -186,6 +188,7 @@ async def test_eval_api_freezes_selected_protocol_on_new_task(monkeypatch):
         V02_CALIBRATED_COMPARE_PROTOCOL_ID,
         V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID,
         QA_CHAT_COMPARE_PROTOCOL_ID,
+        QA_CHAT_V2_COMPARE_PROTOCOL_ID,
     ]
     assert [p["id"] for p in public if p["status"] == "stable"] == [
         DEFAULT_COMPARE_PROTOCOL_ID, V02_PLUS_COMPARE_PROTOCOL_ID,
@@ -255,6 +258,8 @@ def test_existing_protocols_cannot_restore_thinking_exposure_revision(protocol_i
     (V02_CALIBRATED_COMPARE_PROTOCOL_ID, "0.2.3"),
     (V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID, "0.2.3"),
     (V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID, "0.2.4"),
+    (QA_CHAT_COMPARE_PROTOCOL_ID, "1.0.0"),
+    (QA_CHAT_V2_COMPARE_PROTOCOL_ID, "1.1.0"),
 ])
 def test_existing_protocol_revisions_still_restore(protocol_id, revision):
     restored = resolve_compare_protocol(protocol_id, revision)
@@ -316,7 +321,7 @@ def test_stable_plus_preserves_existing_schema_and_gate_policy(response_gate):
     assert result["overall_winner"] is None
 
 
-@pytest.mark.parametrize("revision", ["0.2.0", "0.2.2", "0.2.3", "0.2.4", "0.3.0", "1.0.0"])
+@pytest.mark.parametrize("revision", ["0.2.0", "0.2.2", "0.2.3", "0.2.4", "0.3.0", "1.0.0", "1.1.0"])
 def test_stable_plus_does_not_restore_another_protocol_revision(revision):
     with pytest.raises(ValueError, match="无法恢复任务冻结的实现版本"):
         resolve_compare_protocol(V02_PLUS_COMPARE_PROTOCOL_ID, revision)
@@ -359,3 +364,26 @@ def test_stable_plus_prompt_bytes_remain_frozen(product_count, evidence_mode, ex
         "conversation_adapter_version": "compare-conversation-1",
     }
     assert protocol.public_metadata()["score_dimensions"] == list(protocol.score_dimensions)
+
+
+@pytest.mark.parametrize("profile_id,version,revision,schema", [
+    (V02_PLUS_COMPARE_PROTOCOL_ID, "0.2-simplified-plus", "0.2.1", None),
+    (QA_CHAT_COMPARE_PROTOCOL_ID, "1.0", "1.0.0", "qa-chat-result-1"),
+    (QA_CHAT_V2_COMPARE_PROTOCOL_ID, "1.1", "1.1.0", "qa-chat-result-2"),
+])
+def test_merge_keeps_plus_and_chat_revisions_separate_through_snapshot(profile_id, version, revision, schema):
+    """Merging chat V2 cannot reinterpret either older frozen result family."""
+    protocol = resolve_compare_protocol(profile_id, revision)
+    task = Task(id="merged-profile", mode="compare", items=[], options={},
+                evaluation_profile=profile_id, protocol_manifest=protocol.public_metadata())
+    restored = _task_from_snapshot(snapshot_payload(task_to_snapshot(task)), task.id)
+    assert restored.evaluation_profile == profile_id
+    assert restored.protocol_manifest["standard_id"] == protocol.standard_id
+    assert restored.protocol_manifest["standard_version"] == version
+    assert restored.protocol_manifest["bundle_revision"] == revision
+    assert restored.protocol_manifest["result_schema_version"] == schema
+    assert resolve_compare_protocol(restored.evaluation_profile, revision).observation_model is protocol.observation_model
+    other_revisions = {"0.2.1", "1.0.0", "1.1.0"} - {revision}
+    for other in other_revisions:
+        with pytest.raises(ValueError, match="无法恢复任务冻结的实现版本"):
+            resolve_compare_protocol(profile_id, other)

@@ -100,6 +100,7 @@ def export_baseline_answers(baseline: dict) -> bytes:
     metadata = dict(answer_export_version="human-answers-1.0", products=products,
                     human_standard_version=baseline["human_standard_version"], human_standard_id=protocol.standard_id,
                     human_bundle_revision=protocol.bundle_revision, dimensions=list(dimension_names),
+                    human_result_schema_version=protocol.result_schema_version,
                     dimension_names=dimension_names, score_range=[protocol.score_min, protocol.score_max])
     note_rows = [
         ["项目", "说明"],

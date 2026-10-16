@@ -23,7 +23,7 @@ from .protocol_identity import recover_protocol_identity
 
 
 SHEET_NAME = "对比评估统计"
-STATISTICS_VERSION = "compare-statistics-1.1"
+STATISTICS_VERSION = "compare-statistics-1.2"
 DIMENSION_NAMES = dict(zip(DIMENSIONS, (
     "理解需求", "内容准确性", "服务闭环", "场景化满足", "直观高效", "有理有据", "引导推荐",
 )))
@@ -36,6 +36,7 @@ THRESHOLDS = {
     "0.2-simplified-thinking-exposure": (4, 2),
     "0.3": (2, 1),
     "1.0": (4, 2),
+    "1.1": (4, 2),
 }
 BOOTSTRAP_SAMPLES = 2000
 BOOTSTRAP_SEED = 20260911
@@ -73,6 +74,19 @@ class Case:
 
 def _chat(protocol: CompareProtocol) -> bool:
     return protocol.standard_id == "qa_chat_compare"
+
+
+def balanced_chat(protocol: CompareProtocol | None) -> bool:
+    """The balanced output contract has program-owned, nullable input status."""
+    return bool(protocol and _chat(protocol) and protocol.result_schema_version == "qa-chat-result-2")
+
+
+def gate_observable(case: Case, product: int, protocol: CompareProtocol | None) -> bool:
+    """Whether the product's gate belongs to the observed-input denominator."""
+    if case.status != "done" or product not in range(1, case.product_count + 1):
+        return False
+    status = case.result.get(f"answer{product}_input_status")
+    return status in (None, "complete", "partial") if balanced_chat(protocol) else status in ("complete", "partial")
 
 
 def _score_dimensions(protocol: CompareProtocol) -> tuple[str, ...]:
@@ -177,7 +191,7 @@ def _chat_score_state(case: Case, product: int, dimension: str, protocol: Compar
     input_status = row.get(f"answer{product}_input_status")
     if input_status == "failed":
         return "输入失败", None
-    if input_status not in ("complete", "partial"):
+    if input_status not in ("complete", "partial") and not (balanced_chat(protocol) and input_status is None):
         return "输入状态缺失", None
     response, safety = (row.get(f"answer{product}_{gate}_gate") for gate in ("response", "safety"))
     if response == "fail" or safety == "fail":
@@ -356,37 +370,47 @@ def _count(table: StatisticsTable, subject: str, metric: str, count: int, denomi
     table.rows.append([subject, metric, count, denominator, _ratio(count, denominator), note or ("无可统计样本" if not denominator else "")])
 
 
-def _overview(cases: list[Case], snapshot: dict) -> StatisticsTable:
+def _overview(cases: list[Case], snapshot: dict, protocol: CompareProtocol | None = None) -> StatisticsTable:
     table = _counts_table("A．评测执行与证据质量")
     completed = [c for c in cases if c.status == "done"]
     failed = [c for c in cases if c.status == "failed"]
     for label, count in (("总题数", len(cases)), ("结构化结果成功／覆盖率", len(completed)),
                          ("技术失败", len(failed)), ("未完成", len(cases) - len(completed) - len(failed))):
         _count(table, "任务", label, count, len(cases), "按导出时最新逐题结果；未完成不计入失败")
-    for state in ("high", "medium", "low"):
-        _count(table, "裁判", {"high": "高置信度", "medium": "中置信度", "low": "低置信度"}[state],
-               sum(c.result.get("confidence") == state for c in completed), len(completed), "模型自报，不能解释为准确率")
-    _count(table, "裁判", "置信度缺失", sum(c.result.get("confidence") not in ("high", "medium", "low") for c in completed), len(completed))
+    manifest = snapshot.get("protocol_manifest") or {}
+    balanced = (balanced_chat(protocol) if protocol is not None else
+                manifest.get("standard_id") == "qa_chat_compare" and manifest.get("result_schema_version") == "qa-chat-result-2")
+    if not balanced:
+        for state in ("high", "medium", "low"):
+            _count(table, "裁判", {"high": "高置信度", "medium": "中置信度", "low": "低置信度"}[state],
+                   sum(c.result.get("confidence") == state for c in completed), len(completed), "模型自报，不能解释为准确率")
+        _count(table, "裁判", "置信度缺失", sum(c.result.get("confidence") not in ("high", "medium", "low") for c in completed), len(completed))
     for label, subset in (("成功结果待复核", completed), ("技术失败待复核", failed)):
         _count(table, "裁判", label, sum(bool(c.result.get("needs_human_review") or c.result.get("needs_review")) for c in subset), len(subset))
     errors = Counter(c.result.get("error_type") or "未分类技术错误" for c in failed)
     for reason, count in sorted(errors.items()):
         _count(table, "失败原因", reason, count, len(failed))
-    conflicts = Counter(c.result.get("has_conflict") for c in completed)
-    known = conflicts["yes"] + conflicts["no"]
-    _count(table, "内容冲突", "明确冲突率", conflicts["yes"], known, "yes/(yes+no)；不归责具体产品或产品对")
-    _count(table, "内容冲突", "不确定", conflicts["unclear"], len(completed))
-    _count(table, "内容冲突", "状态缺失", len(completed) - known - conflicts["unclear"], len(completed))
+    if not balanced:
+        conflicts = Counter(c.result.get("has_conflict") for c in completed)
+        known = conflicts["yes"] + conflicts["no"]
+        _count(table, "内容冲突", "明确冲突率", conflicts["yes"], known, "yes/(yes+no)；不归责具体产品或产品对")
+        _count(table, "内容冲突", "不确定", conflicts["unclear"], len(completed))
+        _count(table, "内容冲突", "状态缺失", len(completed) - known - conflicts["unclear"], len(completed))
     for product in range(1, max((c.product_count for c in cases), default=2) + 1):
         present = [c for c in completed if c.product_count >= product]
         label = _name(snapshot, product)
         for state in ("complete", "partial", "failed"):
-            _count(table, label, "输入" + STATE_NAMES[state], sum(c.result.get(f"answer{product}_input_status") == state for c in present), len(present))
-        _count(table, label, "输入状态缺失", sum(c.result.get(f"answer{product}_input_status") not in ("complete", "partial", "failed") for c in present), len(present))
-        observable = [c for c in present if c.result.get(f"answer{product}_input_status") in ("complete", "partial")]
+            _count(table, label, ("采集" if balanced else "输入") + STATE_NAMES[state], sum(c.result.get(f"answer{product}_input_status") == state for c in present), len(present))
+        if balanced:
+            _count(table, label, "采集状态未知", sum(c.result.get(f"answer{product}_input_status") is None for c in present), len(present), "程序没有可信采集结论；不等于产品失败，也不自动剔除可见证据充分的合法分")
+            _count(table, label, "采集状态异常", sum(c.result.get(f"answer{product}_input_status") not in (None, "complete", "partial", "failed") for c in present), len(present))
+        else:
+            _count(table, label, "输入状态缺失", sum(c.result.get(f"answer{product}_input_status") not in ("complete", "partial", "failed") for c in present), len(present))
+        observable = [c for c in present if gate_observable(c, product, protocol)]
         for gate, gate_label in (("response", "响应Gate"), ("safety", "安全Gate")):
             known = [c for c in observable if c.result.get(f"answer{product}_{gate}_gate") in GATE_STATES]
-            _count(table, label, gate_label + "通过率", sum(c.result.get(f"answer{product}_{gate}_gate") == "pass" for c in known), len(known), "pass/(pass+fail+unclear)；仅计对应产品输入complete/partial且Gate有效的结构化结果")
+            note = "pass/(pass+fail+unclear)；程序采集结论未知仍纳入可见Gate，排除可信采集failed" if balanced else "pass/(pass+fail+unclear)；仅计对应产品输入complete/partial且Gate有效的结构化结果"
+            _count(table, label, gate_label + "通过率", sum(c.result.get(f"answer{product}_{gate}_gate") == "pass" for c in known), len(known), note)
             _count(table, label, gate_label + "可观察覆盖率", len(known), len(present), "有效Gate/对应产品结构化完成条目；输入failed单列")
             for state in GATE_STATES:
                 _count(table, label, gate_label + STATE_NAMES[state], sum(c.result.get(f"answer{product}_{gate}_gate") == state for c in observable), len(observable), "不包含输入failed造成的强制unclear")
@@ -520,11 +544,11 @@ def _pair_tables(cases: list[Case], protocol: CompareProtocol, snapshot: dict, *
     return [gaps, gsb] if compact or common_three else [gaps, gsb, differences]
 
 
-def _gate_pairs(cases: list[Case], snapshot: dict) -> StatisticsTable:
+def _gate_pairs(cases: list[Case], snapshot: dict, protocol: CompareProtocol | None = None) -> StatisticsTable:
     table = _counts_table("C4．产品门槛对比（独立于评分样本）")
     count = max((c.product_count for c in cases), default=2)
     for a, b in combinations(range(1, count + 1), 2):
-        present = [c for c in cases if c.status == "done" and all(c.result.get(f"answer{p}_input_status") in ("complete", "partial") for p in (a, b))]
+        present = [c for c in cases if all(gate_observable(c, p, protocol) for p in (a, b))]
         for gate in ("response", "safety", "both"):
             labels = Counter()
             for case in present:
@@ -620,15 +644,15 @@ def build_compare_statistics(snapshot: dict, aligned_results: list[dict]) -> lis
         identity = standard if standard_id == "qa_competitor_compare" else f"{standard_id}@{standard}"
         label = f"标准 {identity} / 实现 {revision} / {count}产品"
         tables.append(StatisticsTable(label, ("说明",), rows=[["下列各区块仅统计本组；分位值与GSB均输出全部方向。"]]))
-        tables.append(_overview(cohort, snapshot))
         protocol = _policy(standard, revision, standard_id)
+        tables.append(_overview(cohort, snapshot, protocol))
         if protocol is None or any(c.identity_diagnostic for c in cohort):
             diagnoses = sorted({c.identity_diagnostic for c in cohort if c.identity_diagnostic})
             tables.append(StatisticsTable("评分统计不可用", ("原因",), rows=[["；".join(diagnoses) or "标准或实现版本缺失/不支持，未猜测评分范围或混合计算。"]]))
             continue
         tables.extend(_dimension_tables(cohort, protocol, snapshot))
         tables.extend(_pair_tables(cohort, protocol, snapshot))
-        tables.append(_gate_pairs(cohort, snapshot))
+        tables.append(_gate_pairs(cohort, snapshot, protocol))
         if count == 3:
             tables.append(_three_way(cohort, protocol, snapshot))
             tables.extend(_pair_tables(cohort, protocol, snapshot, common_three=True))
