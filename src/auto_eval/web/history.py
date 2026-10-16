@@ -316,7 +316,7 @@ def _snapshot_meta_row(data: dict, path: Path) -> dict:
         "judge_runtime": judge_runtime_display(data),
         **judge_runtime_summary(data),
         "preview": _preview(data),
-        "meta_version": 3,
+        "meta_version": 2,
     }
 
 
@@ -347,7 +347,10 @@ def _load_meta_row(path: Path) -> dict | None:
     if meta_path.exists():
         try:
             data = json.loads(meta_path.read_text(encoding="utf-8"))
-            if isinstance(data, dict) and data.get("meta_version") == 3:
+            # source_files is additive: old cached summaries remain valid.
+            # Also accept v3 summaries written by the initial source-export
+            # release, without forcing another full-history rebuild.
+            if isinstance(data, dict) and data.get("meta_version") in {2, 3}:
                 row = data
         except Exception:
             row = None
@@ -359,6 +362,7 @@ def _load_meta_row(path: Path) -> dict | None:
         row = _snapshot_meta_row(data, path)
         _write_meta(path, row)
     row.pop("meta_version", None)  # 版本号只落侧车，响应形状与旧实现一致
+    row.setdefault("source_files", [])
     status, error = _apply_interrupted_status(row.get("status"), row.get("error"))
     row["status"] = status
     row["error"] = error

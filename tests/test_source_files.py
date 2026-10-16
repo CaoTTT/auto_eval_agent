@@ -53,9 +53,9 @@ def test_metadata_survives_new_task_snapshot_reload_payload_and_old_sidecar(arch
     assert history.snapshot_payload(history.task_to_snapshot(restored))["source_files"] == [metadata]
     path = history._find_task_path(task.id)
     meta_path = history._meta_path(path)
-    meta_path.write_text(json.dumps({"meta_version": 2, "task_id": task.id}), encoding="utf-8")
+    meta_path.write_text(json.dumps({"meta_version": 1, "task_id": task.id}), encoding="utf-8")
     assert history.list_snapshots()[0]["source_files"] == [metadata]
-    assert json.loads(meta_path.read_text(encoding="utf-8"))["meta_version"] == 3
+    assert json.loads(meta_path.read_text(encoding="utf-8"))["meta_version"] == 2
     legacy = tasks._task_from_snapshot({"items": [], "mode": "compare"}, "legacy")
     assert legacy.source_files == []
     assert history.snapshot_payload({})["source_files"] == []
