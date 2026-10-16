@@ -108,6 +108,7 @@
             <td style="white-space:nowrap">
               <button @click="loadHistoryTask(h.task_id)">{{ loadingTaskId === h.task_id ? '加载中…' : '加载' }}</button>
               <button @click="exportXlsx(h.task_id)" :disabled="!!exportingTaskId">{{ exportingTaskId === h.task_id ? '正在生成 Excel…' : '导出 Excel' }}</button>
+              <source-file-downloads :task-id="h.task_id" :files="h.source_files"></source-file-downloads>
               <button @click="delHistory(h.task_id)" class="btn-danger">删除</button>
             </td>
             <td class="history-note-cell">
@@ -647,6 +648,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20261012_model_input_evidence"></script>
+  <script type="module" src="/static/app.js?v=20261016_source_files"></script>
 </body>
 </html>

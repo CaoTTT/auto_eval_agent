@@ -14,6 +14,7 @@ async function main() {
     console,AbortController,FormData,setTimeout,clearTimeout,
     async fetch(url,options){
       if(url==='/api/parse')return {ok:true,json:async()=>({items,errors:[]})};
+      if(url==='/api/upload/dataset-source')return {ok:true,json:async()=>({id:'uploaded-source'})};
       if(url==='/api/compare/preflight'){
         preflight=JSON.parse(options.body);
         return {ok:true,json:async()=>({blocked_turn_count:blocked?1:0,turns:[],findings:[]})};

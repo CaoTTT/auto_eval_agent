@@ -5,8 +5,19 @@ import {ScreenshotEvidence} from "./screenshot-evidence.js?v=20260920_audit";
 export {ref, computed, onMounted, onUnmounted, nextTick};
 export {selectEvidenceMode};
 
+export const SourceFileDownloads = {
+  props:{taskId:String,files:Array},
+  setup(props) {
+    const downloads=computed(()=>(props.files || []).filter(file=>file.id && props.taskId).map(file=>({
+      ...file, url:`/api/history/${encodeURIComponent(props.taskId)}/source-files/${encodeURIComponent(file.id)}`,
+    })));
+    return {downloads};
+  },
+  template:`<span v-if="downloads.length"><a v-for="file in downloads" :key="file.id" class="history-text-link" style="display:inline-block;margin-right:8px" :href="file.url" :download="file.filename" :title="file.filename">下载源文件{{downloads.length>1?'：'+file.filename:''}}</a></span><span v-else class="hint">未保存源文件</span>`,
+};
+
 export const CompareDatasetPanel = {
-  components:{CompareCaseList},
+  components:{CompareCaseList,SourceFileDownloads},
   props:{items:Array,datasetName:String,sourceTaskId:String,busy:Boolean,errors:Array,importReport:Object,revision:Number},
   emits:['upload','use','add','remove','query-upload','query-path'],
   setup(props) {
@@ -79,12 +90,13 @@ export const CompareDatasetPanel = {
         <p class="hint">复用该次任务提交的数据；同名文件的不同任务分别保留，不会覆盖原结果。</p>
         <p v-if="historyError" class="err" role="alert">{{historyError}}</p><p v-if="historyLoading" class="hint">正在读取历史数据…</p>
         <div class="table-scroll" v-else><table class="grid dataset-history-table"><thead><tr><th>测试文件 / 备注</th><th>用例数</th><th>评测时间</th><th>操作</th></tr></thead><tbody>
-          <tr v-for="row in historyRows" :key="row.task_id"><td><strong>{{row.dataset_name || '未命名数据'}}</strong><small>{{row.note || row.task_id}}</small></td><td>{{row.total}}</td><td>{{time(row.created_at)}}</td><td><button @click="previewDataset(row.task_id)" :disabled="previewLoading===row.task_id">{{previewLoading===row.task_id?'加载中…':'预览 Case'}}</button></td></tr>
+          <tr v-for="row in historyRows" :key="row.task_id"><td><strong>{{row.dataset_name || '未命名数据'}}</strong><small>{{row.note || row.task_id}}</small></td><td>{{row.total}}</td><td>{{time(row.created_at)}}</td><td><button @click="previewDataset(row.task_id)" :disabled="previewLoading===row.task_id">{{previewLoading===row.task_id?'加载中…':'预览 Case'}}</button> <source-file-downloads :task-id="row.task_id" :files="row.source_files"></source-file-downloads></td></tr>
         </tbody></table><p v-if="!historyRows.length" class="hint">暂无匹配的垂域视觉对比数据。</p></div>
         <div class="pagination" v-if="historyTotal>10"><span>共 {{historyTotal}} 份 · 每页 10 份</span><button @click="loadDatasets(historyPage-1)" :disabled="historyPage<=1 || historyLoading">上一页</button><span>{{historyPage}} / {{Math.ceil(historyTotal/10)}}</span><button @click="loadDatasets(historyPage+1)" :disabled="historyPage>=Math.ceil(historyTotal/10) || historyLoading">下一页</button></div>
         <section v-if="preview" class="dataset-preview" ref="previewPanel">
           <div class="dataset-toolbar"><strong>预览：{{preview.dataset_name || '未命名数据'}}</strong><button @click="closePreview">关闭预览</button></div>
           <p class="hint">来源：{{time(preview.created_at)}} · {{preview.task_id}}</p><p class="hint">{{previewItems.length}} 条 · 图文 {{counts(previewItems).image}} · 文字 {{previewItems.length-counts(previewItems).image}} · 长截图 {{counts(previewItems).shots}} · 录屏 {{counts(previewItems).videos}}</p>
+          <source-file-downloads :task-id="preview.task_id" :files="preview.source_files"></source-file-downloads>
           <compare-case-list :key="preview.task_id" :items="previewItems" readonly title="预览 Case"></compare-case-list>
           <button class="primary" @click="$emit('use',preview)" :disabled="!preview.items.length || busy">使用这份数据，新建评测</button>
         </section>
@@ -108,5 +120,5 @@ export const CompareDatasetPanel = {
 };
 
 export function createApp(options) {
-  return vueCreateApp({...options, components:{...options.components,CompareDatasetPanel,HumanComparePanel,ScreenshotEvidence}});
+  return vueCreateApp({...options, components:{...options.components,CompareDatasetPanel,HumanComparePanel,ScreenshotEvidence,SourceFileDownloads}});
 }

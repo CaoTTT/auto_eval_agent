@@ -124,6 +124,7 @@ def task_to_snapshot(task) -> dict:
         "session_name": task.session_name,
         "mode": task.mode,
         "dataset_name": getattr(task, "dataset_name", ""),
+        "source_files": getattr(task, "source_files", []),
         "note": getattr(task, "note", ""),
         "items": task.items,
         "options": task.options,
@@ -209,6 +210,12 @@ def delete_snapshot(task_id: str) -> bool:
         _meta_path(path).unlink(missing_ok=True)
     except Exception:
         pass
+    from .source_files import delete_task_sources
+
+    try:
+        delete_task_sources(task_id)
+    except (OSError, ValueError) as exc:
+        logger.warning("删除任务源文件失败: task_id=%s error=%s", task_id, exc)
     return True
 
 
@@ -293,6 +300,7 @@ def _snapshot_meta_row(data: dict, path: Path) -> dict:
         "task_id": task_id,
         "session_name": session_name,
         "dataset_name": data.get("dataset_name") or "",
+        "source_files": data.get("source_files") or [],
         "note": data.get("note") or "",
         "mode": data.get("mode"),
         "status": data.get("status"),
@@ -308,7 +316,7 @@ def _snapshot_meta_row(data: dict, path: Path) -> dict:
         "judge_runtime": judge_runtime_display(data),
         **judge_runtime_summary(data),
         "preview": _preview(data),
-        "meta_version": 2,
+        "meta_version": 3,
     }
 
 
@@ -339,7 +347,7 @@ def _load_meta_row(path: Path) -> dict | None:
     if meta_path.exists():
         try:
             data = json.loads(meta_path.read_text(encoding="utf-8"))
-            if isinstance(data, dict) and data.get("meta_version") == 2:
+            if isinstance(data, dict) and data.get("meta_version") == 3:
                 row = data
         except Exception:
             row = None
@@ -386,6 +394,7 @@ def snapshot_payload(data: dict) -> dict:
         "task_id": data.get("task_id"),
         "session_name": data.get("session_name"),
         "dataset_name": data.get("dataset_name") or "",
+        "source_files": data.get("source_files") or [],
         "note": data.get("note") or "",
         "mode": data.get("mode"),
         "items": data.get("items") or [],

@@ -1,4 +1,4 @@
-import { createApp, ref, computed, onMounted, onUnmounted, nextTick, selectEvidenceMode } from "./compare-data.js?v=20260920_audit";
+import { createApp, ref, computed, onMounted, onUnmounted, nextTick, selectEvidenceMode } from "./compare-data.js?v=20261016_source_files";
 
 createApp({
   setup() {
@@ -12,9 +12,11 @@ createApp({
     const mode = ref("rich_content");
     const isVideoMode = computed(() => true);
     const datasetName = ref("");
+    const datasetSourceFileId = ref("");
     const datasetSourceTaskId = ref("");
     const datasetRevision = ref(0);
     let datasetBaseline = "", datasetImportVersion = 0;
+    let datasetImportController = null;
     const items = ref([]);
     let opItemSequence = 0;
     const opItems = ref([newOpItem()]);
@@ -945,10 +947,17 @@ createApp({
       return evaluationProfiles.value.find((profile) => profile.id === id)?.display || id;
     }
 
-    function switchMode(k) {
+    function cancelDatasetImport() {
       datasetImportVersion++;
+      datasetImportController?.abort();
+      datasetImportController = null;
+      opPreparing.value = false;
+    }
+
+    function switchMode(k) {
+      cancelDatasetImport();
       importReport.value = null;
-      opPreparing.value=false;
+      datasetSourceFileId.value = "";
       datasetSourceTaskId.value = "";
       datasetBaseline = "";
       cancelHistoryLoad();
@@ -1011,10 +1020,10 @@ createApp({
     }
     function useComparisonDataset(data) {
       if (mode.value !== 'compare' || !confirmDatasetReplacement()) return;
-      datasetImportVersion++;opPreparing.value=false;cancelHistoryLoad();detachResultView();
+      cancelDatasetImport();cancelHistoryLoad();detachResultView();
       items.value=JSON.parse(JSON.stringify(data.items));
       opItems.value=comparisonDraftRows(items.value);
-      datasetName.value=data.dataset_name || '历史测评数据';datasetSourceTaskId.value=data.task_id;
+      datasetName.value=data.dataset_name || '历史测评数据';datasetSourceFileId.value='';datasetSourceTaskId.value=data.task_id;
       opPage.value=1;errors.value=[];importReport.value=null;datasetBaseline=draftFingerprint();datasetRevision.value++;
     }
     async function onQueryImage(event, index) {
@@ -1082,25 +1091,31 @@ createApp({
       const file = e.target.files && e.target.files[0];
       e.target.value = "";
       if (!file) return;
-      const importVersion = ++datasetImportVersion;
+      cancelDatasetImport();
+      const importVersion = datasetImportVersion;
       const importMode = mode.value;
+      const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+      datasetImportController = controller;
+      const isCurrentImport = () => importVersion === datasetImportVersion && importMode === mode.value && !disposed;
       opPreparing.value = true;
       errors.value = [];
       importReport.value = null;
       try {
         const content = await file.text();
+        if (!isCurrentImport()) return;
         const isCsv = /\.csv$/i.test(file.name || "");
         console.log("[onOpManifestFile] mode:", mode.value, "csv:", isCsv, "file size:", content.length);
         const parseBody = isCsv
-          ? { mode: mode.value, csv: content }
-          : { mode: mode.value, jsonl: content };
+          ? { mode: importMode, csv: content }
+          : { mode: importMode, jsonl: content };
         const parseResponse = await fetch("/api/parse", {
           method: "POST",
+          ...(controller ? {signal: controller.signal} : {}),
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(parseBody),
         });
         const parsed = await parseResponse.json().catch(() => ({}));
-        if (importVersion !== datasetImportVersion || importMode !== mode.value) return;
+        if (!isCurrentImport()) return;
         console.log("[onOpManifestFile] response ok:", parseResponse.ok, "items:", (parsed.items || []).length, "errors:", (parsed.errors || []).length);
         if (!parseResponse.ok) throw new Error(parsed.detail || (isCsv ? "CSV 解析请求失败" : "JSON / JSONL 解析请求失败"));
         const importErrors = [...(parsed.errors || [])];
@@ -1116,9 +1131,21 @@ createApp({
         }
 
         if (mode.value === 'compare' && !confirmDatasetReplacement()) return;
+        const sourceForm = new FormData();
+        sourceForm.append("file", file);
+        const uploadResponse = await fetch("/api/upload/dataset-source", {
+          method: "POST", body: sourceForm,
+          ...(controller ? {signal: controller.signal} : {}),
+        });
+        const sourceFile = await uploadResponse.json().catch(() => ({}));
+        if (!isCurrentImport()) return;
+        if (!uploadResponse.ok || !sourceFile.id) {
+          throw new Error(typeof sourceFile.detail === "string" ? sourceFile.detail : "源文件保存失败，请重新导入");
+        }
         importReport.value = report;
         if (mode.value === 'compare') { cancelHistoryLoad();detachResultView(); }
         datasetName.value = file.name || '';
+        datasetSourceFileId.value = sourceFile.id;
         datasetSourceTaskId.value = '';
         errors.value = importErrors;
         const imported = parsed.items || [];
@@ -1163,10 +1190,13 @@ createApp({
         }
       } catch (error) {
         console.error("[onOpManifestFile] error:", error);
-        if (importVersion !== datasetImportVersion) return;
+        if (!isCurrentImport()) return;
         errors.value = ["批量导入失败：" + (error?.message || String(error))];
       } finally {
-        if (importVersion === datasetImportVersion) opPreparing.value = false;
+        if (importVersion === datasetImportVersion) {
+          opPreparing.value = false;
+          datasetImportController = null;
+        }
       }
     }
 
@@ -1250,6 +1280,8 @@ createApp({
         mode: mode.value,
         items: submittedItems,
         dataset_name: datasetName.value || "手动录入",
+        ...(datasetSourceFileId.value ? {source_file_id: datasetSourceFileId.value}
+          : datasetSourceTaskId.value ? {source_task_id: datasetSourceTaskId.value} : {}),
         evaluation_profile: mode.value === "compare" ? selectedEvaluationProfile.value : null,
         options: {
           ...(mode.value === 'compare' && datasetSourceTaskId.value ? {dataset_source_task_id:datasetSourceTaskId.value} : {}),
@@ -1990,8 +2022,7 @@ createApp({
     }
 
     async function loadHistoryTask(id) {
-      datasetImportVersion++;
-      opPreparing.value=false;
+      cancelDatasetImport();
       cancelHistoryLoad();
       const version = historyLoadVersion;
       let loaded = false;
@@ -2023,6 +2054,8 @@ createApp({
           selectedEvaluationProfile.value = d.evaluation_profile || defaultEvaluationProfile();
         }
         datasetName.value = d.dataset_name || "";
+        datasetSourceFileId.value = "";
+        datasetSourceTaskId.value = d.task_id || id;
         items.value = d.items || [];
         if (d.mode === "compare") {
           opItems.value = items.value.map(item => ({
@@ -2042,8 +2075,16 @@ createApp({
         }
         if (d.mode === 'compare') {
           opItems.value = comparisonDraftRows(items.value);
-          datasetSourceTaskId.value = d.task_id || id;
           datasetBaseline = draftFingerprint();datasetRevision.value++;
+        } else {
+          opItems.value = items.value.map(item => ({...newOpItem(),
+            id: item.id || "", query: item.query || "", context: item.context || "", category: item.category || "",
+            videoPath: item.video_path || "", videoName: String(item.video_path || "").split(/[\\/]/).pop(),
+            frames: item.frames || [], answer: item.answer_text || "",
+            taskStartTime: item.task_start_time ?? null, taskEndTime: item.task_end_time ?? null,
+            sourceLine: item.source_line ?? null, sourceData: item.source_data || null,
+          }));
+          opPage.value = 1;
         }
         modalityFilter.value = "";
         results.value = d.results || [];
@@ -2188,7 +2229,7 @@ createApp({
     onUnmounted(() => {
       disposed = true;
       historyListVersion++;
-      datasetImportVersion++;
+      cancelDatasetImport();
       cancelHistoryLoad();
       if (progressClockTimer != null) window.clearInterval(progressClockTimer);
       if (queueRefreshTimer != null) window.clearInterval(queueRefreshTimer);
@@ -2201,7 +2242,7 @@ createApp({
       scoreDimensions, scoreRules, scoreRuleJoin, filterProducts, scoreOperators, scoreRuleNeedsNumber,
       addScoreRule, changeScoreDimension, removeScoreRule, clearScoreRules, scoreFilterError, resetResultFilters,
       reasonOnlyColumn, cellReasons, reasonsExpanded, toggleCellReasons, allReasonsExpanded, setAllReasonsExpanded,
-      datasetSourceTaskId, datasetRevision, useComparisonDataset,
+      datasetSourceFileId, datasetSourceTaskId, datasetRevision, useComparisonDataset,
       evaluationProfiles, compareProfiles, selectedEvaluationProfile, evaluationProfileLabel,
       taskEvaluationProfile, taskProtocolManifest, taskProtocolDiagnostics, taskIsChat, summaryDimensions, setTaskProtocol,
       judgeModelProfiles, selectedJudgeModelProfile, selectedModelProfile, enableThinking, changeJudgeModel,

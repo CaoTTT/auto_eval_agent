@@ -44,7 +44,7 @@ def test_runtime_round_trip_and_old_sidecar_upgrade(tmp_path, monkeypatch):
     assert listed["judge_runtime"]["judges"][0]["enable_thinking"] is False
     assert "private-provider" not in json.dumps(listed)
     assert "PRIVATE_KEY_SLOT" not in json.dumps(listed)
-    assert json.loads(meta.read_text(encoding="utf-8"))["meta_version"] == 2
+    assert json.loads(meta.read_text(encoding="utf-8"))["meta_version"] == 3
 
 
 @pytest.mark.parametrize("mode", ["rich_content", "compare"])
