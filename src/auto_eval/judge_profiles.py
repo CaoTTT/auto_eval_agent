@@ -22,26 +22,39 @@ def is_bailian(judge: JudgeConfig) -> bool:
 def model_profiles(config: AppConfig) -> list[JudgeModelProfile]:
     profiles = list(config.judge_model_profiles)
     if not profiles:
+        # 选项来源改走 judges.yaml 的 models: 选择列表（配置驱动，改列表下拉自动变），
+        # 不再遍历硬编码的 BAILIAN_MODELS。models 列表为空时回落旧行为
+        # （bailian 判官沿用 BAILIAN_MODELS、其他判官只用自身模型），保证没有
+        # models 列表的旧配置文件 / 测试夹具行为不变。
         for judge in config.judges:
-            model = judge.model or judge.name
-            if is_bailian(judge) and model.lower() in BAILIAN_MODELS:
-                for model_id, (profile_id, display) in BAILIAN_MODELS.items():
+            base_model = (judge.model or judge.name).lower()
+            thinking = judge.enable_thinking if judge.enable_thinking is not None else True
+            if config.models:
+                allowed = [str(m) for m in config.models]
+            elif is_bailian(judge) and base_model in BAILIAN_MODELS:
+                allowed = list(BAILIAN_MODELS)
+            else:
+                allowed = [judge.model or judge.name]  # 保留原始大小写（非百炼模型名可能区分大小写）
+            for model in allowed:
+                ml = str(model).lower()
+                if ml in BAILIAN_MODELS:
+                    profile_id, display = BAILIAN_MODELS[ml]
                     # Explicit server defaults take precedence over provider defaults.
-                    thinking = judge.enable_thinking if judge.enable_thinking is not None else True
-                    rate = judge.rate_limit if model_id == model.lower() else None
-                    if model_id == "qwen3.8-flash" and rate is None:
-                        rate = default_bailian_rate_limit(model_id)
+                    rate = judge.rate_limit if ml == base_model else None
+                    if rate is None and ml == "qwen3.8-flash":
+                        rate = default_bailian_rate_limit(ml)
                     profiles.append(JudgeModelProfile(
                         id=profile_id if len(config.judges) == 1 else f"{judge.name}_{profile_id}",
-                        display=display, judge_name=judge.name, model=model_id,
+                        display=display, judge_name=judge.name, model=ml,
                         supports_thinking=True, default_enable_thinking=thinking, rate_limit=rate,
                     ))
-            else:
-                profiles.append(JudgeModelProfile(
-                    id=f"configured_{judge.name}", display=model, judge_name=judge.name, model=model,
-                    supports_thinking=judge.enable_thinking is not None,
-                    default_enable_thinking=judge.enable_thinking, rate_limit=judge.rate_limit,
-                ))
+                else:
+                    profiles.append(JudgeModelProfile(
+                        id=f"configured_{judge.name}_{ml}", display=str(model), judge_name=judge.name,
+                        model=str(model),
+                        supports_thinking=judge.enable_thinking is not None,
+                        default_enable_thinking=judge.enable_thinking, rate_limit=judge.rate_limit,
+                    ))
     names = {j.name for j in config.judges}
     if len({p.id for p in profiles}) != len(profiles):
         raise ValueError("裁判模型配置 ID 不可重复")

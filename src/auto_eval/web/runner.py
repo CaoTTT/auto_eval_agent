@@ -14,14 +14,11 @@ from datetime import datetime
 from pathlib import Path
 
 from ..paths import RUNS_DIR
-from ..preparation import PreparationLimiter, run_preparation, preparation_limit, preparation_concurrency
+from ..preparation import run_preparation
 from ..timing import StageTimings, collect_timings, timing_span
-from ..task_control import PauseRequested, bind_pause_check, check_pause, pause_aware
-from ..request_throttle import (
-    recommended_concurrency, supports_bailian_pacing,
-    wait_for_active, SECOND_REQUEST_LIMIT,
-)
-from ..config import AppConfig, VisualModeProfile
+from ..task_control import PauseRequested, bind_pause_check, check_pause, pause_aware, wait_for_active
+from .scheduler import MAX_CONCURRENCY, MODEL_LIMITER, PIPELINE_LIMITER, get_settings
+from ..config import AppConfig, JudgeConfig, VisualModeProfile
 from ..query_images import prepare_query_images, QueryImageError, PREPARED_FIELDS
 from ..judges import (
     JudgeClient,
@@ -298,6 +295,25 @@ async def run_eval(task: Task, cfg: AppConfig) -> None:
             retire_task(task)
 
 
+def _overridden_judge(judge: JudgeConfig, settings, endpoints) -> JudgeConfig:
+    """把全局设置的端点预设（base_url+api_key_env 成对）与 model 覆盖到裁判配置。
+
+    选中 active_endpoint 时以其 base_url/api_key_env 覆盖裁判自身值；设了全局
+    model 时覆盖 model。三者均未覆盖时返回原对象（不复制）。纯函数，便于单测。
+    """
+    update: dict = {}
+    if settings.active_endpoint:
+        preset = next(
+            (e for e in endpoints if e.name == settings.active_endpoint), None
+        )
+        if preset:
+            update["base_url"] = preset.base_url
+            update["api_key_env"] = preset.api_key_env  # 成对一起覆盖
+    if settings.model:
+        update["model"] = settings.model
+    return judge.model_copy(update=update) if update else judge
+
+
 def _make_item_evaluator(
     task: Task,
     cfg: AppConfig,
@@ -343,7 +359,8 @@ def _make_item_evaluator(
     clients: list[JudgeClient] = []
     try:
         for j in judges_cfg:
-            clients.append(JudgeClient(j))
+            # 全局设置的端点预设与 model 覆盖，落到构造客户端前的裁判配置上
+            clients.append(JudgeClient(_overridden_judge(j, get_settings(), cfg.endpoints)))
     except BaseException:
         if clients:
             spawn_background(_aclose_judge_clients(clients))
@@ -364,17 +381,19 @@ def _make_item_evaluator(
     )
     # 垂域→中文显示名映射（rich_content.yaml 的 category_display）
     category_display = rich_profile.category_display if rich_profile else {}
-    capacity = max(1, min(128, int(runtime_options.get("concurrency", recommended_concurrency(judges_cfg)))))
-    sem = asyncio.Semaphore(capacity)
-    media_capacity = preparation_concurrency()
-    media_sem = PreparationLimiter(media_capacity)
-    if media_sem is not None:
-        from ..request_throttle import pacing_config
-        log_event("请求调度", "配置请求与媒体调度", details={
-            "Case容量": capacity, "媒体并发": media_capacity,
-            "模型调度": [pacing_config(j) for j in judges_cfg if supports_bailian_pacing(j)],
-        })
-    eval_timeout = float(runtime_options.get("eval_timeout_s") or runtime_options.get("eval_timeout") or 900.0)
+    # 模型并发交给全局统一管控：整题准入由 PIPELINE_LIMITER，模型调用由
+    # MODEL_LIMITER（速率令牌桶 + 在途上限）。这里的 per-task semaphore 只是
+    # 保留"取得槽位后启动计时"的结构，容量取全局上限使其绝不成为比全局更紧的
+    # 约束——rich 也没有每任务的并发上限，前端也不再提供每任务"评估并发数"。
+    sem = asyncio.Semaphore(MAX_CONCURRENCY)
+    settings_limit = get_settings().concurrency
+    log_event("请求调度", "配置请求与媒体调度", details={
+        "模型速率(每窗口)": MODEL_LIMITER.stats()["limit"],
+        "模型在途上限": MODEL_LIMITER.stats()["max_in_flight"],
+        "流水线准入": PIPELINE_LIMITER.limit,
+        "设置并发": settings_limit,
+    })
+    eval_timeout = float(runtime_options.get("eval_timeout_s") or runtime_options.get("eval_timeout") or get_settings().eval_timeout_s)
     loop = asyncio.get_running_loop()
 
     async def _default_on_result(idx: int, res: dict, started: float) -> None:
@@ -627,17 +646,42 @@ def _make_item_evaluator(
                                     progress=15,
                                     progress_message="正在重新执行单题评测",
                                 )
-                            res = await wait_for_active(
-                                _eval_one(
-                                    task.mode, idx, item_dict,
-                                    rich_judges=rich_judges,
-                                    compare_judges=compare_judges,
-                                    evidence_callback=save_evidence,
-                                    category_display=category_display,
-                                    **({"conversation_input": conversation_input} if conversation_input else {}),
-                                ),
-                                timeout=eval_timeout,
-                            )
+                            if MODEL_LIMITER.would_block():
+                                # 展示层提示：暂无可发令牌，需排队等限流。
+                                log_event(
+                                    "模型调度",
+                                    "等待模型限流令牌",
+                                    details={
+                                        "模型在途": MODEL_LIMITER.stats()["running"],
+                                        "模型排队": MODEL_LIMITER.stats()["queued"],
+                                    },
+                                    progress=13,
+                                    progress_message="等待模型限流令牌",
+                                )
+                            # 每次实际模型请求（含重试的每一次 _eval_one）各取一个全局
+                            # 令牌：重试不免费。等令牌不计入单题超时（wait_for_active
+                            # 只包 _eval_one）；等待期间可被暂停中断。
+                            acquired = False
+                            try:
+                                # 等令牌不计入单题超时：wait_for_active 只包 _eval_one。
+                                await pause_aware(MODEL_LIMITER.acquire())
+                                acquired = True
+                                check_pause()
+                                res = await wait_for_active(
+                                    _eval_one(
+                                        task.mode, idx, item_dict,
+                                        rich_judges=rich_judges,
+                                        compare_judges=compare_judges,
+                                        evidence_callback=save_evidence,
+                                        category_display=category_display,
+                                        **({"conversation_input": conversation_input} if conversation_input else {}),
+                                    ),
+                                    timeout=eval_timeout,
+                                )
+                            finally:
+                                # 超时/异常/暂停都归还令牌，避免在途计数泄漏。
+                                if acquired:
+                                    MODEL_LIMITER.release()
                             break
                         except asyncio.TimeoutError:
                             last_error = TimeoutError(f"单题评估超过 {eval_timeout:.0f} 秒")
@@ -733,25 +777,29 @@ def _make_item_evaluator(
 
     async def limited_one(idx: int, item_dict: dict) -> dict:
         pending_judge_traces: list[tuple[str, dict]] = []
-        with preparation_limit(media_sem, priority=idx), bind_pause_check(lambda: task.pause_requested):
-            try:
-                return await one(idx, item_dict, pending_judge_traces)
-            except PauseRequested:
-                # Pause is an unfinished item, not an evaluation failure. Keep
-                # any completed/billable call traces without publishing a score
-                # or consuming its pending index; resume will evaluate it again.
-                if pending_judge_traces:
-                    await asyncio.to_thread(flush_web_trace_records, pending_judge_traces, {
-                        "index": idx, "item_id": item_dict.get("id", f"q{idx}"),
-                        "evaluation_status": "paused", "evaluation_pending": True,
+        # 整题持有 PIPELINE_LIMITER（预处理 + 等模型槽 + 模型调用同一名额），封顶
+        # 「抽帧中 + 已抽帧等模型」总关键帧内存；模型调用再经 MODEL_LIMITER 速率+在途。
+        # bind_pause_check 是同步 contextmanager，须用 with；PIPELINE_LIMITER.slot 用 async with。
+        async with PIPELINE_LIMITER.slot():
+            with bind_pause_check(lambda: task.pause_requested):
+                try:
+                    return await one(idx, item_dict, pending_judge_traces)
+                except PauseRequested:
+                    # Pause is an unfinished item, not an evaluation failure. Keep
+                    # any completed/billable call traces without publishing a score
+                    # or consuming its pending index; resume will evaluate it again.
+                    if pending_judge_traces:
+                        await asyncio.to_thread(flush_web_trace_records, pending_judge_traces, {
+                            "index": idx, "item_id": item_dict.get("id", f"q{idx}"),
+                            "evaluation_status": "paused", "evaluation_pending": True,
+                        })
+                    previous = task.item_progress.get(str(idx)) or {}
+                    _record_progress(task, idx, {
+                        **previous, "item_index": idx, "status": "paused",
+                        "message": "已暂停，尚未完成的评测将在恢复后继续",
+                        "finished_at": int(time.time() * 1000),
                     })
-                previous = task.item_progress.get(str(idx)) or {}
-                _record_progress(task, idx, {
-                    **previous, "item_index": idx, "status": "paused",
-                    "message": "已暂停，尚未完成的评测将在恢复后继续",
-                    "finished_at": int(time.time() * 1000),
-                })
-                return {"_paused": True}
+                    return {"_paused": True}
 
     return limited_one, clients
 
@@ -849,7 +897,7 @@ async def run_resume(task: Task, cfg: AppConfig) -> None:
     clients: list[JudgeClient] = []
     targets = set(attempt["indexes"])
     pending = task.execution_control.setdefault("pending_indexes", sorted(targets))
-    options = {**task.options, "concurrency": attempt["concurrency"], "_retry_id": attempt["id"]}
+    options = {**task.options, "concurrency": attempt.get("concurrency", 4), "_retry_id": attempt["id"]}
     working_items: dict[int, dict] = {}
 
     async def on_result(index: int, result: dict, started: float) -> None:
@@ -922,7 +970,7 @@ async def run_resume(task: Task, cfg: AppConfig) -> None:
                 break
             await _run_update_batch_body(
                 task, cfg, [(i, task.items[i]) for i in list(batch["remaining"])],
-                options={**batch["options"], "concurrency": attempt["concurrency"], "_retry_id": attempt["id"]},
+                options={**batch["options"], "concurrency": attempt.get("concurrency", 4), "_retry_id": attempt["id"]},
                 batch_id=batch_id,
             )
             if batch.get("remaining") and not task.pause_requested:

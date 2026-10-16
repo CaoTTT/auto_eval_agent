@@ -36,12 +36,9 @@ createApp({
     const selectedModelProfile = computed(() =>
       judgeModelProfiles.value.find(profile => profile.id === selectedJudgeModelProfile.value) || null
     );
-    function changeJudgeModel({ resetConcurrency = false } = {}) {
+    function changeJudgeModel() {
       const profile = selectedModelProfile.value;
       enableThinking.value = profile?.supports_thinking === true && profile.default_enable_thinking === true;
-      const recommended = Math.max(1, Math.min(128, profile?.recommended_concurrency || 4));
-      concurrency.value = resetConcurrency || !Number.isInteger(concurrency.value) || concurrency.value < 1
-        ? recommended : Math.min(concurrency.value, recommended);
     }
     function thinkingLabel(value) {
       return value === true ? "思考开启" : value === false ? "思考关闭" : "思考未记录";
@@ -63,8 +60,61 @@ createApp({
     const compareProfiles = computed(() =>
       evaluationProfiles.value.filter((profile) => (profile.modes || []).includes("compare"))
     );
-    const concurrency = ref(4);
+    const activeEndpoint = ref("");
+    const globalConcurrency = ref(10);
+    const maxInFlight = ref(50);
+    const waitingCapacity = ref(10);
+    const endpointOptions = ref([]);
     const mediaConcurrency = ref(4);
+    const showGlobalSettings = ref(false);
+    const savingGlobalSettings = ref(false);
+    const globalSaveMsg = ref("");
+    const globalSaveError = ref(false);
+
+    async function loadGlobalSettings() {
+      try {
+        const response = await fetch("/api/settings", { cache: "no-store" });
+        if (!response.ok) return;
+        const data = await response.json();
+        activeEndpoint.value = data.active_endpoint || "";
+        globalConcurrency.value = data.concurrency ?? 10;
+        maxInFlight.value = data.max_in_flight ?? 50;
+        waitingCapacity.value = data.waiting_capacity ?? 10;
+        endpointOptions.value = data.endpoints || [];
+      } catch (_) {}
+    }
+
+    async function saveGlobalSettings() {
+      if (savingGlobalSettings.value) return;
+      savingGlobalSettings.value = true;
+      globalSaveMsg.value = "";
+      globalSaveError.value = false;
+      try {
+        const response = await fetch("/api/settings", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            active_endpoint: activeEndpoint.value || "",
+            concurrency: Number(globalConcurrency.value),
+            max_in_flight: Number(maxInFlight.value),
+            waiting_capacity: Number(waitingCapacity.value),
+          }),
+        });
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          globalSaveError.value = true;
+          globalSaveMsg.value = "保存失败：" + (data.detail || "HTTP " + response.status);
+        } else {
+          globalSaveMsg.value = "已保存并生效。";
+        }
+      } catch (error) {
+        globalSaveError.value = true;
+        globalSaveMsg.value = "保存失败：" + (error?.message || "网络错误");
+      } finally {
+        savingGlobalSettings.value = false;
+      }
+    }
+
     const requestPacing = computed(() => {
       if (selectedModelProfile.value) return !!selectedModelProfile.value.request_pacing;
       const selected = judges.value.filter((j) => selectedJudges.value.includes(j.name));
@@ -354,7 +404,6 @@ createApp({
     const executionControl = ref({});
     const selectedActiveRuns = ref(0);
     const controlSubmitting = ref(false);
-    const resumeConcurrency = ref(4);
     const resumeFailed = ref(false);
     const isPausing = computed(() => executionControl.value.state === "pausing");
     const canPauseTask = computed(() => !!taskId.value && (running.value || selectedActiveRuns.value > 0 || ["queued", "running"].includes(repairStatus.value) || executionControl.value.save_error));
@@ -1145,10 +1194,6 @@ createApp({
         runError.value = "请选择可用的裁判模型。";
         return;
       }
-      if (!Number.isInteger(concurrency.value) || concurrency.value < 1 || concurrency.value > 128) {
-        runError.value = "评估并发数必须为 1–128 的整数";
-        return;
-      }
       const valid = mode.value === 'compare' ? opItems.value : opItems.value.filter(opItemReady);
       if (mode.value === 'compare' && valid.some(item => !opItemReady(item))) {
         runError.value = '存在未填写问题或缺少产品证据的 Case，请展开检查；不会跳过这些条目提交。';
@@ -1213,7 +1258,6 @@ createApp({
             judge_model_profile: selectedModelProfile.value.id,
             ...(selectedModelProfile.value.supports_thinking === true ? { enable_thinking: enableThinking.value } : {}),
           } : {}),
-          concurrency: concurrency.value,
           eval_timeout_s: evalTimeout.value,
         },
       };
@@ -1281,7 +1325,6 @@ createApp({
       taskJudgeSummary.value = {judge_model: d.judge_model, enable_thinking_label: d.enable_thinking_label};
       executionControl.value = {};
       selectedActiveRuns.value = 1;
-      resumeConcurrency.value = concurrency.value;
       selectedTaskTiming.value = receiveTaskTiming(d.task_timing);
       repairStatus.value = "idle";
       activeRetry.value = null;
@@ -1399,16 +1442,12 @@ createApp({
     async function controlTask(action) {
       const id = taskId.value, version = historyLoadVersion;
       if (!id || controlSubmitting.value || loadingTaskId.value) return;
-      if (action === "resume" && (!Number.isInteger(resumeConcurrency.value) || resumeConcurrency.value < 1 || resumeConcurrency.value > 128)) {
-        runError.value = "恢复并发数必须为 1–128 的整数";
-        return;
-      }
       controlSubmitting.value = true;
       runError.value = "";
       try {
         const response = await fetch(`/api/eval/${encodeURIComponent(id)}/${action}`, {
           method: "POST", headers: {"Content-Type": "application/json"},
-          ...(action === "resume" ? {body: JSON.stringify({concurrency: resumeConcurrency.value, include_failed: resumeFailed.value, idempotency_key: `resume-${Date.now()}-${Math.random().toString(16).slice(2)}`})} : {}),
+          ...(action === "resume" ? {body: JSON.stringify({include_failed: resumeFailed.value, idempotency_key: `resume-${Date.now()}-${Math.random().toString(16).slice(2)}`})} : {}),
         });
         const data = await response.json();
         if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : "操作失败，请刷新后重试");
@@ -1995,7 +2034,6 @@ createApp({
         repairStatus.value = d.repair_status || "idle";
         executionControl.value = d.execution_control || {};
         selectedActiveRuns.value = d.active_runs || 0;
-        resumeConcurrency.value = Number(executionControl.value.concurrency || d.options?.concurrency || 4);
         resumeFailed.value = false;
         const retryRuns = Object.values(d.retry_runs || {});
         activeRetry.value = retryRuns.sort(
@@ -2117,9 +2155,8 @@ createApp({
       evaluationProfiles.value = d.evaluation_profiles || [];
       selectedEvaluationProfile.value = defaultEvaluationProfile();
       selectedJudges.value = defaultJudgeSelection();
-      const selectedJudge = judges.value.find((j) => j.name === selectedJudges.value[0]);
-      concurrency.value = selectedJudge?.recommended_concurrency || 4;
-      if (selectedModelProfile.value) changeJudgeModel({ resetConcurrency: true });
+      await loadGlobalSettings();  // 加载全局 API/端点 + 并发/在途/等待容量
+      if (selectedModelProfile.value) changeJudgeModel();
       loadHistory();
       loadQueue();
       queueRefreshTimer = window.setInterval(loadQueue, 2000);
@@ -2145,11 +2182,13 @@ createApp({
       evaluationProfiles, compareProfiles, selectedEvaluationProfile, evaluationProfileLabel,
       judgeModelProfiles, selectedJudgeModelProfile, selectedModelProfile, enableThinking, changeJudgeModel,
       taskJudgeRuntime, taskJudgeSummary, thinkingLabel, judgeRuntimeLabel,
-      concurrency, mediaConcurrency, requestPacing, evalTimeout, submitting, running, progress, total, results, summary, taskId, runError,
+      mediaConcurrency, requestPacing, evalTimeout, submitting, running, progress, total, results, summary, taskId, runError,
       pacingStatus, pacingError, pacingNumber, pacingWaitLabel, pacingLimitLabel,
       queueState, queueEntries, selectedTaskStatus, queueNotice, taskStatusLabel, queueKindLabel,
       selectedTaskTiming, taskElapsedSeconds, formatTaskDuration,
-      executionControl, controlSubmitting, resumeConcurrency, resumeFailed, isPausing, canPauseTask, canResumeTask, controlTask,
+      executionControl, controlSubmitting, resumeFailed, isPausing, canPauseTask, canResumeTask, controlTask,
+      activeEndpoint, globalConcurrency, maxInFlight, waitingCapacity, endpointOptions, saveGlobalSettings,
+      showGlobalSettings, savingGlobalSettings, globalSaveMsg, globalSaveError,
       repairStatus, retryStatusLabel, retrySubmitting, selectedRetryIndexes, activeRetry,
       failedResultIndexes, retryIndexSelected, toggleRetryIndex, retryFailedCases,
       itemProgress, progressEvents, expandedProgressLogs, pagedProgressRows, progressStages,

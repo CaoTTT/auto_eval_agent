@@ -119,7 +119,7 @@ async def run_preparation(fn: Callable[..., T], *args, timeout: float, **kwargs)
     if limit is None:
         with timing_span("media"):
             return await pause_aware(_run_preparation(fn, *args, timeout=timeout, **kwargs))
-    from .request_throttle import admission_wait
+    from .task_control import admission_wait
 
     with timing_span("media_queue"), admission_wait():
         if isinstance(limit, PreparationLimiter):

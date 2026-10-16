@@ -12,8 +12,6 @@ import httpx
 from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimitError
 
 from .observability import current_context, error_details, log_event
-from .request_throttle import RequestThrottle, estimate_input_tokens, wait_for_active
-from .request_transport import HeaderAdmission, header_admission, paced_http_client
 from .task_control import check_pause, pause_aware
 from .timing import record_model_attempt, timing_span
 
@@ -81,7 +79,11 @@ def build_openai_client(
     connect_timeout_s: float,
     read_timeout_s: float,
 ):
-    """创建禁用 SDK 内置重试的客户端，由本模块统一控制重试次数。"""
+    """创建禁用 SDK 内置重试的客户端，由本模块统一控制重试次数。
+
+    限流在 web 调度器统一接管后不再注入行为追踪的 paced_http_client；
+    这里用普通的 httpx 连接池，重试/暂停由 llm_stream / runner 配合完成。
+    """
     from openai import AsyncOpenAI
 
     timeout = httpx.Timeout(
@@ -96,9 +98,7 @@ def build_openai_client(
         api_key=api_key,
         timeout=timeout,
         max_retries=0,
-        http_client=paced_http_client(timeout),
     )
-    client._auto_eval_header_pacing = True
     return client
 
 
@@ -391,85 +391,31 @@ async def stream_chat_completion(
     max_attempts: int = 4,
     retry_base_s: float = 1.0,
     retry_max_s: float = 20.0,
-    throttle: RequestThrottle | None = None,
 ):
     """始终使用流式接口，成功后返回与完整响应等价的聚合对象。
 
     callback 在一次尝试完整成功后才收到分片，防止断流重试造成重复输出。
+
+    模型调用速率/在途限流由调用方（web 调度器的 MODEL_LIMITER）先取令牌再
+    调用本函数，故此处不再做任何限流，只负责单次流式调用与超时重试。
     """
     if max_attempts < 1:
         raise ValueError("max_attempts 必须大于等于 1")
     check_pause()
-    if throttle is not None and not getattr(client, "_auto_eval_header_pacing", False):
-        from openai import AsyncOpenAI
-
-        if isinstance(client, AsyncOpenAI):
-            raise ValueError("百炼限流调用必须使用 build_openai_client 创建的传输客户端")
-
-    input_tokens = await pause_aware(asyncio.to_thread(estimate_input_tokens, kwargs)) if throttle else 0
-    request_kind = "vision" if any(
-        isinstance(message.get("content"), list) and any(
-            part.get("type") == "image_url" for part in message["content"]
-        ) for message in kwargs.get("messages", [])
-    ) else "text"
 
     async def send(include_usage: bool):
         check_pause()
-        reservation = None
-        admission = None
-        response = None
-        failure = None
-        request = kwargs
-        if throttle is not None:
-            log_event("请求调度", "等待发送额度", progress=30,
-                      progress_message="等待模型请求额度（请求数 / Token / 在途上限）")
-            if getattr(client, "_auto_eval_header_pacing", False):
-                admission = HeaderAdmission(throttle, input_tokens, request_kind)
-            request = {**kwargs, "extra_headers": {
-                "X-DashScope-Wait-Timeout": "30", **(kwargs.get("extra_headers") or {}),
-            }}
-
         async def collect():
-            nonlocal reservation
             check_pause()
-            if not getattr(client, "_auto_eval_header_pacing", False):
-                # Synthetic clients have no HTTP header hook. Keep acquisition
-                # and the call in one coroutine so pausing cannot strand a permit
-                # between an outer admission and a newly scheduled collector.
-                if throttle is not None:
-                    reservation = await throttle.acquire(
-                        throttle.estimate(input_tokens, request_kind),
-                        input_proxy=input_tokens, kind=request_kind,
-                    )
-                record_model_attempt()
-            return await _collect_stream(client, request, include_usage=include_usage)
+            record_model_attempt()
+            return await _collect_stream(client, kwargs, include_usage=include_usage)
 
-        try:
-            if admission is not None:
-                with header_admission(admission), timing_span("model"):
-                    response, chunks, stats = await wait_for_active(
-                        collect(),
-                        timeout=total_timeout_s,
-                    )
-            else:
-                with timing_span("model"):
-                    wait = wait_for_active if throttle is not None else asyncio.wait_for
-                    response, chunks, stats = await wait(
-                        collect(),
-                        timeout=total_timeout_s,
-                    )
-            return response, chunks, stats
-        except BaseException as exc:
-            failure = exc
-            raise
-        finally:
-            # A provider can bill a completed reasoning phase even if it never
-            # produced a usable answer. Settle returned usage on that failure.
-            usage = getattr(response, "usage", None) or getattr(failure, "_auto_eval_usage", None)
-            if reservation is not None:
-                throttle.finish(reservation, usage, failure)
-            if admission is not None:
-                admission.finish(usage, failure)
+        with timing_span("model"):
+            response, chunks, stats = await asyncio.wait_for(
+                collect(),
+                timeout=total_timeout_s,
+            )
+        return response, chunks, stats
 
     last_exc: BaseException | None = None
     use_usage = include_usage

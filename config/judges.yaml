@@ -5,10 +5,37 @@ judges:
   - name: judge_2
     display: 终端用户
     runner: openai_compat
-    base_url: https://api.siliconflow.cn/v1
-    api_key_env: SILICON_FLOW_API_KEY
-    model: Qwen/Qwen3.5-397B-A17B
-    temperature: 0            # SiliconFlow Qwen 支持低温采样且复跑逐字一致（探针实测）
+    base_url: https://llm-62rq0bg4qrp2uy30.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+    api_key_env: ALI
+    model: qwen3.8-flash
+    temperature: 0.1            # SiliconFlow Qwen 支持低温采样且复跑逐字一致（探针实测）
     seed: 42                  # 固定种子 + temperature=0 → 可复现，消除"时好时坏"
     persona: end_user
     concurrency: 3
+
+
+endpoints:
+  - name: zimoALI
+    display: 子墨api
+    base_url: https://llm-62rq0bg4qrp2uy30.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+    api_key_env: ALI
+  - name: xiaohangALI
+    display: 潇航api
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key_env: Lin
+
+models:
+  - qwen3.5-397b-a17b
+  - qwen3.8-flash
+
+# https://llm-62rq0bg4qrp2uy30.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+# ALI
+# qwen3.5-397b-a17b
+
+# https://api.siliconflow.cn/v1
+# SILICON_FLOW_API_KEY
+# Qwen/Qwen3.5-397B-A17B
+
+# https://dashscope.aliyuncs.com/compatible-mode/v1
+# Lin
+# qwen3.5-397b-a17b
