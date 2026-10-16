@@ -58,6 +58,18 @@ def _blank(value) -> bool:
     return value is None or (isinstance(value, str) and not value.strip())
 
 
+def _workbook_metadata(workbook) -> dict:
+    if "填写说明" in workbook:
+        for row in workbook["填写说明"].iter_rows(max_row=40, max_col=2, values_only=True):
+            if row[0] == "模板元信息":
+                try:
+                    metadata = json.loads(row[1])
+                    return metadata if isinstance(metadata, dict) else {}
+                except (ValueError, TypeError):
+                    return {}
+    return {}
+
+
 def suggest_mapping(headers: list[str], sheet_name: str, header_row: int = 1, metadata: dict | None = None) -> dict:
     metadata = metadata or {}
     protocol = human_protocol(metadata.get("human_standard_version") or "0.2-simplified", metadata.get("human_standard_id", ""), metadata.get("human_bundle_revision") or None)
@@ -115,6 +127,7 @@ def suggest_mapping(headers: list[str], sheet_name: str, header_row: int = 1, me
                 context_origin="source" if metadata.get("template_version") else "unknown",
                 na_status="na_unspecified", human_standard_version=metadata.get("human_standard_version", ""),
                 human_standard_id=metadata.get("human_standard_id", ""), human_bundle_revision=metadata.get("human_bundle_revision", ""),
+                human_result_schema_version=metadata.get("human_result_schema_version") or "",
                 policy_note="", purpose="regression", header_signature=digest(headers))
 
 
@@ -129,14 +142,7 @@ def inspect_workbook(path: Path, sheet_name: str = "", header_row: int = 1) -> d
         ws = wb[selected]
         _check_sheet(ws)
         headers = _headers(ws, header_row)
-        metadata = {}
-        if "填写说明" in wb:
-            for row in cached["填写说明"].iter_rows(max_row=40, max_col=2, values_only=True):
-                if row[0] == "模板元信息":
-                    try:
-                        metadata = json.loads(row[1])
-                    except (ValueError, TypeError):
-                        pass
+        metadata = _workbook_metadata(cached)
         return dict(sheets=sheets, sheet_name=selected, header_row=header_row,
                     columns=[dict(column=get_column_letter(i + 1), header=h) for i, h in enumerate(headers)],
                     sample=[[str(c or "") for c in row] for row in cached[selected].iter_rows(
@@ -168,6 +174,15 @@ def parse_human_labels(path: Path, mapping: ImportMapping) -> dict:
         ws, cs = wb[mapping.sheet_name], cache[mapping.sheet_name]
         _check_sheet(ws)
         headers = _headers(ws, mapping.header_row)
+        metadata = _workbook_metadata(cache)
+        if metadata.get("human_standard_version"):
+            recorded_protocol = human_protocol(metadata["human_standard_version"], metadata.get("human_standard_id", ""),
+                                               metadata.get("human_bundle_revision") or None)
+            frozen_v2 = "qa-chat-result-2" in (recorded_protocol.result_schema_version, protocol.result_schema_version)
+            if frozen_v2 and (recorded_protocol.id, recorded_protocol.bundle_revision) != (protocol.id, protocol.bundle_revision):
+                raise HumanError("模板或基准的冻结标准与所选标准不同；不能仅改版本复用评分，请生成新标准空白模板重新标注")
+            if metadata.get("human_result_schema_version") and metadata["human_result_schema_version"] != protocol.result_schema_version:
+                raise HumanError("模板或基准结果Schema与所选标准冲突")
         if mapping.header_signature and digest(headers) != mapping.header_signature:
             raise HumanError("表头已改变，不能复用原列地址；请重新映射", 409)
         physical_columns = [mapping.case_id, mapping.query, mapping.context, mapping.query_hashes, mapping.category,
@@ -399,12 +414,13 @@ def build_human_template(snapshot: dict, standard: str) -> bytes:
         table.rows.append(row)
     meta = dict(template_version="human-wide-1.0", products=products, human_standard_version=protocol.standard_version,
                 human_standard_id=protocol.standard_id, human_bundle_revision=protocol.bundle_revision,
+                human_result_schema_version=protocol.result_schema_version,
                 evaluation_profile=protocol.id, dimensions=list(dimensions), dimension_names=names_by_dimension,
                 score_range=[protocol.score_min, protocol.score_max])
     notes = StatisticsTable("填写说明", ("项目", "说明"), rows=[
         ["模板元信息", json.dumps(meta, ensure_ascii=False)], ["人工标准", protocol.display],
         ["分值范围", f"{protocol.score_min}—{protocol.score_max} 的整数"],
-        ["填写规则", "题号须为文本；留空=未标注；review 非空优先（包括 0 和 N/A）。N/A 默认原因未知。"],
+        ["填写规则", "题号须为文本；留空=未标注；review非空优先（包括N/A）；数字只接受1—5严格整数，N/A默认原因未知。" if protocol.result_schema_version == "qa-chat-result-2" else "题号须为文本；留空=未标注；review 非空优先（包括 0 和 N/A）。N/A 默认原因未知。"],
         ["状态可选值", "scored / not_applicable / unverifiable / gate_blocked / input_failed / unlabeled / na_unspecified"],
         ["身份核对", "请核对产品、题号和原始回答；缺失真实题号须先补充。填写说明中的产品 ID 可在导入映射中修正。"],
         ["Gate/适用性", "Gate：pass/fail/unclear；适用性：true/false；留空=未知。"],

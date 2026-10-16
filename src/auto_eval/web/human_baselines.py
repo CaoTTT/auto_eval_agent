@@ -32,6 +32,8 @@ def baseline_protocol(baseline: dict):
                               baseline.get("human_bundle_revision"))
     if protocol.standard_id == "qa_chat_compare" and not baseline.get("human_bundle_revision"):
         raise HumanError("问答闲聊人工基准缺少冻结修订号，不能用当前标准补写历史")
+    if baseline.get("human_result_schema_version") and baseline["human_result_schema_version"] != protocol.result_schema_version:
+        raise HumanError("人工基准结果Schema与冻结标准冲突")
     return protocol
 
 
@@ -126,6 +128,7 @@ class ImportMapping(StrictModel):
     human_standard_version: str
     human_standard_id: str = ""
     human_bundle_revision: str = ""
+    human_result_schema_version: str = ""
     policy_note: str = Field(min_length=1, max_length=2000)
     purpose: Literal["development", "regression", "holdout"] = "regression"
     header_signature: str = ""
@@ -136,6 +139,9 @@ class ImportMapping(StrictModel):
         self.human_standard_id = protocol.standard_id
         self.human_standard_version = protocol.standard_version
         self.human_bundle_revision = protocol.bundle_revision
+        if self.human_result_schema_version and self.human_result_schema_version != protocol.result_schema_version:
+            raise ValueError("人工结果Schema与标准冲突")
+        self.human_result_schema_version = protocol.result_schema_version or ""
         ids = [p.product_id for p in self.products]
         if len(set(ids)) != len(ids):
             raise ValueError("产品身份不能重复")
@@ -231,6 +237,7 @@ class HumanStore:
                             name=name.strip(), created_at=time.time(), products=mapping["products"],
                             human_standard_id=protocol.standard_id, human_standard_version=protocol.standard_version,
                             human_bundle_revision=protocol.bundle_revision, evaluation_profile=protocol.id,
+                            human_result_schema_version=protocol.result_schema_version,
                             dimensions=list(human_dimensions(protocol)), score_dimensions=list(human_dimensions(protocol, scores=True)),
                             dimension_names=human_dimension_names(protocol),
                             human_policy_note=mapping["policy_note"], score_range=[protocol.score_min, protocol.score_max],

@@ -543,7 +543,9 @@ def export_rows(snapshot: dict) -> dict[str, list[dict]]:
             result_row.update({"题型": "图文题" if item.get("query_images") else "文字题",
                                "提问图片": item.get("query_images", []),
                                "提问图片元数据": item.get("query_image_meta", []),
-                               "输入指纹": item.get("input_manifest_sha256", "")})
+                               "输入指纹": (aligned_results[index].get("input_manifest_sha256") or item.get("input_manifest_sha256", ""))
+                               if recovery["evaluation_profile"] == "qa_chat_compare@1.1"
+                               else item.get("input_manifest_sha256", "")})
     if frame_rows:
         has_screenshots = any(item.get("evidence_mode") == "long_screenshot" for item in snapshot.get("items", []))
         rows["视觉证据清单" if has_screenshots else "抽帧清单"] = frame_rows

@@ -11,7 +11,7 @@ def recover_protocol_identity(snapshot: dict) -> dict:
                 "manifest": manifest, "diagnostics": [], "executable": True, "is_chat": False}
     options = snapshot.get("options") or {}
     records = [snapshot, manifest, options, *(snapshot.get("results") or [])]
-    profiles, families, versions, revisions = [], set(), set(), set()
+    profiles, families, versions, revisions, schemas = [], set(), set(), set(), set()
     diagnostics = []
     for record in records:
         profile = record.get("evaluation_profile")
@@ -31,10 +31,14 @@ def recover_protocol_identity(snapshot: dict) -> dict:
             versions.add(str(record["standard_version"]))
         if record.get("bundle_revision"):
             revisions.add(str(record["bundle_revision"]))
+        if record.get("result_schema_version"):
+            schemas.add(str(record["result_schema_version"]))
     if len(set(profiles)) > 1 or len(families) > 1 or len(versions) > 1:
         diagnostics.append("任务、清单或结果的协议身份冲突，禁止续跑和正式评分统计")
     if len(revisions) > 1:
         diagnostics.append("任务与结果的协议包修订冲突，禁止续跑和正式评分统计")
+    if len(schemas) > 1:
+        diagnostics.append("任务与结果的结果Schema版本冲突，禁止续跑和正式评分统计")
     if profiles:
         profile = profiles[0]
     elif len(families) == 1 and len(versions) == 1:
@@ -58,6 +62,8 @@ def recover_protocol_identity(snapshot: dict) -> dict:
     except ValueError as exc:
         diagnostics.append(str(exc))
         protocol = None
+    if protocol is not None and chat and schemas and schemas != {protocol.result_schema_version}:
+        diagnostics.append("记录的结果Schema与冻结协议不一致，禁止续跑和正式评分统计")
     if protocol is not None and not diagnostics:
         # Only restore facts actually recorded for chat. Legacy compatibility
         # may use its existing inference, with that provenance made explicit.
@@ -66,6 +72,8 @@ def recover_protocol_identity(snapshot: dict) -> dict:
         manifest.setdefault("standard_version", protocol.standard_version)
         if revision:
             manifest.setdefault("bundle_revision", revision)
+        if len(schemas) == 1:
+            manifest.setdefault("result_schema_version", next(iter(schemas)))
         if not chat and not revision:
             manifest.setdefault("recovery_source", "legacy_compatible_inference")
     return {"evaluation_profile": profile, "manifest": manifest,

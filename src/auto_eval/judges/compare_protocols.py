@@ -36,6 +36,13 @@ from .visual_compare_prompt_qa_chat import (
     VISUAL_COMPARE_SYSTEM as QA_CHAT_SYSTEM,
     VISUAL_COMPARE_USER as QA_CHAT_USER,
 )
+from .qa_chat_v2_schema import (
+    QA_CHAT_V2_COMPARE_PROTOCOL_ID, QA_CHAT_V2_RESULT_SCHEMA_VERSION, QAChatV2Observation,
+)
+from .visual_compare_prompt_qa_chat_v2 import (
+    VISUAL_COMPARE_SYSTEM as QA_CHAT_V2_SYSTEM,
+    VISUAL_COMPARE_USER as QA_CHAT_V2_USER,
+)
 
 
 STANDARD_ID = "qa_competitor_compare"
@@ -233,6 +240,24 @@ _PROTOCOLS = {
         dimension_names=dict(QA_CHAT_DIMENSION_NAMES),
         score_dimensions=QA_CHAT_DIMENSIONS,
         result_schema_version=QA_CHAT_RESULT_SCHEMA_VERSION,
+    ),
+    QA_CHAT_V2_COMPARE_PROTOCOL_ID: CompareProtocol(
+        id=QA_CHAT_V2_COMPARE_PROTOCOL_ID,
+        standard_id=QA_CHAT_STANDARD_ID,
+        standard_version="1.1",
+        bundle_revision="1.1.0",
+        display="问答闲聊V2·1-5分（候选）",
+        status="experimental",
+        system_template=QA_CHAT_V2_SYSTEM,
+        user_template=QA_CHAT_V2_USER,
+        observation_model=QAChatV2Observation,
+        require_response_pass=False,
+        score_min=1,
+        score_max=5,
+        dimensions=QA_CHAT_DIMENSIONS,
+        dimension_names=dict(QA_CHAT_DIMENSION_NAMES),
+        score_dimensions=QA_CHAT_DIMENSIONS,
+        result_schema_version=QA_CHAT_V2_RESULT_SCHEMA_VERSION,
     ),
 }
 

@@ -90,6 +90,12 @@ def case_comparison_tables(report: dict) -> tuple[StatisticsTable, StatisticsTab
         detail_fields.extend((("人工输入状态", "human_input_status"), ("人工核验状态", "human_verification_status"),
                               ("模型核验状态", "model_verification_status"), ("模型证据", "model_evidence"),
                               ("模型标准家族", "model_standard_id"), ("模型评分状态", "model_score_status")))
+    if baseline_protocol(report["baseline"]).result_schema_version == "qa-chat-result-2":
+        detail_fields = [("模型理由（维度共享完整原文）" if field == "model_reason" else
+                          "模型证据（维度共享，保留产品归属）" if field == "model_evidence" else label, field)
+                         for label, field in detail_fields]
+        detail_fields.extend((("模型理由归属", "model_reason_scope"), ("模型证据归属", "model_evidence_scope"),
+                              ("模型结果Schema", "model_result_schema_version")))
     groups=[(task,p["product_id"],dimension,
              f'{dimension_names.get(dimension,dimension)}\n{p["display_name"]} [{p["product_id"]}]\n任务 {task}')
             for dimension in dimensions for p in products for task in tasks]

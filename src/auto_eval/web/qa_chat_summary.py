@@ -16,7 +16,9 @@ def task_snapshot(task) -> dict:
 
 def summarize_chat(task, *, include_subsets: bool = True) -> dict:
     from .tasks import latest_results_by_index
-    from .compare_statistics import Case, score_state, product_applicable, conversation_statistics
+    from .compare_statistics import (
+        Case, score_state, product_applicable, conversation_statistics, balanced_chat, gate_observable,
+    )
     snapshot = task_snapshot(task)
     recovery = recover_protocol_identity(snapshot)
     latest = {index: row for index, row in latest_results_by_index(task).items() if 0 <= index < len(task.items)}
@@ -31,6 +33,7 @@ def summarize_chat(task, *, include_subsets: bool = True) -> dict:
     if not recovery["executable"]:
         return summary
     protocol = require_snapshot_protocol(snapshot)
+    balanced = balanced_chat(protocol)
     cases = [Case(index, item, latest.get(index, {}),
                   "failed" if latest.get(index, {}).get("error") else "done" if index in latest else "pending",
                   int(latest.get(index, {}).get("product_count") or item.get("product_count") or 2),
@@ -39,8 +42,18 @@ def summarize_chat(task, *, include_subsets: bool = True) -> dict:
     comparable = set()
     summary["input_failed"] = sum(any(row.get(f"answer{p}_input_status") == "failed" for p in range(1, int(row.get("product_count") or 2) + 1)) for row in ok)
     for product in range(1, count + 1):
+        observable = [case for case in cases if gate_observable(case, product, protocol)]
+        if balanced:
+            present = [case for case in cases if case.status == "done" and case.product_count >= product]
+            summary[f"answer{product}_input_unknown"] = sum(case.result.get(f"answer{product}_input_status") is None for case in present)
         for gate in ("response", "safety"):
-            summary[f"answer{product}_{gate}_gate_pass"] = sum(row.get(f"answer{product}_{gate}_gate") == "pass" and row.get(f"answer{product}_input_status") in {"complete", "partial"} for row in ok)
+            prefix = f"answer{product}_{gate}_gate"
+            passed = sum(case.result.get(prefix) == "pass" for case in observable)
+            summary[prefix + "_pass"] = passed
+            if balanced:
+                known = sum(case.result.get(prefix) in ("pass", "fail", "unclear") for case in observable)
+                summary[prefix + "_observed"] = known
+                summary[prefix + "_pass_rate"] = passed / known if known else None
     for dimension in protocol.score_dimensions:
         all_valid = []
         for product in range(1, count + 1):
@@ -67,8 +80,9 @@ def summarize_chat(task, *, include_subsets: bool = True) -> dict:
         for a, b in combinations(range(1, count + 1), 2):
             summary[f"{dimension}_answer{a}_answer{b}_paired_count"] = sum(case.product_count >= b and all(score_state(case, p, dimension, protocol)[1] is not None for p in (a, b)) for case in cases)
     summary["comparable"] = len(comparable)
-    for state in ("yes", "no", "unclear"):
-        summary[f"conflict_{state}"] = sum(row.get("has_conflict") == state for row in ok)
+    if not balanced:
+        for state in ("yes", "no", "unclear"):
+            summary[f"conflict_{state}"] = sum(row.get("has_conflict") == state for row in ok)
     if include_subsets:
         from ..conversation import is_conversation
         aligned = [{**latest.get(i, {}), "评估状态": "评估失败" if latest.get(i, {}).get("error") else "已完成" if i in latest else "待评估"} for i in range(len(task.items))]

@@ -227,6 +227,7 @@ def align_baseline_to_run(baseline: dict, snapshot: dict, mapping: TaskMapping, 
         result_runtime_summary = (judge_runtime_summary({}, result)
                                   if result.get("judge_runtime") or result.get("judge_model") else runtime_summary)
         policy = _policy(snapshot,result,recovered_identity)
+        shared_reasons = bool(policy and policy.result_schema_version == "qa-chat-result-2")
         same_family = bool(policy and policy.standard_id == human_policy.standard_id)
         compatible = bool(policy and same_family and [policy.score_min,policy.score_max]==baseline["score_range"] and (
             policy.standard_version==baseline["human_standard_version"] or mode=="regression"))
@@ -281,8 +282,12 @@ def align_baseline_to_run(baseline: dict, snapshot: dict, mapping: TaskMapping, 
                            match_status=status, match_reasons=reasons, result_input_binding=binding, binding_reasons=binding_reasons,
                            human_score=human, human_status=label.get("score_status","unlabeled"), human_source=label.get("source",{}),
                            human_reason=label.get("reason",""), model_score=model, model_status=model_status,
-                           model_reason=(result.get(f"answer{slot}_{dim}_reason") or "") if policy and policy.standard_id == "qa_chat_compare" else result.get(f"{dim}_rationale") or result.get(f"{dim}_reason") or "",
-                           model_evidence=result.get(f"answer{slot}_{dim}_evidence", []),
+                           model_reason=(result.get(f"{dim}_reason") or "") if shared_reasons else
+                                        (result.get(f"answer{slot}_{dim}_reason") or "") if policy and policy.standard_id == "qa_chat_compare" else result.get(f"{dim}_rationale") or result.get(f"{dim}_reason") or "",
+                           model_evidence=result.get(f"{dim}_evidence", []) if shared_reasons else result.get(f"answer{slot}_{dim}_evidence", []),
+                           model_reason_scope="dimension_shared" if shared_reasons else "product" if policy and policy.standard_id == "qa_chat_compare" else "dimension_shared",
+                           model_evidence_scope="dimension_shared" if shared_reasons else "product",
+                           model_result_schema_version=policy.result_schema_version if policy else result.get("result_schema_version"),
                            model_verification_status=result.get(f"answer{slot}_{dim}_verification_status"),
                            human_verification_status=label.get("verification_status"),
                            model_gates={g:result.get(f"answer{slot}_{g}_gate") for g in ("response","safety")},
@@ -436,7 +441,7 @@ class HumanComparisons:
             report=dict(**manifest,metrics=metrics,rows=preview["rows"],baseline=baseline,
                         config=preview["config"],frozen_at=self.preview_summary(preview)["frozen_at"],
                         baseline_dimension_names=baseline.get("dimension_names", {}),
-                        human_protocol={key: baseline.get(key) for key in ("human_standard_id", "human_standard_version", "human_bundle_revision", "dimensions", "score_dimensions", "dimension_names", "score_range")},
+                        human_protocol={key: baseline.get(key) for key in ("human_standard_id", "human_standard_version", "human_bundle_revision", "human_result_schema_version", "dimensions", "score_dimensions", "dimension_names", "score_range")},
                         model_protocols=[dict(task_id=s["task_id"],protocol_manifest=s.get("protocol_manifest",{}),
                                               evaluation_profile=s.get("evaluation_profile","")) for s in preview["snapshots"]],
                         model_runtimes=[dict(task_id=s["task_id"], **judge_runtime_summary(s))

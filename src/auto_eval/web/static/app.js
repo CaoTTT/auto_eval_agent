@@ -64,6 +64,12 @@ createApp({
     const taskProtocolManifest = ref({});
     const taskProtocolDiagnostics = ref([]);
     const taskIsChat = computed(() => (taskEvaluationProfile.value || '').startsWith('qa_chat_compare@'));
+    function chatUsesSharedReasons(row = {}) {
+      if (row.result_schema_version) return row.result_schema_version === 'qa-chat-result-2';
+      const profile = row.evaluation_profile || (row.standard_id === 'qa_chat_compare' && row.standard_version
+        ? `qa_chat_compare@${row.standard_version}` : taskEvaluationProfile.value);
+      return profile === 'qa_chat_compare@1.1';
+    }
     const compareProfiles = computed(() =>
       evaluationProfiles.value.filter((profile) => (profile.modes || []).includes("compare"))
     );
@@ -207,7 +213,8 @@ createApp({
           && row[`${prefix}_applicable`] === true && ['verified','partial','not_required'].includes(row[`${prefix}_verification_status`])
           && ['pass','unclear'].includes(row[`answer${product}_response_gate`])
           && ['pass','unclear'].includes(row[`answer${product}_safety_gate`])
-          && ['complete','partial'].includes(row[`answer${product}_input_status`])
+          && (chatUsesSharedReasons(row) ? row[`answer${product}_input_status`] == null || ['complete','partial'].includes(row[`answer${product}_input_status`])
+            : ['complete','partial'].includes(row[`answer${product}_input_status`]))
           && Number.isInteger(value) && value >= 1 && value <= 5 ? value : null;
       }
       // Missing, inapplicable and unknown scores must never be coerced to zero.
@@ -265,10 +272,15 @@ createApp({
       } else if (column.key.endsWith('_summary')) {
         const dimension = column.key.replace('_summary', '');
         if (taskIsChat.value || row.standard_id === 'qa_chat_compare') {
-          for (let n = 1; n <= Number(row.product_count || 2); n++) {
-            add(`产品 ${n} · ${chatScoreStatus(row, dimension, n)}`, row[`answer${n}_${dimension}_reason`]);
-            add(`产品 ${n} 主要问题`, row[`answer${n}_${dimension}_primary_issue`]);
-            add(`产品 ${n} 证据`, row[`answer${n}_${dimension}_evidence`]);
+          if (chatUsesSharedReasons(row)) {
+            add('维度共享评分理由', row[`${dimension}_reason`]);
+            add('维度共享证据（保留原产品归属）', row[`${dimension}_evidence`]);
+          } else {
+            for (let n = 1; n <= Number(row.product_count || 2); n++) {
+              add(`产品 ${n} · ${chatScoreStatus(row, dimension, n)}`, row[`answer${n}_${dimension}_reason`]);
+              add(`产品 ${n} 主要问题`, row[`answer${n}_${dimension}_primary_issue`]);
+              add(`产品 ${n} 证据`, row[`answer${n}_${dimension}_evidence`]);
+            }
           }
         } else add('评分理由', row[`${dimension}_reason`]);
       } else if (column.key === 'has_conflict') add('冲突原因', row.conflict_reason);
@@ -766,9 +778,9 @@ createApp({
           { key: "response_gate_summary", label: "响应体验Gate" },
           { key: "safety_gate_summary", label: "安全稳定Gate" },
           ...taskDimensions.value.map(d => ({key:`${d.key}_summary`, label:d.key === 'accuracy' ? '内容准确（暂不汇总）' : d.label})),
-          { key: "has_conflict", label: "内容冲突" },
+          ...(chatUsesSharedReasons() ? [] : [{ key: "has_conflict", label: "内容冲突" }]),
           { key: "needs_human_review", label: "需人工复核" },
-          { key: "rationale", label: "理由" },
+          ...(chatUsesSharedReasons() ? [] : [{ key: "rationale", label: "理由" }]),
           { key: "latency_s", label: "总耗时" },
         ];
       // rich_content（默认）
@@ -1673,7 +1685,7 @@ createApp({
           const productNo = index + 1;
           const key = field === "input_status" ? `answer${productNo}_input_status` : `answer${productNo}_${field}`;
           const value = r[key];
-          return `P${productNo}:${labels[value] || value || "N/A"}`;
+          return `P${productNo}:${labels[value] || value || (field === 'input_status' && chatUsesSharedReasons(r) ? '未知（未提供采集结论）' : 'N/A')}`;
         }).join("；");
       }
       if (c.key.endsWith("_summary") && !["input_status_summary", "response_gate_summary", "safety_gate_summary"].includes(c.key)) {
