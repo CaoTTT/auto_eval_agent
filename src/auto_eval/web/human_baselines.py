@@ -13,7 +13,36 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from ..judges.compare_protocols import DIMENSIONS, resolve_compare_protocol
+from ..judges.compare_protocols import (ALL_DIMENSIONS, QA_CHAT_DIMENSION_NAMES as CHAT_NAMES,
+                                       resolve_compare_protocol)
+
+
+def human_protocol(version: str, standard_id: str = "", revision: str | None = None):
+    """Bare historical versions belong to the competitor family only."""
+    if "@" in version:
+        family, version = version.split("@", 1)
+        if standard_id and standard_id != family:
+            raise HumanError("人工标准家族与完整协议 ID 冲突")
+        standard_id = family
+    return resolve_compare_protocol(f"{standard_id or 'qa_competitor_compare'}@{version}", revision)
+
+
+def baseline_protocol(baseline: dict):
+    protocol = human_protocol(baseline["human_standard_version"], baseline.get("human_standard_id", ""),
+                              baseline.get("human_bundle_revision"))
+    if protocol.standard_id == "qa_chat_compare" and not baseline.get("human_bundle_revision"):
+        raise HumanError("问答闲聊人工基准缺少冻结修订号，不能用当前标准补写历史")
+    if baseline.get("human_result_schema_version") and baseline["human_result_schema_version"] != protocol.result_schema_version:
+        raise HumanError("人工基准结果Schema与冻结标准冲突")
+    return protocol
+
+
+def human_dimensions(protocol, *, scores=False):
+    return tuple(protocol.score_dimensions if scores else protocol.dimensions)
+
+
+def human_dimension_names(protocol):
+    return {d: protocol.dimension_names[d] for d in human_dimensions(protocol)}
 
 
 class HumanError(ValueError):
@@ -65,10 +94,12 @@ class LabelColumn(StrictModel):
     review: str = ""
     status: str = ""
     reason: str = ""
+    applicable: str = ""
+    verification_status: str = ""
 
     @model_validator(mode="after")
     def validate_dimension(self):
-        if self.dimension_id not in DIMENSIONS or not (self.score or self.review or self.status):
+        if self.dimension_id not in ALL_DIMENSIONS or not (self.score or self.review or self.status):
             raise ValueError("标签必须指定有效维度以及分数或状态列")
         return self
 
@@ -90,32 +121,42 @@ class ImportMapping(StrictModel):
     responses: dict[str, dict[str, str]] = Field(default_factory=dict)
     applicability: dict[str, str] = Field(default_factory=dict)
     gates: dict[str, dict[str, str]] = Field(default_factory=dict)
+    inputs: dict[str, str] = Field(default_factory=dict)
     answer_text_origin: Literal["source", "unknown", "judge_transcription"] = "unknown"
     context_origin: Literal["source", "unknown", "judge_transcription"] = "unknown"
     na_status: Literal["na_unspecified", "not_applicable", "unverifiable", "gate_blocked"] = "na_unspecified"
     human_standard_version: str
+    human_standard_id: str = ""
+    human_bundle_revision: str = ""
+    human_result_schema_version: str = ""
     policy_note: str = Field(min_length=1, max_length=2000)
     purpose: Literal["development", "regression", "holdout"] = "regression"
     header_signature: str = ""
 
     @model_validator(mode="after")
     def validate_mapping(self):
+        protocol = human_protocol(self.human_standard_version, self.human_standard_id, self.human_bundle_revision or None)
+        self.human_standard_id = protocol.standard_id
+        self.human_standard_version = protocol.standard_version
+        self.human_bundle_revision = protocol.bundle_revision
+        if self.human_result_schema_version and self.human_result_schema_version != protocol.result_schema_version:
+            raise ValueError("人工结果Schema与标准冲突")
+        self.human_result_schema_version = protocol.result_schema_version or ""
         ids = [p.product_id for p in self.products]
         if len(set(ids)) != len(ids):
             raise ValueError("产品身份不能重复")
         keys = [(c.product_id, c.dimension_id) for c in self.labels]
         if len(set(keys)) != len(keys) or any(p not in ids for p, _ in keys):
             raise ValueError("标签产品无效或产品维度映射重复")
-        if any(p not in ids for p in (*self.responses, *self.gates)):
+        if any(p not in ids for p in (*self.responses, *self.gates, *self.inputs)):
             raise ValueError("回答或 Gate 的产品无效")
-        if any(d not in DIMENSIONS for d in self.applicability):
+        if any(d not in human_dimensions(protocol) for d in (*self.applicability, *(c.dimension_id for c in self.labels))):
             raise ValueError("适用性维度无效")
         if any(k not in ("response", "safety") for g in self.gates.values() for k in g):
             raise ValueError("Gate 类型无效")
         if any(k not in ("answer", "context", "response_id", "sha256", "evidence")
                for fields in self.responses.values() for k in fields):
             raise ValueError("回答身份字段无效")
-        resolve_compare_protocol("qa_competitor_compare@" + self.human_standard_version)
         return self
 
 
@@ -124,8 +165,10 @@ class HumanScoreLabel(StrictModel):
     product_id: str
     response_id: str
     dimension_id: str
-    score_status: Literal["scored", "not_applicable", "unverifiable", "gate_blocked", "unlabeled", "na_unspecified"]
+    score_status: Literal["scored", "not_applicable", "unverifiable", "gate_blocked", "input_failed", "unlabeled", "na_unspecified"]
     score: int | None = Field(default=None, strict=True)
+    applicable: bool | None = Field(default=None, strict=True)
+    verification_status: Literal["verified", "partial", "unverifiable", "not_required"] | None = None
     annotation_stage: Literal["base", "review"]
     resolution: Literal["accepted", "pending_conflict"] = "accepted"
     reason: str = ""
@@ -179,16 +222,24 @@ class HumanStore:
                 old = self.load_baseline(baseline_id, latest)
                 if old["products"] != mapping["products"]:
                     raise HumanError("升级基准必须保留产品身份；产品变化请创建新基准")
+                old_protocol = baseline_protocol(old)
+                selected_protocol = human_protocol(mapping["human_standard_version"], mapping.get("human_standard_id", ""), mapping.get("human_bundle_revision") or None)
+                if (old_protocol.id, old_protocol.bundle_revision) != (selected_protocol.id, selected_protocol.bundle_revision):
+                    raise HumanError("升级基准必须保留完整评分标准；更换标准须重新标注并创建新基准")
             version = latest + 1
             cases = preview["cases"]
             labels = [r for r in preview["labels"] if r["resolution"] == "accepted"]
             if not any(r["score_status"] == "scored" for r in labels):
                 raise HumanError("至少需要一条有效人工数字评分")
             folder = self.path("baselines", baseline_id, f"v{version}")
-            protocol = resolve_compare_protocol("qa_competitor_compare@" + mapping["human_standard_version"])
+            protocol = human_protocol(mapping["human_standard_version"], mapping.get("human_standard_id", ""), mapping.get("human_bundle_revision") or None)
             manifest = dict(schema_version="human-baseline-1.0", baseline_id=baseline_id, version=version,
                             name=name.strip(), created_at=time.time(), products=mapping["products"],
                             human_standard_id=protocol.standard_id, human_standard_version=protocol.standard_version,
+                            human_bundle_revision=protocol.bundle_revision, evaluation_profile=protocol.id,
+                            human_result_schema_version=protocol.result_schema_version,
+                            dimensions=list(human_dimensions(protocol)), score_dimensions=list(human_dimensions(protocol, scores=True)),
+                            dimension_names=human_dimension_names(protocol),
                             human_policy_note=mapping["policy_note"], score_range=[protocol.score_min, protocol.score_max],
                             purpose=mapping["purpose"], mapping=mapping, mapping_profile_id="map_" + digest(mapping)[:20],
                             case_catalog_sha256=digest(cases), labels_sha256=digest(labels),

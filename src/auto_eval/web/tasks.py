@@ -10,6 +10,7 @@ from typing import Any
 
 from .history import _snapshot_evaluation_profile, load_snapshot, make_session_name, save_task, snapshot_task_timing
 from .persistence import queue_task_save, task_save_pending
+from .protocol_identity import recover_protocol_identity
 
 # 每个 SSE 连接的事件队列上限：慢消费者丢最旧保最新，杜绝无消费者时无限堆积
 _MAX_SUB_QUEUE = 500
@@ -253,7 +254,7 @@ def _task_from_snapshot(snapshot: dict, task_id: str) -> Task:
         items=snapshot.get("items") or [],
         options=options,
         evaluation_profile=evaluation_profile,
-        protocol_manifest=snapshot.get("protocol_manifest") or {},
+        protocol_manifest=(recover_protocol_identity(snapshot)["manifest"] if recover_protocol_identity(snapshot)["is_chat"] else snapshot.get("protocol_manifest") or {}),
         judge_runtime=snapshot.get("judge_runtime") or {},
         dataset_name=snapshot.get("dataset_name") or "",
         note=snapshot.get("note") or "",

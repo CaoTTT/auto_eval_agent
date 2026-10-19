@@ -57,6 +57,16 @@ createApp({
     }
     const evaluationProfiles = ref([]);
     const selectedEvaluationProfile = ref("");
+    const taskEvaluationProfile = ref("");
+    const taskProtocolManifest = ref({});
+    const taskProtocolDiagnostics = ref([]);
+    const taskIsChat = computed(() => (taskEvaluationProfile.value || '').startsWith('qa_chat_compare@'));
+    function chatUsesSharedReasons(row = {}) {
+      if (row.result_schema_version) return row.result_schema_version === 'qa-chat-result-2';
+      const profile = row.evaluation_profile || (row.standard_id === 'qa_chat_compare' && row.standard_version
+        ? `qa_chat_compare@${row.standard_version}` : taskEvaluationProfile.value);
+      return profile === 'qa_chat_compare@1.1';
+    }
     const compareProfiles = computed(() =>
       evaluationProfiles.value.filter((profile) => (profile.modes || []).includes("compare"))
     );
@@ -169,7 +179,7 @@ createApp({
       resetResultPage();
     }
     const turnFilter = ref(''), diagnosticFilter = ref('');
-    const scoreDimensions = [
+    const legacyScoreDimensions = [
       {key: 'response_gate', label: '响应体验', gate: true},
       {key: 'safety_gate', label: '安全稳定', gate: true},
       {key: 'understanding', label: '准确理解需求'},
@@ -180,12 +190,30 @@ createApp({
       {key: 'evidence_quality', label: '有理有据'},
       {key: 'guided_recommendation', label: '引导推荐'},
     ];
+    const chatDimensions = [
+      {key:'understanding',label:'理解需求'}, {key:'personalization',label:'个性化适配'},
+      {key:'emotional_expression',label:'情感表达恰当'}, {key:'style',label:'风格恰当'},
+      {key:'scenario_fulfillment',label:'场景化满足'}, {key:'guided_recommendation',label:'引导推荐'},
+    ];
+    const taskDimensions = computed(() => {
+      const frozen = taskProtocolManifest.value.dimensions;
+      const registered = evaluationProfiles.value.find(p => p.id === taskEvaluationProfile.value)?.dimensions;
+      return frozen?.length ? frozen : registered?.length ? registered : taskIsChat.value ? chatDimensions : legacyScoreDimensions.filter(d => !d.gate);
+    });
+    const scoreDimensions = computed(() => [...legacyScoreDimensions.filter(d => d.gate), ...taskDimensions.value]);
+    const summaryDimensions = computed(() => taskDimensions.value.filter(d => d.key !== 'accuracy'));
+    function setTaskProtocol(data) {
+      taskEvaluationProfile.value = data.evaluation_profile || data.protocol_manifest?.id || (data.mode === 'compare' ? defaultEvaluationProfile() : '');
+      taskProtocolManifest.value = data.protocol_manifest || {};
+      taskProtocolDiagnostics.value = data.protocol_diagnostics || [];
+      scoreRules.value = scoreRules.value.filter(rule => scoreDimensions.value.some(d => d.key === rule.dimension));
+    }
     const scoreRules = ref([]), scoreRuleJoin = ref('all');
     let scoreRuleSequence = 0;
     const filterProducts = computed(() => results.value.some(r => Number(r.product_count) === 3)
       || items.value.some(r => Number(r.product_count) === 3) ? [1, 2, 3] : [1, 2]);
     function scoreOperators(rule) {
-      if (scoreDimensions.find(d => d.key === rule.dimension)?.gate) return [
+      if (scoreDimensions.value.find(d => d.key === rule.dimension)?.gate) return [
         {key: 'pass', label: '通过'}, {key: 'fail', label: '不通过'},
         {key: 'unclear', label: '不清楚'}, {key: 'na', label: '无结果 / N/A'},
       ];
@@ -202,7 +230,7 @@ createApp({
       resetResultPage();
     }
     function changeScoreDimension(rule) {
-      rule.operator = scoreDimensions.find(d => d.key === rule.dimension)?.gate ? 'pass' : 'lt';
+      rule.operator = scoreDimensions.value.find(d => d.key === rule.dimension)?.gate ? 'pass' : 'lt';
       rule.value = '';
       resetResultPage();
     }
@@ -216,7 +244,7 @@ createApp({
       resetResultPage();
     }
     function scoreRuleError(rule) {
-      if (!scoreDimensions.some(d => d.key === rule.dimension)
+      if (!scoreDimensions.value.some(d => d.key === rule.dimension)
           || !scoreOperators(rule).some(op => op.key === rule.operator)) return '请选择有效的维度和判断方式';
       if (!rule.products.length) return '至少选择一个产品';
       if (rule.operator === 'diff_lte' && rule.products.length !== 2) return '分差筛选需要恰好选择两个产品';
@@ -227,6 +255,18 @@ createApp({
     const scoreFilterError = computed(() => mode.value === 'compare'
       ? scoreRules.value.map((rule, i) => scoreRuleError(rule) ? `条件 ${i + 1}：${scoreRuleError(rule)}` : '').filter(Boolean).join('；') : '');
     function scoreValue(row, dimension, product) {
+      if (taskProtocolDiagnostics.value.length) return null;
+      if (taskIsChat.value || row.standard_id === 'qa_chat_compare') {
+        const prefix = `answer${product}_${dimension}`;
+        const value = row[`${prefix}_score`];
+        return !row.error && row[`${prefix}_score_status`] === 'scored'
+          && row[`${prefix}_applicable`] === true && ['verified','partial','not_required'].includes(row[`${prefix}_verification_status`])
+          && ['pass','unclear'].includes(row[`answer${product}_response_gate`])
+          && ['pass','unclear'].includes(row[`answer${product}_safety_gate`])
+          && (chatUsesSharedReasons(row) ? row[`answer${product}_input_status`] == null || ['complete','partial'].includes(row[`answer${product}_input_status`])
+            : ['complete','partial'].includes(row[`answer${product}_input_status`]))
+          && Number.isInteger(value) && value >= 1 && value <= 5 ? value : null;
+      }
       // Missing, inapplicable and unknown scores must never be coerced to zero.
       if (row[`${dimension}_applicable`] === false) return null;
       const raw = row[`answer${product}_${dimension}_score`];
@@ -241,7 +281,7 @@ createApp({
         const values = rule.products.map(product => scoreValue(row, rule.dimension, product));
         return values.every(value => value !== null) && Math.abs(values[0] - values[1]) <= Number(rule.value);
       }
-      const gate = scoreDimensions.find(d => d.key === rule.dimension)?.gate;
+      const gate = scoreDimensions.value.find(d => d.key === rule.dimension)?.gate;
       const matches = product => {
         if (!present(product)) return false;
         if (gate) {
@@ -281,7 +321,18 @@ createApp({
         }
       } else if (column.key.endsWith('_summary')) {
         const dimension = column.key.replace('_summary', '');
-        add('评分理由', row[`${dimension}_reason`]);
+        if (taskIsChat.value || row.standard_id === 'qa_chat_compare') {
+          if (chatUsesSharedReasons(row)) {
+            add('维度共享评分理由', row[`${dimension}_reason`]);
+            add('维度共享证据（保留原产品归属）', row[`${dimension}_evidence`]);
+          } else {
+            for (let n = 1; n <= Number(row.product_count || 2); n++) {
+              add(`产品 ${n} · ${chatScoreStatus(row, dimension, n)}`, row[`answer${n}_${dimension}_reason`]);
+              add(`产品 ${n} 主要问题`, row[`answer${n}_${dimension}_primary_issue`]);
+              add(`产品 ${n} 证据`, row[`answer${n}_${dimension}_evidence`]);
+            }
+          }
+        } else add('评分理由', row[`${dimension}_reason`]);
       } else if (column.key === 'has_conflict') add('冲突原因', row.conflict_reason);
       else if (['needs_human_review', 'needs_review'].includes(column.key)) add('复核原因', row.review_reasons?.length ? row.review_reasons : row.review_reason);
       return entries;
@@ -312,7 +363,7 @@ createApp({
     const conversationGroups = computed(() => {
       const groups = new Map();
       for (const row of results.value) {
-        if (!row.session_id) continue;
+        if (!row.session_id || !Number.isInteger(row.turn_index) || row.turn_index < 1) continue;
         if (!groups.has(row.session_id)) groups.set(row.session_id, []);
         groups.get(row.session_id).push(row);
       }
@@ -775,16 +826,10 @@ createApp({
           { key: "input_status_summary", label: "输入状态" },
           { key: "response_gate_summary", label: "响应体验Gate" },
           { key: "safety_gate_summary", label: "安全稳定Gate" },
-          { key: "understanding_summary", label: "准确理解需求" },
-          { key: "accuracy_summary", label: "内容准确（暂不汇总）" },
-          { key: "service_closure_summary", label: "服务闭环" },
-          { key: "scenario_fulfillment_summary", label: "场景化满足" },
-          { key: "intuitive_efficiency_summary", label: "直观高效" },
-          { key: "evidence_quality_summary", label: "有理有据" },
-          { key: "guided_recommendation_summary", label: "引导推荐" },
-          { key: "has_conflict", label: "内容冲突" },
+          ...taskDimensions.value.map(d => ({key:`${d.key}_summary`, label:d.key === 'accuracy' ? '内容准确（暂不汇总）' : d.label})),
+          ...(chatUsesSharedReasons() ? [] : [{ key: "has_conflict", label: "内容冲突" }]),
           { key: "needs_human_review", label: "需人工复核" },
-          { key: "rationale", label: "理由" },
+          ...(chatUsesSharedReasons() ? [] : [{ key: "rationale", label: "理由" }]),
           { key: "latency_s", label: "总耗时" },
         ];
       // rich_content（默认）
@@ -1321,6 +1366,7 @@ createApp({
       );
       running.value = true;
       taskId.value = d.task_id;
+      setTaskProtocol({...d, mode:mode.value, evaluation_profile:d.evaluation_profile || body.evaluation_profile});
       taskJudgeRuntime.value = d.judge_runtime || null;
       taskJudgeSummary.value = {judge_model: d.judge_model, enable_thinking_label: d.enable_thinking_label};
       executionControl.value = {};
@@ -1660,6 +1706,12 @@ createApp({
       });
     }
 
+    function chatScoreStatus(row, dimension, product) {
+      if (taskProtocolDiagnostics.value.length) return '协议待恢复';
+      if (row.error) return '评估失败';
+      const state = row[`answer${product}_${dimension}_score_status`];
+      return ({scored:'已评分',not_applicable:'不适用',gate_blocked:'门槛未通过',input_failed:'输入失败',unverifiable:'无法核验'})[state] || '待评估';
+    }
     function cell(r, c) {
       const v = r[c.key];
       if (c.key === "category") return r.category_display || (!v || v === "default" ? "通用" : v);
@@ -1672,11 +1724,17 @@ createApp({
           const productNo = index + 1;
           const key = field === "input_status" ? `answer${productNo}_input_status` : `answer${productNo}_${field}`;
           const value = r[key];
-          return `P${productNo}:${labels[value] || value || "N/A"}`;
+          return `P${productNo}:${labels[value] || value || (field === 'input_status' && chatUsesSharedReasons(r) ? '未知（未提供采集结论）' : 'N/A')}`;
         }).join("；");
       }
       if (c.key.endsWith("_summary") && !["input_status_summary", "response_gate_summary", "safety_gate_summary"].includes(c.key)) {
         const dimension = c.key.slice(0, -"_summary".length);
+        if (taskIsChat.value || r.standard_id === 'qa_chat_compare') {
+          return Array.from({length:Number(r.product_count || items.value[r.index]?.product_count || 2)}, (_,i) => {
+            const score = scoreValue(r,dimension,i+1);
+            return `P${i+1}:${score === null ? chatScoreStatus(r,dimension,i+1) : score+'分（已评分）'}`;
+          }).join('；');
+        }
         if (r[`${dimension}_applicable`] === false) return "N/A";
         const count = Number(r.product_count || 2);
         const scores = Array.from({ length: count }, (_, index) => {
@@ -1950,6 +2008,7 @@ createApp({
       }
       if (taskId.value === id) {
         taskId.value = "";
+        setTaskProtocol({});
         taskJudgeRuntime.value = null;
         taskJudgeSummary.value = {};
         selectedTaskTiming.value = null;
@@ -1993,6 +2052,7 @@ createApp({
         loaded = true;
         closeActiveStream();
         taskId.value = d.task_id || id;
+        setTaskProtocol(d);
         taskJudgeRuntime.value = d.judge_runtime || null;
         taskJudgeSummary.value = {judge_model: d.judge_model, enable_thinking_label: d.enable_thinking_label};
         restoreJudgeModel(d.judge_runtime);
@@ -2180,6 +2240,7 @@ createApp({
       reasonOnlyColumn, cellReasons, reasonsExpanded, toggleCellReasons, allReasonsExpanded, setAllReasonsExpanded,
       datasetSourceTaskId, datasetRevision, useComparisonDataset,
       evaluationProfiles, compareProfiles, selectedEvaluationProfile, evaluationProfileLabel,
+      taskEvaluationProfile, taskProtocolManifest, taskProtocolDiagnostics, taskIsChat, summaryDimensions, setTaskProtocol,
       judgeModelProfiles, selectedJudgeModelProfile, selectedModelProfile, enableThinking, changeJudgeModel,
       taskJudgeRuntime, taskJudgeSummary, thinkingLabel, judgeRuntimeLabel,
       mediaConcurrency, requestPacing, evalTimeout, submitting, running, progress, total, results, summary, taskId, runError,

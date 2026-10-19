@@ -4,9 +4,12 @@ from fastapi import HTTPException
 
 from auto_eval.judges.compare_protocols import (
     DEFAULT_COMPARE_PROTOCOL_ID,
+    V02_PLUS_COMPARE_PROTOCOL_ID,
     V03_COMPARE_PROTOCOL_ID,
     V02_CALIBRATED_COMPARE_PROTOCOL_ID,
     V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID,
+    QA_CHAT_COMPARE_PROTOCOL_ID,
+    QA_CHAT_V2_COMPARE_PROTOCOL_ID,
     VisualCompareObservationV02,
     list_compare_protocols,
     resolve_compare_protocol,
@@ -37,11 +40,19 @@ def test_registry_defaults_to_stable_v02_and_exposes_experimental_versions():
     assert resolve_compare_protocol(None).id == DEFAULT_COMPARE_PROTOCOL_ID
     assert {profile.id for profile in list_compare_protocols()} == {
         DEFAULT_COMPARE_PROTOCOL_ID,
+        V02_PLUS_COMPARE_PROTOCOL_ID,
         V03_COMPARE_PROTOCOL_ID,
         V02_CALIBRATED_COMPARE_PROTOCOL_ID,
         V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID,
+        QA_CHAT_COMPARE_PROTOCOL_ID,
+        QA_CHAT_V2_COMPARE_PROTOCOL_ID,
     }
     assert resolve_compare_protocol(V03_COMPARE_PROTOCOL_ID).status == "experimental"
+    plus = resolve_compare_protocol(V02_PLUS_COMPARE_PROTOCOL_ID)
+    assert plus.status == "stable"
+    assert plus.bundle_revision == "0.2.2"
+    assert plus.observation_model is VisualCompareObservationV02
+    assert plus.require_response_pass is True
     calibrated = resolve_compare_protocol(V02_CALIBRATED_COMPARE_PROTOCOL_ID)
     assert calibrated.status == "experimental"
     assert calibrated.public_metadata()["input_modalities"] == ["text", "text_image"]
@@ -129,6 +140,13 @@ async def test_eval_api_freezes_selected_protocol_on_new_task(monkeypatch):
     assert default_response["evaluation_profile"] == DEFAULT_COMPARE_PROTOCOL_ID
     assert created[-1].protocol_manifest["status"] == "stable"
 
+    plus_response = await server_module.api_eval(
+        server_module.EvalReq(mode="compare", items=[item], evaluation_profile=V02_PLUS_COMPARE_PROTOCOL_ID)
+    )
+    assert plus_response["evaluation_profile"] == V02_PLUS_COMPARE_PROTOCOL_ID
+    assert created[-1].protocol_manifest["bundle_revision"] == "0.2.2"
+    assert created[-1].protocol_manifest["score_range"] == [1, 5]
+
     v03_response = await server_module.api_eval(
         server_module.EvalReq(
             mode="compare",
@@ -166,11 +184,15 @@ async def test_eval_api_freezes_selected_protocol_on_new_task(monkeypatch):
     assert manifest["status"] == "experimental"
     public = server_module.api_config()["evaluation_profiles"]
     assert [p["id"] for p in public] == [
-        DEFAULT_COMPARE_PROTOCOL_ID, V03_COMPARE_PROTOCOL_ID,
+        DEFAULT_COMPARE_PROTOCOL_ID, V02_PLUS_COMPARE_PROTOCOL_ID, V03_COMPARE_PROTOCOL_ID,
         V02_CALIBRATED_COMPARE_PROTOCOL_ID,
         V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID,
+        QA_CHAT_COMPARE_PROTOCOL_ID,
+        QA_CHAT_V2_COMPARE_PROTOCOL_ID,
     ]
-    assert [p["id"] for p in public if p["status"] == "stable"] == [DEFAULT_COMPARE_PROTOCOL_ID]
+    assert [p["id"] for p in public if p["status"] == "stable"] == [
+        DEFAULT_COMPARE_PROTOCOL_ID, V02_PLUS_COMPARE_PROTOCOL_ID,
+    ]
 
     with pytest.raises(HTTPException) as exc_info:
         await server_module.api_eval(
@@ -229,12 +251,16 @@ def test_existing_protocols_cannot_restore_thinking_exposure_revision(protocol_i
 @pytest.mark.parametrize("protocol_id,revision", [
     (DEFAULT_COMPARE_PROTOCOL_ID, "0.2.0"),
     (DEFAULT_COMPARE_PROTOCOL_ID, "0.2.1"),
+    (V02_PLUS_COMPARE_PROTOCOL_ID, "0.2.1"),
+    (V02_PLUS_COMPARE_PROTOCOL_ID, "0.2.2"),
     (V03_COMPARE_PROTOCOL_ID, "0.3.0"),
     (V03_COMPARE_PROTOCOL_ID, "0.3.1"),
     (V02_CALIBRATED_COMPARE_PROTOCOL_ID, "0.2.2"),
     (V02_CALIBRATED_COMPARE_PROTOCOL_ID, "0.2.3"),
     (V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID, "0.2.3"),
     (V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID, "0.2.4"),
+    (QA_CHAT_COMPARE_PROTOCOL_ID, "1.0.0"),
+    (QA_CHAT_V2_COMPARE_PROTOCOL_ID, "1.1.0"),
 ])
 def test_existing_protocol_revisions_still_restore(protocol_id, revision):
     restored = resolve_compare_protocol(protocol_id, revision)
@@ -281,3 +307,141 @@ def test_thinking_exposure_ui_only_exposes_r023():
     assert resolve_compare_protocol(active.id, "0.2.3") is active
     archived = resolve_compare_protocol(active.id, "0.2.4")
     assert archived not in list_compare_protocols()
+
+
+@pytest.mark.parametrize("response_gate", ["pass", "fail", "unclear"])
+@pytest.mark.parametrize("revision", ["0.2.1", "0.2.2"])
+def test_stable_plus_preserves_existing_schema_and_gate_policy(response_gate, revision):
+    protocol = resolve_compare_protocol(V02_PLUS_COMPARE_PROTOCOL_ID, revision)
+    observation = protocol.observation_model.model_validate(_observation_data(5, response_gate))
+    result = visual_compare_result_fields(observation, protocol)
+    assert result["answer1_understanding_score"] == (5 if response_gate == "pass" else None)
+    assert result["answer2_understanding_score"] == 3
+    assert result["standard_version"] == "0.2-simplified-plus"
+    assert result["evaluation_profile"] == V02_PLUS_COMPARE_PROTOCOL_ID
+    assert result["bundle_revision"] == revision
+    assert result["overall_winner"] is None
+
+
+@pytest.mark.parametrize("revision", ["0.2.0", "0.2.3", "0.2.4", "0.3.0", "1.0.0", "1.1.0", "unknown"])
+def test_stable_plus_does_not_restore_another_protocol_revision(revision):
+    with pytest.raises(ValueError, match="无法恢复任务冻结的实现版本"):
+        resolve_compare_protocol(V02_PLUS_COMPARE_PROTOCOL_ID, revision)
+
+
+@pytest.mark.parametrize("product_count,evidence_mode,expected_sha256", [
+    (2, "video_frames", "cad4deb0a5db837ac161cd50af994ad58d058cc474aa31eeed7f8e8da176eb1a"),
+    (2, "long_screenshot", "c6c7a1e7b6b26d95e7ab3274aab6b7d0f9e66e322f0744cc18b3ead42d2a1b94"),
+    (3, "video_frames", "9c9f7c9389b67413302cdcce01afd76eb3c0b3a83e4cf5b0ea26bf0720858603"),
+    (3, "long_screenshot", "fb367a01fd72bcae3266946cbc05da714a4b21faf3ba32f09934ad2e40693cbb"),
+])
+def test_stable_plus_prompt_bytes_remain_frozen(product_count, evidence_mode, expected_sha256):
+    """Freeze the original stable-plus source and rendered 0.2.1 request.
+
+    Anchors were captured from competitive_assessment 7dbe69c, before the
+    qa_chat implementation merge. A scoring change requires a new revision.
+    """
+    import hashlib
+    from pathlib import Path
+    from auto_eval.judges import visual_compare_prompt_v02_simplified_plus_r021 as prompt
+
+    source = Path(prompt.__file__).read_text(encoding="utf-8").encode("utf-8")
+    assert hashlib.sha256(source).hexdigest() == "f436ea425624ec57a47c81401a9812a37eb401d60f3749a24ef365fbb24b3e9b"
+    protocol = resolve_compare_protocol(V02_PLUS_COMPARE_PROTOCOL_ID, "0.2.1")
+    assert protocol.system_template is prompt.VISUAL_COMPARE_SYSTEM
+    assert protocol.user_template is prompt.VISUAL_COMPARE_USER
+    values = dict(persona="frozen-plus-regression", product_count=product_count,
+                  evidence_mode=evidence_mode, evaluation_datetime="2026-10-15T12:00:00+08:00",
+                  question="frozen query", context="frozen context", context1="c1", context2="c2", context3="c3",
+                  answer1="a1", answer2="a2", answer3="a3", frame_count1=2, frame_count2=2, frame_count3=2,
+                  image_count1=2, image_count2=2, image_count3=2,
+                  split_manifest1="{}", split_manifest2="{}", split_manifest3="{}")
+    request = protocol.system_template.render(**values) + "\0" + protocol.user_template.render(**values)
+    assert hashlib.sha256(request.encode("utf-8")).hexdigest() == expected_sha256
+    assert protocol.request_metadata() == {
+        "id": V02_PLUS_COMPARE_PROTOCOL_ID, "standard_id": "qa_competitor_compare",
+        "standard_version": "0.2-simplified-plus", "bundle_revision": "0.2.1",
+        "display": "V0.2 简化版（稳定plus）·1-5分", "status": "stable", "score_range": [1, 5],
+        "modes": ["compare"], "input_modalities": ["text", "text_image"],
+        "conversation_adapter_version": "compare-conversation-1",
+    }
+    assert protocol.public_metadata()["score_dimensions"] == list(protocol.score_dimensions)
+
+
+@pytest.mark.parametrize("product_count,evidence_mode,expected_sha256", [
+    (2, "video_frames", "6eda7cb297d89045a115e3d34fb41a58b4cc1115e2a5f1ec5be4f84f8ac16950"),
+    (2, "long_screenshot", "f11aa6874e78850f41a059a3f7015c3c1be8c7e96678e0f32bc4c4b153790644"),
+    (3, "video_frames", "be4a83308d7ace04e10d35ea67123292e7c2b4b215d166d1b7b6444952a40f49"),
+    (3, "long_screenshot", "a4f02fbf1e34bd2476cb3d27edda31829bca3360eb3ff892c10d129aeae239a8"),
+])
+def test_stable_plus_uploaded_prompt_is_frozen_and_preserves_output_contract(
+    product_count, evidence_mode, expected_sha256
+):
+    """Freeze the uploaded 0.2.2 source while retaining the 0.2.1 I/O shape."""
+    import hashlib
+    import json
+    from pathlib import Path
+    from auto_eval.judges import visual_compare_prompt_v02_simplified_plus as prompt
+
+    assert hashlib.sha256(Path(prompt.__file__).read_bytes()).hexdigest() == (
+        "5c774f5bf795f8b9a1047a535186a5c30044c767d2adcc3123a9f1aa7b92a7ad"
+    )
+    active = resolve_compare_protocol(V02_PLUS_COMPARE_PROTOCOL_ID)
+    frozen = resolve_compare_protocol(V02_PLUS_COMPARE_PROTOCOL_ID, "0.2.1")
+    assert active.bundle_revision == "0.2.2"
+    assert resolve_compare_protocol(V02_PLUS_COMPARE_PROTOCOL_ID, "0.2.2") is active
+    assert active.system_template is prompt.VISUAL_COMPARE_SYSTEM
+    assert active.user_template is prompt.VISUAL_COMPARE_USER
+    assert frozen.system_template is not active.system_template
+    assert frozen not in list_compare_protocols()
+    assert active.observation_model is frozen.observation_model is VisualCompareObservationV02
+    assert active.require_response_pass is frozen.require_response_pass is True
+    assert active.dimensions == frozen.dimensions
+    assert active.score_dimensions == frozen.score_dimensions
+    assert active.request_metadata() == {**frozen.request_metadata(), "bundle_revision": "0.2.2"}
+    values = dict(persona="frozen-plus-regression", product_count=product_count,
+                  evidence_mode=evidence_mode, evaluation_datetime="2026-10-15T12:00:00+08:00",
+                  question="frozen query", context="frozen context", context1="c1", context2="c2", context3="c3",
+                  answer1="a1", answer2="a2", answer3="a3", frame_count1=2, frame_count2=2, frame_count3=2,
+                  image_count1=2, image_count2=2, image_count3=2,
+                  split_manifest1="{}", split_manifest2="{}", split_manifest3="{}")
+    system = active.system_template.render(**values)
+    user = active.user_template.render(**values)
+    request = system + "\0" + user
+    assert hashlib.sha256(request.encode("utf-8")).hexdigest() == expected_sha256
+    assert user == frozen.user_template.render(**values)
+
+    def output_example(rendered_system):
+        output = rendered_system.split("【二十二、输出JSON结构】", 1)[1]
+        return json.loads(output[output.index("{"):output.rindex("}") + 1])
+
+    original_example = output_example(frozen.system_template.render(**values))
+    updated_example = output_example(system)
+    assert len(updated_example) == 81
+    assert list(updated_example) == list(original_example)
+    assert updated_example == original_example
+
+
+@pytest.mark.parametrize("profile_id,version,revision,schema", [
+    (V02_PLUS_COMPARE_PROTOCOL_ID, "0.2-simplified-plus", "0.2.1", None),
+    (V02_PLUS_COMPARE_PROTOCOL_ID, "0.2-simplified-plus", "0.2.2", None),
+    (QA_CHAT_COMPARE_PROTOCOL_ID, "1.0", "1.0.0", "qa-chat-result-1"),
+    (QA_CHAT_V2_COMPARE_PROTOCOL_ID, "1.1", "1.1.0", "qa-chat-result-2"),
+])
+def test_merge_keeps_plus_and_chat_revisions_separate_through_snapshot(profile_id, version, revision, schema):
+    """Merging chat V2 cannot reinterpret either older frozen result family."""
+    protocol = resolve_compare_protocol(profile_id, revision)
+    task = Task(id="merged-profile", mode="compare", items=[], options={},
+                evaluation_profile=profile_id, protocol_manifest=protocol.public_metadata())
+    restored = _task_from_snapshot(snapshot_payload(task_to_snapshot(task)), task.id)
+    assert restored.evaluation_profile == profile_id
+    assert restored.protocol_manifest["standard_id"] == protocol.standard_id
+    assert restored.protocol_manifest["standard_version"] == version
+    assert restored.protocol_manifest["bundle_revision"] == revision
+    assert restored.protocol_manifest["result_schema_version"] == schema
+    assert resolve_compare_protocol(restored.evaluation_profile, revision).observation_model is protocol.observation_model
+    other_revisions = ({"1.0.0", "1.1.0"} if profile_id == V02_PLUS_COMPARE_PROTOCOL_ID
+                       else {"0.2.1", "0.2.2", "1.0.0", "1.1.0"} - {revision})
+    for other in other_revisions:
+        with pytest.raises(ValueError, match="无法恢复任务冻结的实现版本"):
+            resolve_compare_protocol(profile_id, other)
