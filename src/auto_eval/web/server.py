@@ -160,7 +160,7 @@ class QueuePositionReq(BaseModel):
 
 
 class ResumeReq(BaseModel):
-    concurrency: int = Field(ge=1, le=128, strict=True)
+    concurrency: int | None = Field(default=None, ge=1, le=128, strict=True)
     include_failed: bool = False
     idempotency_key: str = Field(default="", max_length=128)
 
@@ -363,6 +363,12 @@ def api_config():
         "evaluation_profiles": [
             profile.public_metadata() for profile in list_compare_protocols()
         ],
+        # API/端点预设：前端按任务选择并随新建任务冻结进 judge_runtime。
+        "endpoints": [
+            {"name": e.name, "display": e.display or e.name,
+             "base_url": e.base_url, "api_key_env": e.api_key_env}
+            for e in c.endpoints
+        ],
     }
 
 
@@ -448,8 +454,6 @@ class SettingsReq(BaseModel):
     waiting_capacity: int | None = None
     eval_timeout_s: float | None = None
     judges: list[str] | None = None
-    active_endpoint: str | None = None
-    model: str | None = None
 
 
 def _settings_payload() -> dict:
@@ -457,21 +461,12 @@ def _settings_payload() -> dict:
     configured = [j.name for j in cfg().judges]
     # 配置变化后持久化的名字可能失效：按当前配置过滤，空则回落第一个
     judges = [name for name in s.judges if name in configured] or configured[:1]
-    # 端点预设/模型同理：配置里已删除的回落「未覆盖」
-    configured_endpoints = {e.name for e in cfg().endpoints}
-    active_endpoint = (
-        s.active_endpoint if s.active_endpoint in configured_endpoints else None
-    )
-    configured_models = set(cfg().models)
-    model = s.model if s.model in configured_models else None
     return {
         "concurrency": s.concurrency,
         "max_in_flight": s.max_in_flight,
         "waiting_capacity": s.waiting_capacity,
         "eval_timeout_s": s.eval_timeout_s,
         "judges": judges,
-        "active_endpoint": active_endpoint,
-        "model": model,
         "models": list(cfg().models),
         "endpoints": [
             {
@@ -502,19 +497,12 @@ async def api_put_settings(req: SettingsReq) -> dict:
         raise HTTPException(422, f"waiting_capacity 须为 {MIN_WAITING_CAPACITY}–{MAX_WAITING_CAPACITY}")
     if req.eval_timeout_s is not None and (isinstance(req.eval_timeout_s, bool) or not MIN_EVAL_TIMEOUT_S <= req.eval_timeout_s <= MAX_EVAL_TIMEOUT_S):
         raise HTTPException(422, f"eval_timeout_s 须为 {MIN_EVAL_TIMEOUT_S}–{MAX_EVAL_TIMEOUT_S}")
-    # 空串=清空覆盖（回落 None），非空才须命中配置里的端点预设/可选模型
-    if req.active_endpoint is not None and req.active_endpoint and req.active_endpoint not in {e.name for e in cfg().endpoints}:
-        raise HTTPException(422, f"active_endpoint 不在配置的端点预设中：{req.active_endpoint}")
-    if req.model is not None and req.model and req.model not in set(cfg().models):
-        raise HTTPException(422, f"model 不在配置的可选模型列表中：{req.model}")
     apply_settings(
         concurrency=req.concurrency,
         max_in_flight=req.max_in_flight,
         waiting_capacity=req.waiting_capacity,
         eval_timeout_s=req.eval_timeout_s,
         judges=req.judges,
-        active_endpoint=req.active_endpoint,
-        model=req.model,
     )
     persist_settings()
     return _settings_payload()
@@ -629,12 +617,19 @@ async def api_resume(task_id: str, req: ResumeReq):
     if not indexes:
         raise HTTPException(409, "没有待执行的题目；如需重试失败项，请勾选同时重试失败项")
     app_cfg = cfg()
+    # 前端 resume 不再上报 concurrency（并发已由全局 MODEL_LIMITER 统一管控）；
+    # 缺省时回落到任务既有并发值，与新任务/调度统计口径一致。
+    effective_concurrency = req.concurrency if req.concurrency is not None else (
+        task.execution_control.get("concurrency")
+        or (task.options.get("concurrency") if isinstance(task.options.get("concurrency"), int) else None)
+        or 4
+    )
     attempt = {"id": f"resume_{uuid.uuid4().hex[:10]}", "idempotency_key": idem,
                "status": "queued", "created_at": time.time(), "indexes": indexes,
-               "concurrency": req.concurrency, "include_failed": req.include_failed,
+               "concurrency": effective_concurrency, "include_failed": req.include_failed,
                "completed": 0, "failed": 0}
     attempts.append(attempt)
-    task.execution_control.update(state="queued", concurrency=req.concurrency, pending_indexes=indexes.copy())
+    task.execution_control.update(state="queued", concurrency=effective_concurrency, pending_indexes=indexes.copy())
     _freeze_legacy_judge(task, app_cfg)
     position = EVAL_SCHEDULER.enqueue(task, app_cfg, run_resume)
     await wait_task_save(task, save=save_task)

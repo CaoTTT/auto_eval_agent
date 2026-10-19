@@ -14,10 +14,10 @@ from datetime import datetime
 from pathlib import Path
 
 from ..paths import RUNS_DIR
-from ..preparation import run_preparation
+from ..preparation import preparation_limit, run_preparation
 from ..timing import StageTimings, collect_timings, timing_span
 from ..task_control import PauseRequested, bind_pause_check, check_pause, pause_aware, wait_for_active
-from .scheduler import MAX_CONCURRENCY, MODEL_LIMITER, PIPELINE_LIMITER, get_settings
+from .scheduler import MAX_CONCURRENCY, MODEL_LIMITER, PIPELINE_LIMITER, PREP_LIMITER, get_settings
 from ..config import AppConfig, JudgeConfig, VisualModeProfile
 from ..query_images import prepare_query_images, QueryImageError, PREPARED_FIELDS
 from ..judges import (
@@ -295,25 +295,6 @@ async def run_eval(task: Task, cfg: AppConfig) -> None:
             retire_task(task)
 
 
-def _overridden_judge(judge: JudgeConfig, settings, endpoints) -> JudgeConfig:
-    """把全局设置的端点预设（base_url+api_key_env 成对）与 model 覆盖到裁判配置。
-
-    选中 active_endpoint 时以其 base_url/api_key_env 覆盖裁判自身值；设了全局
-    model 时覆盖 model。三者均未覆盖时返回原对象（不复制）。纯函数，便于单测。
-    """
-    update: dict = {}
-    if settings.active_endpoint:
-        preset = next(
-            (e for e in endpoints if e.name == settings.active_endpoint), None
-        )
-        if preset:
-            update["base_url"] = preset.base_url
-            update["api_key_env"] = preset.api_key_env  # 成对一起覆盖
-    if settings.model:
-        update["model"] = settings.model
-    return judge.model_copy(update=update) if update else judge
-
-
 def _make_item_evaluator(
     task: Task,
     cfg: AppConfig,
@@ -359,8 +340,9 @@ def _make_item_evaluator(
     clients: list[JudgeClient] = []
     try:
         for j in judges_cfg:
-            # 全局设置的端点预设与 model 覆盖，落到构造客户端前的裁判配置上
-            clients.append(JudgeClient(_overridden_judge(j, get_settings(), cfg.endpoints)))
+            # 裁判配置（含 API/端点的 base_url+api_key_env）已冻结在 task.judge_runtime，
+            # 由 restore_runtime 原样恢复；这里不再做任何全局覆盖。
+            clients.append(JudgeClient(j))
     except BaseException:
         if clients:
             spawn_background(_aclose_judge_clients(clients))
@@ -646,42 +628,20 @@ def _make_item_evaluator(
                                     progress=15,
                                     progress_message="正在重新执行单题评测",
                                 )
-                            if MODEL_LIMITER.would_block():
-                                # 展示层提示：暂无可发令牌，需排队等限流。
-                                log_event(
-                                    "模型调度",
-                                    "等待模型限流令牌",
-                                    details={
-                                        "模型在途": MODEL_LIMITER.stats()["running"],
-                                        "模型排队": MODEL_LIMITER.stats()["queued"],
-                                    },
-                                    progress=13,
-                                    progress_message="等待模型限流令牌",
-                                )
-                            # 每次实际模型请求（含重试的每一次 _eval_one）各取一个全局
-                            # 令牌：重试不免费。等令牌不计入单题超时（wait_for_active
-                            # 只包 _eval_one）；等待期间可被暂停中断。
-                            acquired = False
-                            try:
-                                # 等令牌不计入单题超时：wait_for_active 只包 _eval_one。
-                                await pause_aware(MODEL_LIMITER.acquire())
-                                acquired = True
-                                check_pause()
-                                res = await wait_for_active(
-                                    _eval_one(
-                                        task.mode, idx, item_dict,
-                                        rich_judges=rich_judges,
-                                        compare_judges=compare_judges,
-                                        evidence_callback=save_evidence,
-                                        category_display=category_display,
-                                        **({"conversation_input": conversation_input} if conversation_input else {}),
-                                    ),
-                                    timeout=eval_timeout,
-                                )
-                            finally:
-                                # 超时/异常/暂停都归还令牌，避免在途计数泄漏。
-                                if acquired:
-                                    MODEL_LIMITER.release()
+                            # 令牌收在 llm_stream.send()：每次真实模型请求（含网络重试/
+                            # 降级/JSON 修复）各取一个全局令牌+在途名额，重试不绕过。
+                            # 这里不再整题持令牌；wait_for_active 仍负责单题超时。
+                            res = await wait_for_active(
+                                _eval_one(
+                                    task.mode, idx, item_dict,
+                                    rich_judges=rich_judges,
+                                    compare_judges=compare_judges,
+                                    evidence_callback=save_evidence,
+                                    category_display=category_display,
+                                    **({"conversation_input": conversation_input} if conversation_input else {}),
+                                ),
+                                timeout=eval_timeout,
+                            )
                             break
                         except asyncio.TimeoutError:
                             last_error = TimeoutError(f"单题评估超过 {eval_timeout:.0f} 秒")
@@ -782,24 +742,27 @@ def _make_item_evaluator(
         # bind_pause_check 是同步 contextmanager，须用 with；PIPELINE_LIMITER.slot 用 async with。
         async with PIPELINE_LIMITER.slot():
             with bind_pause_check(lambda: task.pause_requested):
-                try:
-                    return await one(idx, item_dict, pending_judge_traces)
-                except PauseRequested:
-                    # Pause is an unfinished item, not an evaluation failure. Keep
-                    # any completed/billable call traces without publishing a score
-                    # or consuming its pending index; resume will evaluate it again.
-                    if pending_judge_traces:
-                        await asyncio.to_thread(flush_web_trace_records, pending_judge_traces, {
-                            "index": idx, "item_id": item_dict.get("id", f"q{idx}"),
-                            "evaluation_status": "paused", "evaluation_pending": True,
+                # 等待容量约束预处理（抽帧）并发：preparation_limit 绑定一个容量 =
+                # waiting_capacity 的 PREP_LIMITER，run_preparation 抽帧时持有、模型前释放。
+                with preparation_limit(PREP_LIMITER):
+                    try:
+                        return await one(idx, item_dict, pending_judge_traces)
+                    except PauseRequested:
+                        # Pause is an unfinished item, not an evaluation failure. Keep
+                        # any completed/billable call traces without publishing a score
+                        # or consuming its pending index; resume will evaluate it again.
+                        if pending_judge_traces:
+                            await asyncio.to_thread(flush_web_trace_records, pending_judge_traces, {
+                                "index": idx, "item_id": item_dict.get("id", f"q{idx}"),
+                                "evaluation_status": "paused", "evaluation_pending": True,
+                            })
+                        previous = task.item_progress.get(str(idx)) or {}
+                        _record_progress(task, idx, {
+                            **previous, "item_index": idx, "status": "paused",
+                            "message": "已暂停，尚未完成的评测将在恢复后继续",
+                            "finished_at": int(time.time() * 1000),
                         })
-                    previous = task.item_progress.get(str(idx)) or {}
-                    _record_progress(task, idx, {
-                        **previous, "item_index": idx, "status": "paused",
-                        "message": "已暂停，尚未完成的评测将在恢复后继续",
-                        "finished_at": int(time.time() * 1000),
-                    })
-                    return {"_paused": True}
+                        return {"_paused": True}
 
     return limited_one, clients
 

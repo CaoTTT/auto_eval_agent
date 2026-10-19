@@ -32,6 +32,36 @@ def test_preparation_capacity_must_be_positive(capacity):
 
 
 @pytest.mark.asyncio
+async def test_set_capacity_grows_admits_waiters_and_shrinks_is_soft():
+    limiter = PreparationLimiter(2)
+    a = asyncio.create_task(limiter.acquire())
+    b = asyncio.create_task(limiter.acquire())
+    c = asyncio.create_task(limiter.acquire())
+    d = asyncio.create_task(limiter.acquire())
+    await asyncio.wait_for(a, timeout=1)
+    await asyncio.wait_for(b, timeout=1)
+    await asyncio.sleep(0)
+    assert not c.done() and not d.done()
+    # 调大 2 → 4：新增名额直接按优先级放给队头等待者，无需 release。
+    limiter.set_capacity(4)
+    await asyncio.wait_for(asyncio.gather(c, d), timeout=1)
+    # 调小为软限制：运行中的名额不必归还，只是不再放新名额。
+    limiter.set_capacity(1)
+    e = asyncio.create_task(limiter.acquire())
+    await asyncio.sleep(0)
+    assert not e.done()
+    # 依次归还最初拿到的 4 个名额：队列里的 e 拿到 1 个，其余回补可用额度。
+    for _ in range(4):
+        limiter.release()
+    await asyncio.wait_for(e, timeout=1)
+    limiter.release()
+    await assert_one_reusable_permit(limiter)
+    # 非法容量 clamp 到 1（与调度器 PREP_LIMITER.set_capacity(max(1,...)) 一致）。
+    limiter.set_capacity(0)
+    assert limiter._total == 1
+
+
+@pytest.mark.asyncio
 async def test_ready_case_encoding_precedes_later_case_extraction():
     limiter = PreparationLimiter(1)
     order = []

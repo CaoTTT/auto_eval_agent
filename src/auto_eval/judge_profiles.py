@@ -9,7 +9,7 @@ BAILIAN_MODELS = {
     "qwen3.5-397b-a17b": ("bailian_qwen35_397b", "Qwen3.5-397B-A17B"),
     "qwen3.8-flash": ("bailian_qwen38_flash", "Qwen3.8-Flash"),
 }
-FROZEN_OPTIONS = {"judges", "judge_model_profile", "enable_thinking"}
+FROZEN_OPTIONS = {"judges", "judge_model_profile", "enable_thinking", "api_endpoint"}
 
 
 def is_bailian(judge: JudgeConfig) -> bool:
@@ -118,8 +118,20 @@ def resolve_new_runtime(config: AppConfig, options: dict) -> tuple[dict, list[Ju
     if profile.supports_thinking and thinking is None:
         raise ValueError("支持思考的模型须配置明确的默认开关")
     judge = configured_profile(config, profile, thinking)
+    # API 跟随任务：选中端点（base_url+api_key_env 成对）冻结进裁判配置，随任务持久；
+    # 缺省（空）沿用裁判自身 base_url/api_key_env。运行期不再被任何全局设置改写。
+    api_endpoint = options.get("api_endpoint") or ""
+    if api_endpoint:
+        endpoint = next((e for e in config.endpoints if e.name == api_endpoint), None)
+        if endpoint is None:
+            raise ValueError("端点预设不存在")
+        judge = judge.model_copy(update={
+            "base_url": endpoint.base_url,
+            "api_key_env": endpoint.api_key_env,
+        })
     # Reference the credential slot without writing the secret value.
-    snapshot = {"version": 1, "profile_id": profile.id, "judges": [judge.model_dump()]}
+    snapshot = {"version": 1, "profile_id": profile.id,
+                "api_endpoint": api_endpoint or None, "judges": [judge.model_dump()]}
     return snapshot, [judge]
 
 
@@ -152,12 +164,15 @@ def check_frozen_options(task, options: dict) -> None:
         # Never reinterpret a historical task using a newly selected model/toggle.
         if "judge_model_profile" in options or "enable_thinking" in options:
             raise ValueError("旧任务未记录完整裁判配置；切换模型或思考模式请新建任务")
+        if "api_endpoint" in options and options["api_endpoint"]:
+            raise ValueError("已有任务的 API/端点不可变；请新建任务")
         if "judges" in options and options["judges"] != task.options.get("judges", []):
             raise ValueError("已有任务的裁判不可变；请新建任务")
         return
     judges = runtime["judges"]
     expected = {"judges": [j["name"] for j in judges], "judge_model_profile": runtime["profile_id"],
-                "enable_thinking": judges[0].get("enable_thinking")}
+                "enable_thinking": judges[0].get("enable_thinking"),
+                "api_endpoint": runtime.get("api_endpoint") or ""}
     for key in FROZEN_OPTIONS & options.keys():
         if key == "enable_thinking" and type(options[key]) is not bool:
             raise ValueError("enable_thinking 必须为 true 或 false")

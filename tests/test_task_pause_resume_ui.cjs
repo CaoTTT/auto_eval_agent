@@ -41,10 +41,10 @@ async function main() {
   assert.equal(app.selectedTaskStatus.value, 'paused');
   assert.equal(app.canResumeTask.value, true);
   assert.equal(stream.closed, true);
-  app.resumeConcurrency.value = 9; app.resumeFailed.value = true;
+  app.resumeFailed.value = true;
   await app.controlTask('resume');
   const body = JSON.parse(requests.at(-1).options.body);
-  assert.equal(body.concurrency, 9);
+  assert.equal('concurrency' in body, false, 'resume must not send per-task concurrency');
   assert.equal(body.include_failed, true);
   assert.ok(body.idempotency_key);
   assert.equal(app.selectedTaskStatus.value, 'queued');
@@ -52,13 +52,6 @@ async function main() {
 
   snapshot.status = 'paused'; snapshot.active_runs = 0;
   await app.loadHistoryTask('task-one');
-  app.resumeConcurrency.value = 0;
-  const count = requests.length;
-  await app.controlTask('resume');
-  assert.equal(requests.length, count, 'invalid concurrency must not send a request');
-  assert.match(app.runError.value, /1–128/);
-
-  app.resumeConcurrency.value = 5;
   pendingControl = {};
   const pending = app.controlTask('resume');
   await Promise.resolve();
@@ -69,6 +62,6 @@ async function main() {
   assert.equal(app.taskId.value, 'task-two', 'late action response must not switch the selected task');
   assert.equal(app.selectedTaskStatus.value, 'done');
   assert.equal(app.controlSubmitting.value, false);
-  console.log('Pause/resume UI: drain state, preserved results, concurrency, validation, SSE and navigation race passed');
+  console.log('Pause/resume UI: drain state, preserved results, SSE and navigation race passed');
 }
 main().catch(error => {console.error(error); process.exitCode = 1;});

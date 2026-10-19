@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
-from auto_eval.config import AppConfig, JudgeConfig, JudgeModelProfile, RateLimitConfig, VisualModeProfile
+from auto_eval.config import AppConfig, EndpointPreset, JudgeConfig, JudgeModelProfile, RateLimitConfig, VisualModeProfile
 from auto_eval.judge_profiles import (
     check_frozen_options, default_profile_id, model_profiles, resolve_new_runtime, restore_runtime, legacy_runtime,
 )
@@ -55,10 +55,45 @@ def test_legacy_bailian_auto_discovers_models_and_retains_default():
     assert default_profile_id(app) == "bailian_qwen38_flash"
 
 
-@pytest.mark.asyncio
-async def test_old_flash_runtime_uses_current_quota_without_restricting_new_tasks():
-    from auto_eval.request_throttle import shared_throttle
+def test_api_endpoint_frozen_into_runtime_and_rejected_on_change():
+    app = config()
+    app.endpoints = [
+        EndpointPreset(name="proxy-a", base_url="https://proxy-a.invalid/v1", api_key_env="PROXY_A_KEY"),
+        EndpointPreset(name="proxy-b", base_url="https://proxy-b.invalid/v1", api_key_env="PROXY_B_KEY"),
+    ]
+    # 选中端点：base_url/api_key_env 冻结进 runtime
+    runtime, judges = resolve_new_runtime(
+        app, {"judge_model_profile": "bailian_qwen35_397b", "enable_thinking": False, "api_endpoint": "proxy-a"}
+    )
+    assert judges[0].base_url == "https://proxy-a.invalid/v1"
+    assert runtime["api_endpoint"] == "proxy-a"
+    # 缺省（不选端点）沿用裁判自身配置
+    default_runtime, default_judges = resolve_new_runtime(
+        app, {"judge_model_profile": "bailian_qwen35_397b", "enable_thinking": False}
+    )
+    assert default_judges[0].base_url == app.judges[0].base_url
+    assert default_runtime.get("api_endpoint") is None
+    # 未知端点拒绝
+    with pytest.raises(ValueError):
+        resolve_new_runtime(app, {"judge_model_profile": "bailian_qwen35_397b", "api_endpoint": "nope"})
+    # 冻结后不可改端点
+    task = Task(id="t", mode="rich_content", items=[], options={}, judge_runtime=runtime)
+    check_frozen_options(task, {"api_endpoint": "proxy-a"})  # 一致可通过
+    with pytest.raises(ValueError):
+        check_frozen_options(task, {"api_endpoint": "proxy-b"})
+    with pytest.raises(ValueError):
+        check_frozen_options(task, {"api_endpoint": ""})
+    # 未选端点的任务要求空，不能补选
+    with pytest.raises(ValueError):
+        check_frozen_options(
+            Task(id="t2", mode="rich_content", items=[], options={}, judge_runtime=default_runtime),
+            {"api_endpoint": "proxy-a"},
+        )
 
+
+def test_restore_preserves_frozen_judge_runtime():
+    # 全局 MODEL_LIMITER 接管限流后，restore 只保证裁判的 runtime 配置原样恢复，
+    # rate_limit 仍随冻结配置保留（供展示/审计），不再有 shared_throttle 配额共享。
     app = config()
     runtime, _ = resolve_new_runtime(app, {"judge_model_profile": "bailian_qwen38_flash", "enable_thinking": False})
     runtime["judges"][0]["rate_limit"] = RateLimitConfig(
@@ -66,20 +101,14 @@ async def test_old_flash_runtime_uses_current_quota_without_restricting_new_task
     ).model_dump()
     before = copy.deepcopy(runtime)
     restored = restore_runtime(app, runtime)[0]
-    fresh = resolve_new_runtime(app, {"judge_model_profile": "bailian_qwen38_flash"})[1][0]
-    throttle = shared_throttle(restored)
-    assert shared_throttle(fresh) is throttle
-    assert throttle.snapshot()["request_budget"] == 30_000
-    assert throttle.snapshot()["token_budget"] == 20_000_000
-    assert throttle.snapshot()["max_inflight"] == 128
+    # restore 用当前配置（flash 默认配额 rpm=30000），不应用冻结的旧 rpm=60。
+    assert restored.rate_limit is not None and restored.rate_limit.rpm == 30_000
     assert restored.enable_thinking is False
     assert runtime == before
 
 
 @pytest.mark.parametrize("explicit_rate", [None, RateLimitConfig(rpm=120, tpm=200_000, rps=2, max_inflight=16)])
-def test_restore_uses_current_admin_quota_even_after_profile_rename(explicit_rate):
-    from auto_eval.request_throttle import pacing_config
-
+def test_restore_preserves_frozen_quota_after_profile_rename(explicit_rate):
     app = config()
     runtime, _ = resolve_new_runtime(app, {"judge_model_profile": "bailian_qwen38_flash", "enable_thinking": False})
     app.judge_model_profiles = [JudgeModelProfile(
@@ -89,7 +118,6 @@ def test_restore_uses_current_admin_quota_even_after_profile_rename(explicit_rat
     app.judges[0].temperature = .7
     restored = restore_runtime(app, runtime)[0]
     assert restored.rate_limit == explicit_rate
-    assert pacing_config(restored)["tpm"] == (explicit_rate.tpm if explicit_rate else 20_000_000)
     assert restored.enable_thinking is False and restored.temperature == 0
 
 

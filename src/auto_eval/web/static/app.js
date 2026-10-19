@@ -60,7 +60,7 @@ createApp({
     const compareProfiles = computed(() =>
       evaluationProfiles.value.filter((profile) => (profile.modes || []).includes("compare"))
     );
-    const activeEndpoint = ref("");
+    const selectedEndpoint = ref("");  // 新建任务选择的 API/端点（空=用裁判配置默认）
     const globalConcurrency = ref(10);
     const maxInFlight = ref(50);
     const waitingCapacity = ref(10);
@@ -76,11 +76,9 @@ createApp({
         const response = await fetch("/api/settings", { cache: "no-store" });
         if (!response.ok) return;
         const data = await response.json();
-        activeEndpoint.value = data.active_endpoint || "";
         globalConcurrency.value = data.concurrency ?? 10;
         maxInFlight.value = data.max_in_flight ?? 50;
         waitingCapacity.value = data.waiting_capacity ?? 10;
-        endpointOptions.value = data.endpoints || [];
       } catch (_) {}
     }
 
@@ -94,7 +92,6 @@ createApp({
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            active_endpoint: activeEndpoint.value || "",
             concurrency: Number(globalConcurrency.value),
             max_in_flight: Number(maxInFlight.value),
             waiting_capacity: Number(waitingCapacity.value),
@@ -1253,6 +1250,7 @@ createApp({
         evaluation_profile: mode.value === "compare" ? selectedEvaluationProfile.value : null,
         options: {
           ...(mode.value === 'compare' && datasetSourceTaskId.value ? {dataset_source_task_id:datasetSourceTaskId.value} : {}),
+          ...(selectedEndpoint.value ? { api_endpoint: selectedEndpoint.value } : {}),
           judges: selectedJudges.value,
           ...(selectedModelProfile.value ? {
             judge_model_profile: selectedModelProfile.value.id,
@@ -2155,7 +2153,9 @@ createApp({
       evaluationProfiles.value = d.evaluation_profiles || [];
       selectedEvaluationProfile.value = defaultEvaluationProfile();
       selectedJudges.value = defaultJudgeSelection();
-      await loadGlobalSettings();  // 加载全局 API/端点 + 并发/在途/等待容量
+      endpointOptions.value = d.endpoints || [];
+      selectedEndpoint.value = "";  // 默认：用裁判配置自身的端点
+      await loadGlobalSettings();  // 加载全局 并发/在途/等待容量
       if (selectedModelProfile.value) changeJudgeModel();
       loadHistory();
       loadQueue();
@@ -2187,7 +2187,7 @@ createApp({
       queueState, queueEntries, selectedTaskStatus, queueNotice, taskStatusLabel, queueKindLabel,
       selectedTaskTiming, taskElapsedSeconds, formatTaskDuration,
       executionControl, controlSubmitting, resumeFailed, isPausing, canPauseTask, canResumeTask, controlTask,
-      activeEndpoint, globalConcurrency, maxInFlight, waitingCapacity, endpointOptions, saveGlobalSettings,
+      selectedEndpoint, globalConcurrency, maxInFlight, waitingCapacity, endpointOptions, saveGlobalSettings,
       showGlobalSettings, savingGlobalSettings, globalSaveMsg, globalSaveError,
       repairStatus, retryStatusLabel, retrySubmitting, selectedRetryIndexes, activeRetry,
       failedResultIndexes, retryIndexSelected, toggleRetryIndex, retryFailedCases,

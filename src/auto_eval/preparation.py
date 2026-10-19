@@ -53,12 +53,31 @@ class PreparationLimiter:
     def __init__(self, capacity: int):
         if capacity < 1:
             raise ValueError("preparation capacity must be positive")
+        self._total = capacity
         self._available = capacity
         self._sequence = itertools.count()
         self._waiters: list[tuple[int, int, asyncio.Future]] = []
 
+    def set_capacity(self, capacity: int) -> None:
+        """运行时调整容量；缩小为软限制（不抢占运行中的作业）。
+
+        调大时把新增名额按优先级放给队头等待者；调小只减少可用额度，运行中
+        的作业自然收敛。与 ResizableLimiter.set_limit 的软调整语义一致。
+        """
+        new = max(1, int(capacity))
+        self._available += new - self._total
+        self._total = new
+        while self._waiters and self._available > 0:
+            _, _, waiter = heapq.heappop(self._waiters)
+            if waiter.done():  # 已被取消的滞留者，不消耗名额
+                continue
+            self._available -= 1
+            waiter.set_result(None)
+
     async def acquire(self, *, priority: int = 0) -> None:
-        if self._available:
+        # 必须用 >0：收缩后 _available 可能为负（软限制、运行中不抢占），
+        # truthy 检查会把负数误判为可用容量导致超发。
+        if self._available > 0:
             self._available -= 1
             return
         waiter = asyncio.get_running_loop().create_future()

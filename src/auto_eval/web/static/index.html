@@ -219,10 +219,18 @@
 
   <section>
     <h2>② 评估配置</h2>
-    <p class="hint">以下选项用于创建新任务。已创建任务的模型和思考设置固定；暂停恢复、失败补跑沿用原配置。</p>
+    <p class="hint">以下选项用于创建新任务。已创建任务的模型、思考设置与 API/端点固定；暂停恢复、失败补跑沿用原配置。</p>
     <div class="row">
       <span class="lbl">裁判视角：</span>
       <span v-for="j in visibleJudges.filter(j => selectedJudges.includes(j.name))" :key="j.name" class="chip">{{ j.display || j.name }}</span>
+    </div>
+    <div v-if="endpointOptions.length" class="row">
+      <label class="lbl" for="task-endpoint">API / 端点：</label>
+      <select id="task-endpoint" v-model="selectedEndpoint" :disabled="submitting" aria-describedby="task-endpoint-help">
+        <option value="">用裁判配置默认</option>
+        <option v-for="ep in endpointOptions" :key="ep.name" :value="ep.name">{{ ep.display || ep.name }}</option>
+      </select>
+      <span id="task-endpoint-help" class="hint">随本任务冻结；创建后不可改。默认走裁判自身的地址与密钥。</span>
     </div>
     <div v-if="judgeModelProfiles.length" class="row judge-model-options">
       <label class="lbl" for="judge-model-profile">裁判模型：</label>
@@ -256,18 +264,10 @@
     <div class="system-global-settings">
       <p class="global-settings-toggle">
         <a href="#" @click.prevent="showGlobalSettings = !showGlobalSettings">
-          {{ showGlobalSettings ? '▾' : '▸' }} 系统全局设置{{ showGlobalSettings ? '' : '（API/端点 · 并发速率 · 在途 · 等待容量）' }}
+          {{ showGlobalSettings ? '▾' : '▸' }} 系统全局设置{{ showGlobalSettings ? '' : '（并发速率 · 在途 · 等待容量）' }}
         </a>
       </p>
       <div v-if="showGlobalSettings" class="global-settings-panel">
-        <div class="row">
-          <label class="lbl" for="global-endpoint">API / 端点：</label>
-          <select id="global-endpoint" v-model="activeEndpoint" aria-describedby="global-endpoint-help">
-            <option value="">不覆盖（用配置默认）</option>
-            <option v-for="ep in endpointOptions" :key="ep.name" :value="ep.name">{{ ep.display || ep.name }}</option>
-          </select>
-          <span id="global-endpoint-help" class="hint">全局裁判走该端点的地址与密钥。</span>
-        </div>
         <div class="row">
           <label class="lbl" for="global-concurrency">全局并发（每 2 秒请求数）：</label>
           <input id="global-concurrency" type="number" min="1" max="64" step="1" v-model.number="globalConcurrency" aria-describedby="global-concurrency-help" style="width:80px">
@@ -283,7 +283,7 @@
           <input id="global-waiting" type="number" min="0" max="256" step="1" v-model.number="waitingCapacity" aria-describedby="global-waiting-help" style="width:80px">
           <span id="global-waiting-help" class="hint">「抽帧中 + 已抽帧等模型」的作业数上限，封顶关键帧内存。</span>
         </div>
-        <p class="hint">模型并发由以上全局设置统一管控：「全局并发」控制请求速率、「在途数量」控制并发进行中的模型请求、「等待容量」限制媒体准备/抽帧并行度、API/端点决定裁判走哪个后端。修改后需点击保存才生效并持久化。</p>
+        <p class="hint">模型并发由以上全局设置统一管控：「全局并发」控制请求速率、「在途数量」控制并发进行中的模型请求、「等待容量」限制媒体准备/抽帧并行度（API/端点与模型已改为按任务选择并冻结）。修改后需点击保存才生效并持久化。</p>
         <div class="row">
           <button class="primary" @click="saveGlobalSettings" :disabled="savingGlobalSettings">保存全局设置</button>
           <span v-if="globalSaveMsg" class="hint" :class="globalSaveError ? 'error' : ''">{{ globalSaveMsg }}</span>

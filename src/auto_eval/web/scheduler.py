@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 from ..paths import RUNS_DIR
+from ..preparation import PreparationLimiter
 from .history import save_task
 from .persistence import drain_task_saves, queue_task_save, wait_task_save
 from .tasks import Task, retire_task
@@ -57,10 +58,6 @@ class RuntimeSettings:
     # 裁判名列表（本模块不感知 config，只存原始名字；空 = 未设置，由
     # 调用方回落到配置的第一个裁判）。合法性校验在 server PUT 侧做。
     judges: list[str] = field(default_factory=list)
-    # 全局覆盖：选中命名端点预设名（base_url+api_key_env 成对）+ 独立 model。
-    # None/空串 = 不覆盖，裁判回落 config/judges.yaml 自身值。
-    active_endpoint: str | None = None
-    model: str | None = None
 
 
 class ResizableLimiter:
@@ -336,6 +333,9 @@ MODEL_LIMITER: ResizableLimiter | TokenBucketRateLimiter = TokenBucketRateLimite
 PIPELINE_LIMITER = ResizableLimiter(
     DEFAULT_MAX_IN_FLIGHT + DEFAULT_WAITING_CAPACITY
 )
+# 预处理（抽帧/关键帧提取）并发槽：容量 = 等待容量（waiting_capacity），
+# 由 run_preparation 在抽帧阶段持有、进模型前释放。跨事件循环安全。
+PREP_LIMITER = PreparationLimiter(max(1, DEFAULT_WAITING_CAPACITY))
 
 _settings = RuntimeSettings()
 
@@ -345,10 +345,14 @@ def get_settings() -> RuntimeSettings:
 
 
 def _sync_pipeline_limit() -> None:
-    """流水线准入 = 最大在途 + 预处理等待容量；整题持有，封顶关键帧内存。"""
+    """流水线准入 = 最大在途 + 预处理等待容量；整题持有，封顶关键帧内存。
+
+    同时把预处理并发槽对到当前等待容量（clamp ≥1，等待容量最小允许 0）。
+    """
     PIPELINE_LIMITER.set_limit(
         max(1, _settings.max_in_flight + _settings.waiting_capacity)
     )
+    PREP_LIMITER.set_capacity(max(1, _settings.waiting_capacity))
 
 
 def apply_settings(
@@ -358,8 +362,6 @@ def apply_settings(
     waiting_capacity: int | None = None,
     eval_timeout_s: float | None = None,
     judges: list[str] | None = None,
-    active_endpoint: str | None = None,
-    model: str | None = None,
 ) -> RuntimeSettings:
     """更新运行时设置并即时对齐限流器（越界值 clamp 到合法区间）。
 
@@ -395,11 +397,6 @@ def apply_settings(
         )
     if judges is not None:
         _settings.judges = list(dict.fromkeys(str(name) for name in judges))
-    # 空串显式清空覆盖 → 回落 None（=不覆盖，用 config 默认）。
-    if active_endpoint is not None:
-        _settings.active_endpoint = active_endpoint.strip() or None
-    if model is not None:
-        _settings.model = model.strip() or None
     return _settings
 
 
@@ -416,8 +413,6 @@ def load_persisted_settings(path: Path | None = None) -> RuntimeSettings:
     waiting_capacity = None
     eval_timeout_s = None
     judges = None
-    active_endpoint = None
-    model = None
     if isinstance(raw, dict):
         if isinstance(raw.get("concurrency"), int):
             concurrency = raw["concurrency"]
@@ -432,18 +427,12 @@ def load_persisted_settings(path: Path | None = None) -> RuntimeSettings:
             isinstance(name, str) for name in persisted_judges
         ):
             judges = persisted_judges
-        if isinstance(raw.get("active_endpoint"), str):
-            active_endpoint = raw["active_endpoint"]
-        if isinstance(raw.get("model"), str):
-            model = raw["model"]
     apply_settings(
         concurrency=concurrency,
         max_in_flight=max_in_flight,
         waiting_capacity=waiting_capacity,
         eval_timeout_s=eval_timeout_s,
         judges=judges,
-        active_endpoint=active_endpoint,
-        model=model,
     )
     return _settings
 
@@ -457,8 +446,6 @@ def persist_settings(path: Path | None = None) -> bool:
         "waiting_capacity": _settings.waiting_capacity,
         "eval_timeout_s": _settings.eval_timeout_s,
         "judges": _settings.judges,
-        "active_endpoint": _settings.active_endpoint,
-        "model": _settings.model,
         "updated_at": time.time(),
     }
     try:

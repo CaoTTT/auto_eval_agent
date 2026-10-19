@@ -42,7 +42,6 @@ def fake_clients(monkeypatch):
     monkeypatch.setattr(runner, "JudgeClient", Client)
     monkeypatch.setattr(runner, "RichContentJudge", lambda *a: None)
     monkeypatch.setattr(runner, "VisualCompareJudge", lambda *a: None)
-    monkeypatch.setattr(runner, "supports_bailian_pacing", lambda _: False)
     return load_config(Path(__file__).parents[1] / "config")
 
 
@@ -99,7 +98,9 @@ async def test_pause_drains_inflight_then_resume_uses_new_semaphore(storage, mon
     peak = 0
     await runner.run_resume(restored, cfg)
     assert restored.status == "done"
-    assert peak == 3
+    # 模型调用改由全局 MODEL_LIMITER 按节拍放行（200ms 档）后，瞬时在途由
+    # 速率节拍决定，未必达到并发上限 3；只校验不超限（组并发上限仍被尊重）。
+    assert 1 <= peak <= 3
     assert sorted(calls) == list(range(7))
     assert restored.results[:2] == preserved
     assert restored.options["concurrency"] == 2
@@ -228,6 +229,38 @@ async def test_resume_endpoint_idempotency_and_no_input_mutation(storage, monkey
 def test_resume_concurrency_is_strict(concurrency):
     with pytest.raises(ValidationError):
         server.ResumeReq(concurrency=concurrency)
+
+
+@pytest.mark.asyncio
+async def test_resume_accepts_missing_concurrency_and_falls_back(storage, monkeypatch):
+    """前端 resume 不再上报 concurrency 后，缺省回落任务既有并发值（不再 422）。"""
+    task = make_task(3)
+    task.judge_runtime = {"version": 1, "profile_id": "test", "judges": [
+        {"name": "judge", "model": "fake", "enable_thinking": False},
+    ]}
+    task.status, task.active_runs = "paused", 0
+    task.execution_control.update(state="paused", concurrency=3)
+
+    async def get(_):
+        return task
+
+    monkeypatch.setattr(server, "get_task_async", get)
+    monkeypatch.setattr(server, "cfg", lambda: AppConfig(judges=[
+        JudgeConfig(name="judge", model="fake", enable_thinking=False),
+    ]))
+
+    class Queue:
+        def enqueue(self, parent, cfg, fn):
+            parent.active_runs += 1
+            parent.status = "queued"
+            return 1
+
+    monkeypatch.setattr(server, "EVAL_SCHEDULER", Queue())
+    response = await server.api_resume(task.id, server.ResumeReq())  # 无 concurrency
+    attempt = task.execution_control["resumes"][-1]
+    assert response["status"] == "queued"
+    assert attempt["concurrency"] == 3  # 回落到 execution_control 既有值
+    assert task.execution_control["concurrency"] == 3
 
 
 def test_crash_preserves_resume_selection_and_attempt_audit():

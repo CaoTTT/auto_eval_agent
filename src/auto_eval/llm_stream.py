@@ -396,8 +396,9 @@ async def stream_chat_completion(
 
     callback 在一次尝试完整成功后才收到分片，防止断流重试造成重复输出。
 
-    模型调用速率/在途限流由调用方（web 调度器的 MODEL_LIMITER）先取令牌再
-    调用本函数，故此处不再做任何限流，只负责单次流式调用与超时重试。
+    限流在此逐实际请求生效：每次真实模型请求（初试 / 网络重试 /
+    stream_options 降级 / JSON 修复复调都会重新走 send）都取一个全局令牌 +
+    在途名额，重试不绕过。等令牌计入 admission_wait，不计外层单题截止。
     """
     if max_attempts < 1:
         raise ValueError("max_attempts 必须大于等于 1")
@@ -405,17 +406,34 @@ async def stream_chat_completion(
 
     async def send(include_usage: bool):
         check_pause()
+
         async def collect():
             check_pause()
             record_model_attempt()
             return await _collect_stream(client, kwargs, include_usage=include_usage)
 
-        with timing_span("model"):
-            response, chunks, stats = await asyncio.wait_for(
-                collect(),
-                timeout=total_timeout_s,
-            )
-        return response, chunks, stats
+        from .web.scheduler import MODEL_LIMITER  # 函数体内惰性导入，避免 import 环
+        from .task_control import admission_wait
+
+        # on_cancel + acquired 双保险：acquire 已完成但本协程被取消时由 on_cancel
+        # 释放；正常路径 finally 释放一次；acquire 未完成时两者都不释放。
+        acquired = False
+        try:
+            with admission_wait():
+                await pause_aware(
+                    MODEL_LIMITER.acquire(),
+                    on_cancel=lambda _: MODEL_LIMITER.release(),
+                )
+                acquired = True
+            with timing_span("model"):
+                response, chunks, stats = await asyncio.wait_for(
+                    collect(),
+                    timeout=total_timeout_s,
+                )
+            return response, chunks, stats
+        finally:
+            if acquired:
+                MODEL_LIMITER.release()
 
     last_exc: BaseException | None = None
     use_usage = include_usage
