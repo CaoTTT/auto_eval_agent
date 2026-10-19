@@ -337,7 +337,8 @@ def _validate_batch_item_ids(items: list[dict]) -> None:
 def api_config():
     from ..preparation import preparation_concurrency
 
-    # 模型并发改由全局 MODEL_LIMITER 统一管理，不再有裁判各自的百炼 recommended_concurrency/request_pacing。
+    # 模型并发改由全局 MODEL_LIMITER 统一管理；所有模型调用都走同一调度器，
+    # 前端据此轮询 /api/request-pacing 展示全局限流状态。
     global_concurrency = get_settings().concurrency
     c = cfg()
     profiles = model_profiles(c)
@@ -349,7 +350,7 @@ def api_config():
             "judge_name": profile.judge_name, "supports_thinking": profile.supports_thinking,
             "default_enable_thinking": profile.default_enable_thinking,
             "recommended_concurrency": global_concurrency,
-            "request_pacing": False,
+            "request_pacing": True,
         })
     return {
         "judge_model_profiles": public_profiles,
@@ -361,7 +362,7 @@ def api_config():
         "judges": [
             {"name": j.name, "display": j.display or j.name,
              "recommended_concurrency": global_concurrency,
-             "request_pacing": False}
+             "request_pacing": True}
             for j in c.judges
         ],
         "evaluation_profiles": [
@@ -471,7 +472,6 @@ def _settings_payload() -> dict:
         "waiting_capacity": s.waiting_capacity,
         "eval_timeout_s": s.eval_timeout_s,
         "judges": judges,
-        "models": list(cfg().models),
         "endpoints": [
             {
                 "name": e.name,

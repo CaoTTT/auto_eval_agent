@@ -8,10 +8,30 @@ judges:
     base_url: https://llm-62rq0bg4qrp2uy30.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
     api_key_env: ALI
     model: qwen3.8-flash
-    temperature: 0.1            # SiliconFlow Qwen 支持低温采样且复跑逐字一致（探针实测）
-    seed: 42                  # 固定种子 + temperature=0 → 可复现，消除"时好时坏"
     persona: end_user
+    temperature: 0            # SiliconFlow Qwen 支持低温采样且复跑逐字一致（探针实测）
+    seed: 42                  # 固定种子 + temperature=0 → 可复现，消除"时好时坏"
     concurrency: 3
+    enable_thinking: true
+    vl_high_resolution_images: true
+    total_timeout_s: 300
+    read_timeout_s: 90
+
+
+default_judge_model_profile: qwen3.8-flash
+judge_model_profiles:
+  - id: qwen3.5-397b-a17b
+    display: Qwen3.5-397B-A17B
+    judge_name: judge_2
+    model: qwen3.5-397b-a17b
+    supports_thinking: true
+    default_enable_thinking: true
+  - id: qwen3.8-flash
+    display: Qwen3.8-Flash
+    judge_name: judge_2
+    model: qwen3.8-flash
+    supports_thinking: true
+    default_enable_thinking: true
 
 
 endpoints:
@@ -23,10 +43,6 @@ endpoints:
     display: 潇航api
     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
     api_key_env: Lin
-
-models:
-  - qwen3.5-397b-a17b
-  - qwen3.8-flash
 
 # https://llm-62rq0bg4qrp2uy30.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
 # ALI

@@ -6,8 +6,8 @@ from urllib.parse import urlparse
 from .config import AppConfig, JudgeConfig, JudgeModelProfile, default_bailian_rate_limit
 
 BAILIAN_MODELS = {
-    "qwen3.5-397b-a17b": ("bailian_qwen35_397b", "Qwen3.5-397B-A17B"),
-    "qwen3.8-flash": ("bailian_qwen38_flash", "Qwen3.8-Flash"),
+    "qwen3.5-397b-a17b": ("qwen3.5-397b-a17b", "Qwen3.5-397B-A17B"),
+    "qwen3.8-flash": ("qwen3.8-flash", "Qwen3.8-Flash"),
 }
 FROZEN_OPTIONS = {"judges", "judge_model_profile", "enable_thinking", "api_endpoint"}
 

@@ -71,8 +71,8 @@ createApp({
       evaluationProfiles.value.filter((profile) => (profile.modes || []).includes("compare"))
     );
     const selectedEndpoint = ref("");  // 新建任务选择的 API/端点（空=用裁判配置默认）
-    const globalConcurrency = ref(10);
-    const maxInFlight = ref(50);
+    const globalConcurrency = ref(5);
+    const maxInFlight = ref(40);
     const waitingCapacity = ref(10);
     const endpointOptions = ref([]);
     const mediaConcurrency = ref(4);
@@ -86,8 +86,8 @@ createApp({
         const response = await fetch("/api/settings", { cache: "no-store" });
         if (!response.ok) return;
         const data = await response.json();
-        globalConcurrency.value = data.concurrency ?? 10;
-        maxInFlight.value = data.max_in_flight ?? 50;
+        globalConcurrency.value = data.concurrency ?? 5;
+        maxInFlight.value = data.max_in_flight ?? 40;
         waitingCapacity.value = data.waiting_capacity ?? 10;
       } catch (_) {}
     }
@@ -136,22 +136,6 @@ createApp({
         ? value.toLocaleString("zh-CN", { maximumFractionDigits: digits }) : "—";
     }
 
-    function pacingWaitLabel(reason) {
-      return ({
-        cooldown: "限流冷却", second_window: "连续 1 秒请求额度",
-        request_window: "连续 60 秒请求额度", minute_window: "连续 60 秒请求额度",
-        token_budget: "Token 预算", pacing: "平滑发送间隔", warmup: "逐步升速",
-        inflight: "等待响应槽位", inflight_limit: "等待响应槽位",
-      })[reason] || (reason ? "等待发送额度" : "额度可用");
-    }
-
-    function pacingLimitLabel(kind) {
-      return ({
-        requests: "请求频率", request: "请求频率", tokens: "Token 额度",
-        token: "Token 额度", burst: "增速", overload: "服务拥塞",
-        congestion: "服务拥塞", unknown: "未分类限流",
-      })[kind] || (kind ? "未分类限流" : "无");
-    }
     const evalTimeout = ref(900);
     const submitting = ref(false);
     const running = ref(false);
@@ -1912,11 +1896,22 @@ createApp({
         const activeTask = queueState.value.running;
         const runtime = activeTask ? activeTask.judge_runtime : taskJudgeRuntime.value;
         const model = runtime?.judges?.[0]?.model;
-        const controllers = data.controllers || [];
-        const controller = model && controllers.length
-          ? controllers.find(entry => entry.model === model || (entry.models || []).includes(model))
-          : controllers.length ? (controllers.length === 1 ? controllers[0] : null) : data.controller;
-        pacingStatus.value = data.enabled && data.active ? controller || null : null;
+        const modelLimiter = data.model_limiter || {};
+        const pipelineLimiter = data.pipeline_limiter || {};
+        const settings = data.settings || {};
+        pacingStatus.value = data.enabled && data.active ? {
+          model,
+          model_rate: modelLimiter.limit,
+          rate_window_s: 2,
+          inflight: modelLimiter.running,
+          inflight_limit: modelLimiter.max_in_flight,
+          model_queued: modelLimiter.queued,
+          pipeline_limit: pipelineLimiter.limit,
+          pipeline_running: pipelineLimiter.running,
+          pipeline_queued: pipelineLimiter.queued,
+          waiting_capacity: settings.waiting_capacity,
+          eval_timeout_s: settings.eval_timeout_s,
+        } : null;
         pacingError.value = "";
       } catch (_) {
         if (!disposed && (queueState.value.running || running.value || repairStatus.value === "running")) {
@@ -2244,7 +2239,7 @@ createApp({
       judgeModelProfiles, selectedJudgeModelProfile, selectedModelProfile, enableThinking, changeJudgeModel,
       taskJudgeRuntime, taskJudgeSummary, thinkingLabel, judgeRuntimeLabel,
       mediaConcurrency, requestPacing, evalTimeout, submitting, running, progress, total, results, summary, taskId, runError,
-      pacingStatus, pacingError, pacingNumber, pacingWaitLabel, pacingLimitLabel,
+      pacingStatus, pacingError, pacingNumber,
       queueState, queueEntries, selectedTaskStatus, queueNotice, taskStatusLabel, queueKindLabel,
       selectedTaskTiming, taskElapsedSeconds, formatTaskDuration,
       executionControl, controlSubmitting, resumeFailed, isPausing, canPauseTask, canResumeTask, controlTask,

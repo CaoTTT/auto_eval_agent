@@ -38,8 +38,8 @@ async function main() {
         judge_model_profiles: profiles, default_judge_model_profile: 'bailian_35',
       })};
       if (url === '/api/settings') return {ok: true, json: async () => ({
-        concurrency: 10, max_in_flight: 50, waiting_capacity: 10,
-        active_endpoint: '', model: null, judges: ['judge_2'], endpoints: [], models: ['qwen3.8-flash'],
+        concurrency: 5, max_in_flight: 40, waiting_capacity: 10,
+        active_endpoint: '', model: null, judges: ['judge_2'], endpoints: [],
       })};
       if (url.startsWith('/api/history?')) return {ok: true, json: async () => ({items: []})};
       if (url.startsWith('/api/history/')) return {ok: true, json: async () => snapshot};
@@ -56,7 +56,8 @@ async function main() {
   assert.equal(app.selectedJudgeModelProfile.value, 'bailian_35');
   assert.equal(app.enableThinking.value, true);
   assert.equal(app.selectedJudges.value.join(), 'judge_2');
-  assert.equal(app.globalConcurrency.value, 10);
+  assert.equal(app.globalConcurrency.value, 5);
+  assert.equal(app.maxInFlight.value, 40);
   assert.equal(app.endpointOptions.value.length, 0);
 
   for (const mode of ['rich_content', 'compare']) {

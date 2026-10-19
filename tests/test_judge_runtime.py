@@ -23,7 +23,7 @@ def config():
 
 
 @pytest.mark.parametrize("profile,model", [
-    ("bailian_qwen35_397b", "qwen3.5-397b-a17b"), ("bailian_qwen38_flash", "qwen3.8-flash"),
+    ("qwen3.5-397b-a17b", "qwen3.5-397b-a17b"), ("qwen3.8-flash", "qwen3.8-flash"),
 ])
 @pytest.mark.parametrize("thinking", [False, True])
 def test_all_four_combinations_are_isolated_and_frozen(profile, model, thinking, monkeypatch):
@@ -47,12 +47,13 @@ def test_all_four_combinations_are_isolated_and_frozen(profile, model, thinking,
     assert actual.api_key() == "secret-never-persist"
 
 
-def test_legacy_bailian_auto_discovers_models_and_retains_default():
+def test_bailian_auto_discovers_models_with_model_name_ids():
     app = config()
     assert [p.model for p in model_profiles(app)] == ["qwen3.5-397b-a17b", "qwen3.8-flash"]
-    assert default_profile_id(app) == "bailian_qwen35_397b"
+    assert [p.id for p in model_profiles(app)] == ["qwen3.5-397b-a17b", "qwen3.8-flash"]
+    assert default_profile_id(app) == "qwen3.5-397b-a17b"
     app.judges[0].model = "qwen3.8-flash"
-    assert default_profile_id(app) == "bailian_qwen38_flash"
+    assert default_profile_id(app) == "qwen3.8-flash"
 
 
 def test_api_endpoint_frozen_into_runtime_and_rejected_on_change():
@@ -63,19 +64,19 @@ def test_api_endpoint_frozen_into_runtime_and_rejected_on_change():
     ]
     # 选中端点：base_url/api_key_env 冻结进 runtime
     runtime, judges = resolve_new_runtime(
-        app, {"judge_model_profile": "bailian_qwen35_397b", "enable_thinking": False, "api_endpoint": "proxy-a"}
+        app, {"judge_model_profile": "qwen3.5-397b-a17b", "enable_thinking": False, "api_endpoint": "proxy-a"}
     )
     assert judges[0].base_url == "https://proxy-a.invalid/v1"
     assert runtime["api_endpoint"] == "proxy-a"
     # 缺省（不选端点）沿用裁判自身配置
     default_runtime, default_judges = resolve_new_runtime(
-        app, {"judge_model_profile": "bailian_qwen35_397b", "enable_thinking": False}
+        app, {"judge_model_profile": "qwen3.5-397b-a17b", "enable_thinking": False}
     )
     assert default_judges[0].base_url == app.judges[0].base_url
     assert default_runtime.get("api_endpoint") is None
     # 未知端点拒绝
     with pytest.raises(ValueError):
-        resolve_new_runtime(app, {"judge_model_profile": "bailian_qwen35_397b", "api_endpoint": "nope"})
+        resolve_new_runtime(app, {"judge_model_profile": "qwen3.5-397b-a17b", "api_endpoint": "nope"})
     # 冻结后不可改端点
     task = Task(id="t", mode="rich_content", items=[], options={}, judge_runtime=runtime)
     check_frozen_options(task, {"api_endpoint": "proxy-a"})  # 一致可通过
@@ -95,7 +96,7 @@ def test_restore_preserves_frozen_judge_runtime():
     # 全局 MODEL_LIMITER 接管限流后，restore 只保证裁判的 runtime 配置原样恢复，
     # rate_limit 仍随冻结配置保留（供展示/审计），不再有 shared_throttle 配额共享。
     app = config()
-    runtime, _ = resolve_new_runtime(app, {"judge_model_profile": "bailian_qwen38_flash", "enable_thinking": False})
+    runtime, _ = resolve_new_runtime(app, {"judge_model_profile": "qwen3.8-flash", "enable_thinking": False})
     runtime["judges"][0]["rate_limit"] = RateLimitConfig(
         rpm=60, tpm=100_000, rps=1, max_inflight=4,
     ).model_dump()
@@ -110,7 +111,7 @@ def test_restore_preserves_frozen_judge_runtime():
 @pytest.mark.parametrize("explicit_rate", [None, RateLimitConfig(rpm=120, tpm=200_000, rps=2, max_inflight=16)])
 def test_restore_preserves_frozen_quota_after_profile_rename(explicit_rate):
     app = config()
-    runtime, _ = resolve_new_runtime(app, {"judge_model_profile": "bailian_qwen38_flash", "enable_thinking": False})
+    runtime, _ = resolve_new_runtime(app, {"judge_model_profile": "qwen3.8-flash", "enable_thinking": False})
     app.judge_model_profiles = [JudgeModelProfile(
         id="renamed_flash", display="Flash", judge_name="judge_2", model="qwen3.8-flash",
         supports_thinking=True, default_enable_thinking=True, rate_limit=explicit_rate,
@@ -124,7 +125,7 @@ def test_restore_preserves_frozen_quota_after_profile_rename(explicit_rate):
 @pytest.mark.parametrize("change", ["model", "base_url", "api_key_env"])
 def test_restore_does_not_apply_an_unrelated_connection_or_model_quota(change):
     app = config()
-    runtime, _ = resolve_new_runtime(app, {"judge_model_profile": "bailian_qwen38_flash"})
+    runtime, _ = resolve_new_runtime(app, {"judge_model_profile": "qwen3.8-flash"})
     profiles = model_profiles(app)
     app.judge_model_profiles = profiles
     flash = profiles[1]
@@ -139,9 +140,9 @@ def test_restore_does_not_apply_an_unrelated_connection_or_model_quota(change):
 
 def test_admin_default_is_honored_by_legacy_judge_only_clients():
     app = config()
-    app.default_judge_model_profile = "bailian_qwen38_flash"
+    app.default_judge_model_profile = "qwen3.8-flash"
     runtime, _ = resolve_new_runtime(app, {"judges": ["judge_2"]})
-    assert runtime["profile_id"] == "bailian_qwen38_flash"
+    assert runtime["profile_id"] == "qwen3.8-flash"
 
 
 def test_unrelated_provider_keeps_current_config():
@@ -166,7 +167,7 @@ def test_invalid_selection_fails_before_execution(options):
 
 
 @pytest.mark.parametrize("override", [
-    {"judge_model_profile": "bailian_qwen38_flash"}, {"enable_thinking": False}, {"judges": []},
+    {"judge_model_profile": "qwen3.8-flash"}, {"enable_thinking": False}, {"judges": []},
 ])
 def test_original_task_inference_options_are_immutable(override):
     runtime, _ = resolve_new_runtime(config(), {})
@@ -211,7 +212,7 @@ async def test_all_creation_paths_save_effective_runtime(api, mode, upsert):
     item = {"id": "one", "query": "test"}
     if mode == "compare":
         item.update(answer1="A", answer2="B", video1="a.mp4", video2="b.mp4")
-    options = {"judge_model_profile": "bailian_qwen38_flash", "enable_thinking": False}
+    options = {"judge_model_profile": "qwen3.8-flash", "enable_thinking": False}
     if upsert:
         response = await server.api_eval_items(server.EvalItemsReq(task_id="created", mode=mode, items=[item], options=options))
     else:
@@ -238,6 +239,8 @@ async def test_update_rejects_override_before_items_mutation(api):
 def test_public_config_has_no_credentials(api):
     public = server.api_config()
     assert len(public["judge_model_profiles"]) == 2
+    assert all(profile["request_pacing"] for profile in public["judge_model_profiles"])
+    assert all(judge["request_pacing"] for judge in public["judges"])
     assert "DASHSCOPE_API_KEY" not in str(public)
     assert "base_url" not in str(public)
 

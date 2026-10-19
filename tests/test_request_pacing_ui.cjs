@@ -14,8 +14,12 @@ async function main() {
     document: { hidden: false }, window: { clearInterval() {} },
     createApp(options) { app = options.setup(); return { mount() {} }; },
     async fetch(url) {
-      if (url === '/api/queue') return { ok: true, json: async () => ({ running: queueRunning }) };
-      if (url.startsWith('/api/history?')) return { ok: true, json: async () => ({ items: [] }) };
+      if (url === '/api/queue') {
+        return { ok: true, json: async () => ({ running: queueRunning, queued: [] }) };
+      }
+      if (url.startsWith('/api/history?')) {
+        return { ok: true, json: async () => ({ items: [] }) };
+      }
       assert.equal(url, '/api/request-pacing');
       pacingCalls++;
       if (failPacing) return { ok: false };
@@ -25,9 +29,9 @@ async function main() {
   const code = fs.readFileSync(path.join(__dirname, '../src/auto_eval/web/static/app.js'), 'utf8')
     .replace(/^import[^\n]*\n/gm, '');
   vm.runInNewContext(code, context);
-  app.judges.value = [{ name: 'bailian', request_pacing: true }];
-  app.selectedJudges.value = ['bailian'];
-  app.concurrency.value = 128;
+  app.judges.value = [{ name: 'judge', request_pacing: true }];
+  app.selectedJudges.value = ['judge'];
+  app.judgeModelProfiles.value = [];
 
   await app.loadQueue();
   assert.equal(pacingCalls, 0, 'idle pages do not poll request pacing');
@@ -41,17 +45,21 @@ async function main() {
   await tick();
   await app.loadQueue();
   assert.equal(pacingCalls, 1, 'slow pacing requests are not duplicated by queue refreshes');
-  resolvePacing({ ok: true, json: async () => ({ enabled: true, active: true,
-    controller: { requests_last_second: 2, inflight: 60, target_rps: 8, token_budget: 800000 } }) });
+  resolvePacing({ ok: true, json: async () => ({
+    enabled: true, active: true,
+    model_limiter: { limit: 5, running: 2, queued: 1, max_in_flight: 40 },
+    pipeline_limiter: { limit: 50, running: 8, queued: 3 },
+    settings: { concurrency: 5, max_in_flight: 40, waiting_capacity: 10, eval_timeout_s: 900 },
+  }) });
   await first;
-  assert.equal(app.pacingStatus.value.requests_last_second, 2);
-  assert.equal(app.pacingStatus.value.inflight, 60);
-  assert.equal(app.concurrency.value, 128, 'monitoring must not change evaluation concurrency');
+  assert.equal(app.pacingStatus.value.model_rate, 5);
+  assert.equal(app.pacingStatus.value.inflight, 2);
+  assert.equal(app.pacingStatus.value.inflight_limit, 40);
+  assert.equal(app.pacingStatus.value.pipeline_queued, 3);
+  assert.equal(app.pacingStatus.value.waiting_capacity, 10);
   assert.equal(app.pacingNumber(0), '0');
   assert.equal(app.pacingNumber(null), '—', 'unknown metrics cannot be shown as zero');
   assert.equal(app.pacingNumber(800000), '800,000');
-  assert.equal(app.pacingWaitLabel('token_budget'), 'Token 预算');
-  assert.equal(app.pacingLimitLabel('token'), 'Token 额度');
 
   failPacing = true;
   await app.loadQueue();
@@ -64,8 +72,12 @@ async function main() {
   await tick();
   queueRunning = null;
   await app.loadQueue();
-  resolvePacing({ ok: true, json: async () => ({ enabled: true, active: true,
-    controller: { requests_last_second: 9 } }) });
+  resolvePacing({ ok: true, json: async () => ({
+    enabled: true, active: true,
+    model_limiter: { limit: 5, running: 9, queued: 0, max_in_flight: 40 },
+    pipeline_limiter: { limit: 50, running: 8, queued: 0 },
+    settings: { concurrency: 5, max_in_flight: 40, waiting_capacity: 10, eval_timeout_s: 900 },
+  }) });
   await pending;
   assert.equal(app.pacingStatus.value, null, 'late metrics cannot revive an idle display');
   assert.equal(app.pacingError.value, '');
@@ -75,15 +87,19 @@ async function main() {
   const before = pacingCalls;
   await app.loadQueue();
   assert.equal(pacingCalls, before, 'unsupported providers do not fetch pacing status');
-  app.judges.value = [{ name: 'bailian', request_pacing: true }];
+  app.judges.value = [{ name: 'judge', request_pacing: true }];
   const closing = app.loadQueue();
   await tick();
   cleanup();
-  resolvePacing({ ok: true, json: async () => ({ enabled: true, active: true,
-    controller: { requests_last_second: 3 } }) });
+  resolvePacing({ ok: true, json: async () => ({
+    enabled: true, active: true,
+    model_limiter: { limit: 5, running: 3, queued: 0, max_in_flight: 40 },
+    pipeline_limiter: { limit: 50, running: 8, queued: 0 },
+    settings: { concurrency: 5, max_in_flight: 40, waiting_capacity: 10, eval_timeout_s: 900 },
+  }) });
   await closing;
   assert.equal(app.pacingStatus.value, null, 'unmounted UI ignores late status responses');
-  console.log('Pacing polling, deduplication, error recovery, separate capacity and stale-response checks passed');
+  console.log('Pacing polling, deduplication, new limiter schema, error recovery and stale-response checks passed');
 }
 
 main().catch(error => { console.error(error); process.exitCode = 1; });
