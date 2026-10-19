@@ -414,3 +414,240 @@ def parse_analysis(text: str) -> str:
         return ""
     m = re.search(r"<analysis>(.*?)</analysis>", text, re.DOTALL)
     return m.group(1).strip() if m else ""
+
+
+class JSONKeyPairs(list):
+    """An object before dict construction; duplicate entries remain intact."""
+
+
+def _strip_json_trailing_commas_outside_strings(text: str) -> str:
+    """Repair punctuation only; literal ',}' and ',]' text is evidence data."""
+    output, in_string, escaped = [], False, False
+    for index, char in enumerate(text):
+        if in_string:
+            output.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == ",":
+            following = index + 1
+            while following < len(text) and text[following].isspace():
+                following += 1
+            if following < len(text) and text[following] in "}]":
+                continue
+        output.append(char)
+    return "".join(output)
+
+
+def scan_recoverable_json_object(text: str) -> dict:
+    """Retain independently decodable original top-level key/value pairs.
+
+    This is a guard for syntax-only model repair, not a field guesser. Missing
+    closing braces or separators can leave complete values recoverable; missing
+    values, damaged strings/arrays, multiple objects and ambiguous content cannot.
+    """
+    candidate = re.sub(r"^```(?:json)?\s*", "", text.strip())
+    candidate = re.sub(r"\s*```$", "", candidate).strip()
+    decoder = json.JSONDecoder(object_pairs_hook=JSONKeyPairs)
+    pairs, diagnostics, seen = [], [], set()
+    in_string, escaped, start = False, False, None
+    for index, char in enumerate(candidate):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char == "{":
+            start = index
+            break
+    if start is None or candidate.startswith(("[", '"', "'")):
+        return {"data": None, "raw_key_pairs": [], "structural_diagnostics": ["原始输出没有可唯一恢复的完整对象字段，禁止凭空补判"]}
+
+    def whitespace(position):
+        while position < len(candidate) and candidate[position].isspace():
+            position += 1
+        return position
+
+    position = whitespace(start + 1)
+    while position < len(candidate):
+        if candidate[position] == "}":
+            tail = candidate[position + 1:]
+            if "{" in tail or "[" in tail:
+                diagnostics.append("原始输出含额外对象/数组，无法唯一恢复字段")
+            break
+        try:
+            key, end = decoder.raw_decode(candidate, position)
+            if not isinstance(key, str):
+                raise ValueError("字段名不是字符串")
+            position = whitespace(end)
+            if position >= len(candidate) or candidate[position] != ":":
+                raise ValueError(f"{key}缺少明确的冒号和值")
+            position = whitespace(position + 1)
+            value, position = decoder.raw_decode(candidate, position)
+        except (json.JSONDecodeError, ValueError) as exc:
+            diagnostics.append(f"原始字段/值无法确定恢复：{exc}")
+            break
+        pairs.append([key, value])
+        if key in seen:
+            diagnostics.append(f"原始输出重复键：{key}")
+        seen.add(key)
+        position = whitespace(position)
+        if position >= len(candidate):
+            break
+        if candidate[position] == ",":
+            position = whitespace(position + 1)
+        elif candidate[position] not in ('"', "}"):
+            diagnostics.append(f"字段{key}后有无法确定的内容，禁止语义修复")
+            break
+    return {"data": None if diagnostics else dict(pairs), "raw_key_pairs": pairs,
+            "structural_diagnostics": diagnostics}
+
+
+def parse_json_preserving_pairs(text: str):
+    """V2-only JSON parsing, preserving and rejecting repeated object keys.
+
+    Legacy ``parse_json_loose`` intentionally keeps its frozen behavior. A
+    non-None result may describe a duplicate-key failure with ``data=None``;
+    callers must never send that failure through a model syntax repair call.
+    """
+    if not text:
+        return None
+    stripped = re.sub(r"^```(?:json)?\s*", "", text.strip())
+    stripped = re.sub(r"\s*```$", "", stripped).strip()
+    def load(value):
+        return json.loads(value, object_pairs_hook=JSONKeyPairs)
+
+    objects = None
+    locally_repaired = False
+    candidate = stripped
+    try:
+        # A complete JSON array/scalar is a structure error, not prose around
+        # an object. In particular, never unwrap [<valid result object>].
+        objects = load(stripped)
+    except json.JSONDecodeError:
+        # An explicit array/string wrapper remains a non-object root even if
+        # its own punctuation is malformed. Never turn [<result>,], an unclosed
+        # array, or a quoted object into a successful inner-object response.
+        root_hint = ("array" if stripped.startswith("[") else
+                     "string" if stripped.startswith(('"', "'")) else None)
+        if root_hint:
+            return {"data": None, "raw_key_pairs": [], "locally_repaired_key_pairs": [],
+                    "duplicate_keys": [], "top_level_type": root_hint,
+                    "structural_diagnostics": [f"顶层JSON必须为对象，实际为{root_hint}包装；包装本身还有语法错误"],
+                    "candidate": stripped, "locally_repaired": False}
+        # Same deterministic quote/trailing-comma syntax tolerance as the old
+        # parser, but keep the complete response and use object_pairs_hook.
+        repaired, in_string, escaped = [], False, False
+        for i, char in enumerate(candidate):
+            if escaped:
+                repaired.append(char)
+                escaped = False
+                continue
+            if char == "\\" and in_string:
+                repaired.append(char)
+                escaped = True
+                continue
+            if char != '"':
+                repaired.append(char)
+                continue
+            if not in_string:
+                in_string = True
+                repaired.append(char)
+                continue
+            following = i + 1
+            while following < len(candidate) and candidate[following].isspace():
+                following += 1
+            if following >= len(candidate) or candidate[following] in ":,}]":
+                in_string = False
+                repaired.append(char)
+            else:
+                repaired.append('\\"')
+        try:
+            objects = load(_strip_json_trailing_commas_outside_strings("".join(repaired)))
+            locally_repaired = True
+        except json.JSONDecodeError:
+            # Recognize already-visible repeated keys even when another syntax
+            # error prevents a full parse. Values are preserved as raw slices;
+            # this scanner does not claim to repair or interpret the content.
+            frames, duplicates, raw_pairs = [], [], []
+            decoder = json.JSONDecoder()
+            index = 0
+            object_no = 0
+            while index < len(candidate):
+                char = candidate[index]
+                if char in "{[":
+                    object_no += 1
+                    frames.append({"kind": char, "keys": {}, "path": f"object#{object_no}"})
+                elif char in "}]":
+                    if frames:
+                        frames.pop()
+                elif char == '"':
+                    try:
+                        value, consumed = decoder.raw_decode(candidate[index:])
+                    except json.JSONDecodeError:
+                        index += 1
+                        continue
+                    following = index + consumed
+                    while following < len(candidate) and candidate[following].isspace():
+                        following += 1
+                    if frames and frames[-1]["kind"] == "{" and following < len(candidate) and candidate[following] == ":":
+                        frame = frames[-1]
+                        frame["keys"][value] = frame["keys"].get(value, 0) + 1
+                        raw_pairs.append([value, {"raw_value_tail": candidate[following + 1:]}])
+                        if frame["keys"][value] > 1:
+                            duplicates.append({"path": frame["path"], "key": value, "occurrence": frame["keys"][value]})
+                    index += consumed
+                    continue
+                index += 1
+            if duplicates:
+                return {"data": None, "raw_key_pairs": raw_pairs, "duplicate_keys": duplicates,
+                        "structural_diagnostics": [f"重复键 {entry['path']}.{entry['key']}" for entry in duplicates],
+                        "candidate": candidate, "locally_repaired": False, "top_level_type": "object",
+                        "locally_repaired_key_pairs": []}
+            return None
+
+    duplicates = []
+
+    def inspect(value, path="$"):
+        if isinstance(value, JSONKeyPairs):
+            seen = {}
+            for key, member in value:
+                seen[key] = seen.get(key, 0) + 1
+                if seen[key] > 1:
+                    duplicates.append({"path": path, "key": key, "occurrence": seen[key]})
+                inspect(member, f"{path}.{key}")
+        elif isinstance(value, list):
+            for i, member in enumerate(value):
+                inspect(member, f"{path}[{i}]")
+
+    def convert(value):
+        if isinstance(value, JSONKeyPairs):
+            return {key: convert(member) for key, member in value}
+        if isinstance(value, list):
+            return [convert(member) for member in value]
+        return value
+
+    inspect(objects)
+    top_level_type = (
+        "object" if isinstance(objects, JSONKeyPairs) else "array" if isinstance(objects, list)
+        else "null" if objects is None else "boolean" if isinstance(objects, bool)
+        else "string" if isinstance(objects, str) else "number")
+    diagnostics = [f"重复键 {entry['path']}.{entry['key']}" for entry in duplicates]
+    if top_level_type != "object":
+        diagnostics.append(f"顶层JSON必须为对象，实际为{top_level_type}")
+    return {"data": None if duplicates else convert(objects),
+            "raw_key_pairs": objects if isinstance(objects, list) and not locally_repaired else [],
+            "locally_repaired_key_pairs": objects if isinstance(objects, list) and locally_repaired else [],
+            "duplicate_keys": duplicates,
+            "structural_diagnostics": diagnostics, "top_level_type": top_level_type,
+            "candidate": candidate, "locally_repaired": locally_repaired}

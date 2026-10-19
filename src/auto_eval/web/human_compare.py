@@ -9,11 +9,12 @@ import uuid
 
 from pydantic import Field
 
-from ..judges.compare_protocols import resolve_compare_protocol
-from .compare_statistics import Case, SCORE_DIMENSIONS, score_state
+from .compare_statistics import Case, score_state, product_applicable
 from .history import judge_runtime_summary, task_to_snapshot
 from .tasks import latest_results_by_index
-from .human_baselines import HumanError, HumanStore, StrictModel, atomic_json, digest, read_json
+from .protocol_identity import recover_protocol_identity
+from .human_baselines import (HumanError, HumanStore, StrictModel, atomic_json, digest, read_json,
+                              baseline_protocol, human_protocol, human_dimensions)
 from .human_statistics import build_human_statistics
 
 
@@ -29,7 +30,7 @@ class ComparisonRequest(StrictModel):
     version: int = Field(ge=1)
     tasks: list[TaskMapping] = Field(min_length=1, max_length=10)
     case_ids: list[str] | None = None
-    dimensions: list[str] = Field(default_factory=lambda: list(SCORE_DIMENSIONS))
+    dimensions: list[str] = Field(default_factory=list)
     compatibility_mode: str = "same_standard"
 
 
@@ -95,6 +96,8 @@ def _source_id(item: dict, field: str) -> str:
 def _binding(item: dict, result: dict, n: int) -> tuple[str, list[str]]:
     if not result:
         return "missing_result", ["模型没有结果"]
+    if item.get("history_prefix_sha256") and result.get("history_prefix_sha256") != item["history_prefix_sha256"]:
+        return "stale_result", ["结果原始历史指纹缺失或不同"]
     # Compare raw source values only. Visual judge transcriptions are different fields.
     for key in ("query", "context", f"answer{n}", f"context{n}"):
         if key in result and _text(result[key]).strip() != _text(item.get(key) or (item.get("question") if key=="query" else "")).strip():
@@ -116,7 +119,8 @@ def _binding(item: dict, result: dict, n: int) -> tuple[str, list[str]]:
 
 def _identity(case: dict, item: dict, pid: str, n: int):
     left, right = case, case_identity(item)
-    if item.get("session_id"):
+    turn = item.get("turn_index")
+    if item.get("session_id") and type(turn) is int and turn > 0:
         if not case.get("history_prefix_sha256") or not item.get("history_prefix_sha256"):
             return "history_unverified", ["多轮人工基准缺少完整原始历史指纹；不能仅凭题号或相同问题对齐"]
         if case["history_prefix_sha256"] != item["history_prefix_sha256"]:
@@ -156,19 +160,46 @@ def _identity(case: dict, item: dict, pid: str, n: int):
     return ("verified" if proven else "identity_unverified"), reasons or ["原始采集信息不足；路径相同不能证明内容相同"]
 
 
-def _policy(snapshot: dict, row: dict):
+def _policy(snapshot: dict, row: dict, recovered_identity: dict | None = None):
+    recovered = recovered_identity if recovered_identity is not None else recover_protocol_identity(
+        {**snapshot, "results": snapshot.get("results") or [row]})
+    if recovered["is_chat"]:
+        if not recovered["executable"]:
+            return None
+        frozen = recovered["manifest"]
+        revision = frozen.get("bundle_revision")
+        if not revision:
+            return None
+        try:
+            return human_protocol(recovered["evaluation_profile"], frozen.get("standard_id", ""), revision)
+        except ValueError:
+            return None
     manifest = snapshot.get("protocol_manifest") or {}
     standard = row.get("standard_version") or manifest.get("standard_version")
     revision = row.get("bundle_revision") or manifest.get("bundle_revision")
+    family = row.get("standard_id") or manifest.get("standard_id")
+    profile = row.get("evaluation_profile") or snapshot.get("evaluation_profile") or manifest.get("evaluation_profile") or manifest.get("id")
     if not standard or not revision:
         return None
     try:
-        return resolve_compare_protocol("qa_competitor_compare@"+standard,revision)
+        policy = human_protocol(profile or standard, family or "", revision)
+        if policy.standard_version != standard:
+            return None
+        for key, value in (("standard_id", policy.standard_id), ("standard_version", policy.standard_version),
+                           ("bundle_revision", policy.bundle_revision)):
+            if row.get(key) and manifest.get(key) and row[key] != manifest[key]:
+                return None
+            if snapshot.get(key) and snapshot[key] != value:
+                return None
+        if snapshot.get("evaluation_profile") and snapshot["evaluation_profile"] != policy.id:
+            return None
+        return policy
     except ValueError:
         return None
 
 
 def align_baseline_to_run(baseline: dict, snapshot: dict, mapping: TaskMapping, scope: list[str], dimensions: list[str], mode: str) -> list[dict]:
+    human_policy = baseline_protocol(baseline)
     products = {p["product_id"] for p in baseline["products"]}
     if not mapping.product_map or len(set(mapping.product_map.values())) != len(mapping.product_map):
         raise HumanError("请提供一对一产品映射")
@@ -183,6 +214,7 @@ def align_baseline_to_run(baseline: dict, snapshot: dict, mapping: TaskMapping, 
         if sid:
             indexes[mapping.case_map.get(sid,sid)].append(i)
     results = {int(r["index"]): r for r in snapshot["results"] if isinstance(r.get("index"),int)}
+    recovered_identity = recover_protocol_identity(snapshot)
     runtime_summary = judge_runtime_summary(snapshot)
     slots = {v:int(k[-1]) for k,v in mapping.product_map.items()}
     rows = []
@@ -194,9 +226,15 @@ def align_baseline_to_run(baseline: dict, snapshot: dict, mapping: TaskMapping, 
         result = results.get(i,{})
         result_runtime_summary = (judge_runtime_summary({}, result)
                                   if result.get("judge_runtime") or result.get("judge_model") else runtime_summary)
-        policy = _policy(snapshot,result)
-        compatible = bool(policy and [policy.score_min,policy.score_max]==baseline["score_range"] and (
+        policy = _policy(snapshot,result,recovered_identity)
+        shared_reasons = bool(policy and policy.result_schema_version == "qa-chat-result-2")
+        same_family = bool(policy and policy.standard_id == human_policy.standard_id)
+        compatible = bool(policy and same_family and [policy.score_min,policy.score_max]==baseline["score_range"] and (
             policy.standard_version==baseline["human_standard_version"] or mode=="regression"))
+        if policy and not same_family:
+            raise HumanError("人工与模型标准家族不同，回归模式也不能跨家族生成数字一致性")
+        if policy and human_policy.standard_id == "qa_chat_compare" and (policy.id, policy.bundle_revision) != (human_policy.id, human_policy.bundle_revision):
+            raise HumanError("问答闲聊必须使用相同完整标准与冻结修订号")
         if policy and [policy.score_min,policy.score_max] != baseline["score_range"]:
             raise HumanError("人工与模型分制不兼容，不能进行线性换分或生成数字一致性报告")
         if policy and policy.standard_version != baseline["human_standard_version"] and mode != "regression":
@@ -220,9 +258,21 @@ def align_baseline_to_run(baseline: dict, snapshot: dict, mapping: TaskMapping, 
                 label = labels.get((ck,pid,dim),{})
                 human = label.get("score") if label.get("resolution")=="accepted" and label.get("score_status")=="scored" else None
                 model_status, model = "标准或冻结修订号缺失/未知", None
+                model_applicable = None
+                formal_status = None
                 if policy and slot:
-                    model_status,model = score_state(Case(i or 0,item,result,"failed" if result.get("error") else "done" if result else "unfinished",
-                                                          int(item.get("product_count") or 2),policy.standard_version,policy.bundle_revision),slot,dim,policy)
+                    model_case = Case(i or 0,item,result,"failed" if result.get("error") else "done" if result else "unfinished",
+                                      product_count,policy.standard_version,policy.bundle_revision, policy.standard_id)
+                    model_status,model = score_state(model_case,slot,dim,policy)
+                    model_applicable = product_applicable(model_case, slot, dim, policy)
+                    if policy.standard_id == "qa_chat_compare":
+                        formal_status = "scored" if model is not None else {
+                            "输入失败": "input_failed", "响应Gate阻断": "gate_blocked", "安全Gate阻断": "gate_blocked",
+                            "维度不适用": "not_applicable", "无法核验": "unverifiable"}.get(model_status)
+                human_applicable = label.get("applicable")
+                if human_applicable is None:
+                    human_applicable = ((True if label.get("score_status") == "scored" else False if label.get("score_status") == "not_applicable" else None)
+                                        if human_policy.standard_id == "qa_chat_compare" else state.get("applicability",{}).get(dim))
                 mid = digest([snapshot["task_id"],snapshot["snapshot_sha256"],ck,pid,dim])[:32]
                 identity_accepted = status=="verified" and binding=="verified"
                 row = dict(match_id=mid, task_id=snapshot["task_id"], task_snapshot_sha256=snapshot["snapshot_sha256"],
@@ -232,13 +282,24 @@ def align_baseline_to_run(baseline: dict, snapshot: dict, mapping: TaskMapping, 
                            match_status=status, match_reasons=reasons, result_input_binding=binding, binding_reasons=binding_reasons,
                            human_score=human, human_status=label.get("score_status","unlabeled"), human_source=label.get("source",{}),
                            human_reason=label.get("reason",""), model_score=model, model_status=model_status,
-                           model_reason=result.get(f"{dim}_rationale") or result.get(f"{dim}_reason") or "",
+                           model_reason=(result.get(f"{dim}_reason") or "") if shared_reasons else
+                                        (result.get(f"answer{slot}_{dim}_reason") or "") if policy and policy.standard_id == "qa_chat_compare" else result.get(f"{dim}_rationale") or result.get(f"{dim}_reason") or "",
+                           model_evidence=result.get(f"{dim}_evidence", []) if shared_reasons else result.get(f"answer{slot}_{dim}_evidence", []),
+                           model_reason_scope="dimension_shared" if shared_reasons else "product" if policy and policy.standard_id == "qa_chat_compare" else "dimension_shared",
+                           model_evidence_scope="dimension_shared" if shared_reasons else "product",
+                           model_result_schema_version=policy.result_schema_version if policy else result.get("result_schema_version"),
+                           model_verification_status=result.get(f"answer{slot}_{dim}_verification_status"),
+                           human_verification_status=label.get("verification_status"),
                            model_gates={g:result.get(f"answer{slot}_{g}_gate") for g in ("response","safety")},
-                           human_gates=state.get("gates",{}).get(pid,{}), human_applicable=state.get("applicability",{}).get(dim),
-                           model_applicable=result.get(f"{dim}_applicable"), model_input_status=result.get(f"answer{slot}_input_status"),
+                           human_gates=state.get("gates",{}).get(pid,{}), human_applicable=human_applicable,
+                           model_applicable=model_applicable, model_input_status=result.get(f"answer{slot}_input_status"),
+                           human_input_status=state.get("inputs",{}).get(pid),
+                           model_score_status=formal_status,
+                           model_recorded_score_status=result.get(f"answer{slot}_{dim}_score_status"),
                            compatible=compatible, identity_accepted=identity_accepted,
                            prompt_sha256=result.get("prompt_sha256",""), evidence=response_identity(item,slot)["evidence"] if slot else "")
                 row.update(model_standard=policy.standard_version if policy else "unknown",
+                           model_standard_id=policy.standard_id if policy else "unknown",
                            bundle_revision=policy.bundle_revision if policy else "unknown",
                            **result_runtime_summary)
                 finalize_row(row)
@@ -265,11 +326,13 @@ class HumanComparisons:
     def create_preview(self, request: ComparisonRequest, snapshots: list[dict]) -> dict:
         if request.compatibility_mode not in ("same_standard","regression"):
             raise HumanError("无效兼容模式")
-        if not request.dimensions or any(d not in SCORE_DIMENSIONS for d in request.dimensions) or len(set(request.dimensions))!=len(request.dimensions):
-            raise HumanError("请选择六个统计维度中的至少一项；内容准确性仅留档")
         if len({t.task_id for t in request.tasks}) != len(request.tasks):
             raise HumanError("重复任务")
         baseline = self.store.load_baseline(request.baseline_id,request.version)
+        dimensions = request.dimensions or list(human_dimensions(baseline_protocol(baseline), scores=True))
+        if any(d not in human_dimensions(baseline_protocol(baseline), scores=True) for d in dimensions) or len(set(dimensions)) != len(dimensions):
+            raise HumanError("维度必须属于所选人工标准且不能重复")
+        request = request.model_copy(update={"dimensions": dimensions})
         first = request.tasks[0]
         anchor = [_source_id(it,first.id_field) for it in snapshots[0]["items"]]
         if not all(anchor) or len(anchor)!=len(set(anchor)):
@@ -305,6 +368,7 @@ class HumanComparisons:
             if row["result_input_binding"]=="binding_unverified" and row["match_status"] in ("verified","identity_unverified"):
                 confirmations[key]["binding_ids"].append(row["match_id"])
         return dict(preview_id=preview["preview_id"],config_sha256=preview["config_sha256"],scope_count=len(preview["scope"]),
+                    dimensions=preview["config"]["dimensions"],
                     human_n=sum(r["human_score"] is not None for r in rows), comparable_n=sum(r["comparable"] for r in rows),
                     matches=dict(Counter(r["match_status"] for r in rows)),bindings=dict(Counter(r["result_input_binding"] for r in rows)),
                     case_matching={s["task_id"]:len({r["case_id"] for r in rows if r["task_id"]==s["task_id"] and
@@ -376,6 +440,8 @@ class HumanComparisons:
                                           [p["product_id"] for p in baseline["products"]],preview["config"]["dimensions"])
             report=dict(**manifest,metrics=metrics,rows=preview["rows"],baseline=baseline,
                         config=preview["config"],frozen_at=self.preview_summary(preview)["frozen_at"],
+                        baseline_dimension_names=baseline.get("dimension_names", {}),
+                        human_protocol={key: baseline.get(key) for key in ("human_standard_id", "human_standard_version", "human_bundle_revision", "human_result_schema_version", "dimensions", "score_dimensions", "dimension_names", "score_range")},
                         model_protocols=[dict(task_id=s["task_id"],protocol_manifest=s.get("protocol_manifest",{}),
                                               evaluation_profile=s.get("evaluation_profile","")) for s in preview["snapshots"]],
                         model_runtimes=[dict(task_id=s["task_id"], **judge_runtime_summary(s))

@@ -210,7 +210,7 @@ async def test_concurrent_case_capture_does_not_mix_requests(environment, monkey
         judges=[JudgeConfig(name="test")], visual_modes={"rich_content": profile}))
     await asyncio.gather(*(one(index, item) for index, item in enumerate(items)))
     records, skipped = successful_records(history.task_to_snapshot(task))
-    assert not skipped and len(records) == 2
+    assert not skipped and len(records) == 2, task.results
     assert records[0]["request_id"] != records[1]["request_id"]
     for record in records:
         call = next(call for call in client.calls if record["query"] in call[1])

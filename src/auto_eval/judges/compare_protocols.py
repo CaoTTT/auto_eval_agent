@@ -5,7 +5,7 @@ output schema, score range, gate semantics and user-facing lifecycle state.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Literal, TypeAlias
 
 from jinja2 import Template
@@ -15,6 +15,10 @@ from ..schema import VisualCompareObservation
 from .visual_compare_prompt_v02_simplified import (
     VISUAL_COMPARE_SYSTEM as V02_SYSTEM,
     VISUAL_COMPARE_USER as V02_USER,
+)
+from .visual_compare_prompt_v02_simplified_plus import (
+    VISUAL_COMPARE_SYSTEM as V02_PLUS_SYSTEM,
+    VISUAL_COMPARE_USER as V02_PLUS_USER,
 )
 from .visual_compare_prompt_v03 import (
     VISUAL_COMPARE_SYSTEM as V03_SYSTEM,
@@ -28,10 +32,26 @@ from .visual_compare_prompt_v02_thinking_exposure_r023 import (
     VISUAL_COMPARE_SYSTEM as V02_THINKING_EXPOSURE_SYSTEM,
     VISUAL_COMPARE_USER as V02_THINKING_EXPOSURE_USER,
 )
+from .qa_chat_schema import (
+    QA_CHAT_COMPARE_PROTOCOL_ID, QA_CHAT_STANDARD_ID, QA_CHAT_RESULT_SCHEMA_VERSION,
+    QA_CHAT_DIMENSIONS, QA_CHAT_DIMENSION_NAMES, QAChatObservation,
+)
+from .visual_compare_prompt_qa_chat import (
+    VISUAL_COMPARE_SYSTEM as QA_CHAT_SYSTEM,
+    VISUAL_COMPARE_USER as QA_CHAT_USER,
+)
+from .qa_chat_v2_schema import (
+    QA_CHAT_V2_COMPARE_PROTOCOL_ID, QA_CHAT_V2_RESULT_SCHEMA_VERSION, QAChatV2Observation,
+)
+from .visual_compare_prompt_qa_chat_v2 import (
+    VISUAL_COMPARE_SYSTEM as QA_CHAT_V2_SYSTEM,
+    VISUAL_COMPARE_USER as QA_CHAT_V2_USER,
+)
 
 
 STANDARD_ID = "qa_competitor_compare"
 DEFAULT_COMPARE_PROTOCOL_ID = f"{STANDARD_ID}@0.2-simplified"
+V02_PLUS_COMPARE_PROTOCOL_ID = f"{STANDARD_ID}@0.2-simplified-plus"
 V03_COMPARE_PROTOCOL_ID = f"{STANDARD_ID}@0.3"
 V02_CALIBRATED_COMPARE_PROTOCOL_ID = f"{STANDARD_ID}@0.2-simplified-calibrated"
 V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID = f"{STANDARD_ID}@0.2-simplified-thinking-exposure"
@@ -44,6 +64,11 @@ DIMENSIONS = (
     "evidence_quality",
     "guided_recommendation",
 )
+DIMENSION_NAMES = dict(zip(DIMENSIONS, (
+    "理解需求", "内容准确性", "服务闭环", "场景化满足", "直观高效", "有理有据", "引导推荐",
+)))
+ALL_DIMENSIONS = tuple(dict.fromkeys((*DIMENSIONS, *QA_CHAT_DIMENSIONS)))
+DIMENSION_LABELS = {**DIMENSION_NAMES, **QA_CHAT_DIMENSION_NAMES}
 
 V02QualityScore: TypeAlias = Literal[1, 2, 3, 4, 5]
 
@@ -106,6 +131,10 @@ class CompareProtocol:
     require_response_pass: bool
     score_min: int
     score_max: int
+    dimensions: tuple[str, ...] = DIMENSIONS
+    dimension_names: dict[str, str] = field(default_factory=lambda: dict(DIMENSION_NAMES))
+    score_dimensions: tuple[str, ...] = tuple(d for d in DIMENSIONS if d != "accuracy")
+    result_schema_version: str | None = None
 
     def public_metadata(self) -> dict:
         return {
@@ -119,7 +148,27 @@ class CompareProtocol:
             "modes": ["compare"],
             "input_modalities": ["text"] if self.bundle_revision in {"0.2.0", "0.3.0"} else ["text", "text_image"],
             "conversation_adapter_version": None if self.bundle_revision in {"0.2.0", "0.3.0"} else "compare-conversation-1",
+            "dimensions": [{"key": key, "label": self.dimension_names[key]} for key in self.dimensions],
+            "dimension_names": dict(self.dimension_names),
+            "score_dimensions": list(self.score_dimensions),
+            "result_schema_version": self.result_schema_version,
         }
+
+    def request_metadata(self) -> dict:
+        """Keep legacy request fingerprints frozen when adding UI metadata.
+
+        The conversation adapter hashed public_metadata before dimensions were
+        exposed. Old bundles must keep that exact identity field set even while
+        newly created manifests can expose the richer display contract.
+        """
+        metadata = self.public_metadata()
+        if self.standard_id != STANDARD_ID:
+            return metadata
+        legacy_keys = (
+            "id", "standard_id", "standard_version", "bundle_revision", "display",
+            "status", "score_range", "modes", "input_modalities", "conversation_adapter_version",
+        )
+        return {key: metadata[key] for key in legacy_keys}
 
 
 _PROTOCOLS = {
@@ -132,6 +181,20 @@ _PROTOCOLS = {
         status="stable",
         system_template=V02_SYSTEM,
         user_template=V02_USER,
+        observation_model=VisualCompareObservationV02,
+        require_response_pass=True,
+        score_min=1,
+        score_max=5,
+    ),
+    V02_PLUS_COMPARE_PROTOCOL_ID: CompareProtocol(
+        id=V02_PLUS_COMPARE_PROTOCOL_ID,
+        standard_id=STANDARD_ID,
+        standard_version="0.2-simplified-plus",
+        bundle_revision="0.2.2",
+        display="V0.2 简化版（稳定plus）·1-5分",
+        status="stable",
+        system_template=V02_PLUS_SYSTEM,
+        user_template=V02_PLUS_USER,
         observation_model=VisualCompareObservationV02,
         require_response_pass=True,
         score_min=1,
@@ -179,6 +242,42 @@ _PROTOCOLS = {
         score_min=1,
         score_max=5,
     ),
+    QA_CHAT_COMPARE_PROTOCOL_ID: CompareProtocol(
+        id=QA_CHAT_COMPARE_PROTOCOL_ID,
+        standard_id=QA_CHAT_STANDARD_ID,
+        standard_version="1.0",
+        bundle_revision="1.0.0",
+        display="问答闲聊V1·1-5分（候选）",
+        status="experimental",
+        system_template=QA_CHAT_SYSTEM,
+        user_template=QA_CHAT_USER,
+        observation_model=QAChatObservation,
+        require_response_pass=False,
+        score_min=1,
+        score_max=5,
+        dimensions=QA_CHAT_DIMENSIONS,
+        dimension_names=dict(QA_CHAT_DIMENSION_NAMES),
+        score_dimensions=QA_CHAT_DIMENSIONS,
+        result_schema_version=QA_CHAT_RESULT_SCHEMA_VERSION,
+    ),
+    QA_CHAT_V2_COMPARE_PROTOCOL_ID: CompareProtocol(
+        id=QA_CHAT_V2_COMPARE_PROTOCOL_ID,
+        standard_id=QA_CHAT_STANDARD_ID,
+        standard_version="1.1",
+        bundle_revision="1.1.0",
+        display="问答闲聊V2·1-5分（候选）",
+        status="experimental",
+        system_template=QA_CHAT_V2_SYSTEM,
+        user_template=QA_CHAT_V2_USER,
+        observation_model=QAChatV2Observation,
+        require_response_pass=False,
+        score_min=1,
+        score_max=5,
+        dimensions=QA_CHAT_DIMENSIONS,
+        dimension_names=dict(QA_CHAT_DIMENSION_NAMES),
+        score_dimensions=QA_CHAT_DIMENSIONS,
+        result_schema_version=QA_CHAT_V2_RESULT_SCHEMA_VERSION,
+    ),
 }
 
 
@@ -191,6 +290,18 @@ def resolve_compare_protocol(protocol_id: str | None, bundle_revision: str | Non
     try:
         protocol = _PROTOCOLS[selected]
         if bundle_revision and bundle_revision != protocol.bundle_revision:
+            if selected == V02_PLUS_COMPARE_PROTOCOL_ID and bundle_revision == "0.2.1":
+                # Preserve the frozen rubric for historical stable-plus tasks.
+                from .visual_compare_prompt_v02_simplified_plus_r021 import (
+                    VISUAL_COMPARE_SYSTEM as legacy_system,
+                    VISUAL_COMPARE_USER as legacy_user,
+                )
+                return replace(
+                    protocol,
+                    bundle_revision=bundle_revision,
+                    system_template=legacy_system,
+                    user_template=legacy_user,
+                )
             if selected == V02_CALIBRATED_COMPARE_PROTOCOL_ID and bundle_revision == "0.2.2":
                 # Keep pre-fusion calibrated tasks bound to their original templates.
                 from .visual_compare_prompt_v02_calibrated_r022 import (
@@ -226,3 +337,31 @@ def resolve_compare_protocol(protocol_id: str | None, bundle_revision: str | Non
     except KeyError as exc:
         supported = ", ".join(_PROTOCOLS)
         raise ValueError(f"未知评测协议 {selected!r}；可选值：{supported}") from exc
+
+
+def resolve_compare_standard(
+    standard_id: str | None,
+    standard_version: str | None,
+    bundle_revision: str | None = None,
+) -> CompareProtocol:
+    """Resolve an explicit family/version, retaining bare legacy versions.
+
+    Missing chat revisions must be rejected by snapshot recovery, where it is
+    possible to distinguish a historical task from a newly selected protocol.
+    """
+    family = standard_id or STANDARD_ID
+    if standard_version and "@" in standard_version:
+        selected_family, version = standard_version.split("@", 1)
+        if standard_id and selected_family != standard_id:
+            raise ValueError("评测标准家族与完整协议ID冲突")
+        family, standard_version = selected_family, version
+    if "@" in family:
+        selected_family, version = family.split("@", 1)
+        if standard_version and standard_version != version:
+            raise ValueError("评测标准版本与完整协议ID冲突")
+        family, standard_version = selected_family, version
+    if not standard_version:
+        if family != STANDARD_ID:
+            raise ValueError("评测标准缺少版本")
+        return resolve_compare_protocol(None, bundle_revision)
+    return resolve_compare_protocol(f"{family}@{standard_version}", bundle_revision)

@@ -223,6 +223,10 @@ def _new_judge_runtime(app_cfg, options):
 
 def _check_judge_options(task, options):
     try:
+        if task.mode == "compare":
+            from .protocol_identity import require_snapshot_protocol
+            require_snapshot_protocol({"mode": task.mode, "evaluation_profile": task.evaluation_profile,
+                "protocol_manifest": task.protocol_manifest, "options": task.options, "results": task.results})
         check_frozen_options(task, options)
         if task.judge_runtime:
             restore_runtime(cfg(), task.judge_runtime)
@@ -538,6 +542,7 @@ async def api_eval(req: EvalReq):
         "status": "queued",
         "queue_position": queue_position,
         "evaluation_profile": task.evaluation_profile,
+        "protocol_manifest": task.protocol_manifest,
         "judge_runtime": task.judge_runtime,
     }
 
@@ -932,7 +937,7 @@ async def api_item_result(task_id: str, item_id: str):
         "index": idx,
         "item": task.items[idx],
         "result": (
-            result_export_row(task.mode, raw, idx, task.items)
+            result_export_row(task.mode, raw, idx, task.items, task.evaluation_profile, task.protocol_manifest, task.results)
             if raw is not None
             else None
         ),
@@ -1079,7 +1084,8 @@ async def api_stream(task_id: str, compact: bool = False):
             # status=done，仅看 status 会在批运行中立即下发伪 done；批结束时
             # 由 run_update_batch 补发终态事件驱动下方实时循环退出。
             if task.status == "done" and task.active_runs <= 0:
-                payload = {"summary": task.summary, "total": len(task.items), "task_timing": task.timing_snapshot()}
+                from .history import _readable_summary
+                payload = {"summary": _readable_summary(task_to_snapshot(task)), "total": len(task.items), "task_timing": task.timing_snapshot()}
                 if task.retry_runs and task.repair_status != "idle":
                     payload["retry"] = max(
                         task.retry_runs.values(),
@@ -1094,7 +1100,8 @@ async def api_stream(task_id: str, compact: bool = False):
                 yield _sse("cancelled", {"message": "排队任务已取消", "task_timing": task.timing_snapshot()})
                 return
             if task.status == "paused" and task.active_runs <= 0:
-                yield _sse("paused", {"status": "paused", "summary": task.summary, "execution_control": task.execution_control, "task_timing": task.timing_snapshot()})
+                from .history import _readable_summary
+                yield _sse("paused", {"status": "paused", "summary": _readable_summary(task_to_snapshot(task)), "execution_control": task.execution_control, "task_timing": task.timing_snapshot()})
                 return
             # 实时跟进
             while True:
