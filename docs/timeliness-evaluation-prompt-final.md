@@ -4,7 +4,7 @@
 
 界面标签：**时效性评估V1·1-3分（候选）**。协议：`timeliness_compare@1.0`；当前包修订：`1.0.2`；结果Schema：`timeliness-result-3`。输入沿用当前compare链路，每次评估尝试一次模型调用、一个JSON输出，Gate理由在结果前，各维证据及理由在分数前，新增整组内容冲突 `conflict_reason → has_conflict`。历史`1.0.0 / timeliness-result-1`及`1.0.1 / timeliness-result-2`按各自冻结合同读取和续跑，不补写冲突结果。
 
-本文件的SYSTEM由 [运行模块](../src/auto_eval/judges/visual_compare_prompt_timeliness.py) 中 `render_system_prompt(product_count=2)` 直接生成，包含原工作簿主表、R01–R20、C01–C20及从v0.2稳定plus迁移的内容冲突规则、字段合同和两产品22个基础键模板。原工作簿快照及SHA保持不变；新增规则来源与定义见 [内容冲突扩展标准](timeliness-content-conflict.md)。USER部分从同文件 `VISUAL_COMPARE_USER` 的源码常量提取。程序附加的题图说明及多轮上下文适配仍由现有链路组装，实际完整请求以运行审计记录为准。
+本文件的SYSTEM由 [运行模块](../src/auto_eval/judges/visual_compare_prompt_timeliness.py) 中 `render_system_prompt(product_count=2)` 直接生成，包含原工作簿主表、R01–R20、C01–C20及从v0.2稳定plus迁移的内容冲突规则、字段合同和两产品22个基础键模板。原工作簿快照及SHA保持不变；新增规则来源与定义见 [完整标准第5节内容冲突检测](timeliness-standard-v1.0.md#5-内容冲突检测)。USER部分从同文件 `VISUAL_COMPARE_USER` 的源码常量提取。程序附加的题图说明及多轮上下文适配仍由现有链路组装，实际完整请求以运行审计记录为准。
 
 SYSTEM正文SHA-256（UTF-8）：`f36ea38cd5f6e093b0b840bdff77892ffeae272ecac45839f8814cb2cef7fb51`。
 

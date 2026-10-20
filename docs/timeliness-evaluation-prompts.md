@@ -2,7 +2,7 @@
 
 状态：已接入当前本地开发分支，界面可选“时效性评估V1·1-3分（候选）”。每次评估尝试一次模型评审、一次完整JSON输出；2产品和3产品调用次数相同。本文说明运行合同，不代表已部署或已完成真实模型准确率验证。
 
-可直接复制的运行时完整SYSTEM及原始USER模板见[最终完整Prompt](timeliness-evaluation-prompt-final.md)。架构见[设计说明](timeliness-evaluation-design.md)，评分原文见[标准快照](timeliness-standard-v1.0.md)，新增检测项见[内容冲突补充标准](timeliness-content-conflict.md)，完整两产品模型输出形状见[JSON构造示例](examples/timeliness-result-v3.json)。
+可直接复制的运行时完整SYSTEM及原始USER模板见[最终完整Prompt](timeliness-evaluation-prompt-final.md)。架构见[设计说明](timeliness-evaluation-design.md)，评分条款及内容冲突检测统一见[时效性评估完整标准](timeliness-standard-v1.0.md)，完整两产品模型输出形状见[JSON构造示例](examples/timeliness-result-v3.json)。
 
 ## 1. 与现有项目对齐
 
@@ -376,11 +376,11 @@ JSON对象按键名解析，键顺序不是评分语义。Prompt和展示按固�
 
 ## 7. 固定原文与验收
 
-标准原文仍为[快照](timeliness-standard-v1.0.md)，源文件SHA-256：
+原始条款、规则、案例及修订说明完整保留于[统一标准第1–4节](timeliness-standard-v1.0.md)，原始Excel文件SHA-256：
 `9f3d663e213bfb7f6ba66cc2eacc316b6f7eeaba85726957e79e6bf6dad1a9a9`。
 运行时SYSTEM已冻结主表评分条款、R01–R20全文及C01–C20全部构造案例；不在运行时随机挑选，也不依赖本地工作簿。案例未规定的维度不能补成3。
 
-原表正文与SHA保持不变；[内容冲突补充标准](timeliness-content-conflict.md)单独记录V0.2来源原文、迁移约束及构造边界例，不虚构Excel新增单元格。明确不同时间可共存应no，同条件无法确认应unclear，不能把所有数值差异等同冲突或过时。已纠正的历史差异不作为当前冲突；产品内部文本/截图不一致不自动等于产品间冲突。
+原表正文与SHA保持不变；[完整标准第5节内容冲突检测](timeliness-standard-v1.0.md#5-内容冲突检测)集中记录V0.2来源原文、迁移约束及构造边界例，不虚构Excel新增单元格。明确不同时间可共存应no，同条件无法确认应unclear，不能把所有数值差异等同冲突或过时。已纠正的历史差异不作为当前冲突；产品内部文本/截图不一致不自动等于产品间冲突。
 
 结构和运行测试、后续真实模型校准共同覆盖：两产品22基础键/三产品29基础键及条件NA键；Gate理由在Gate前，各维证据理由在分数前，冲突理由在结论前；Gate fail与理解1阻断；理解NA续评；核心1与另一核心缺证并存；缺证不打2；同版3；历史匹配/单图时间冲突；测试时差；多目标时点；产品排列和审核日期变化的不变性；历史旧包32/45键和20/27基础键合同读取与续跑。冲突新增yes/no/unclear合法性、空理由/缺键拒绝、unclear复核、三产品已证实yes优先、缺输入不填no、独立举证和不自动扣分等检验。
 
