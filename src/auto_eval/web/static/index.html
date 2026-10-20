@@ -105,6 +105,7 @@
             <td style="white-space:nowrap">
               <button @click="loadHistoryTask(h.task_id)">{{ loadingTaskId === h.task_id ? '加载中…' : '加载' }}</button>
               <button @click="exportXlsx(h.task_id)" :disabled="!!exportingTaskId">{{ exportingTaskId === h.task_id ? '正在生成 Excel…' : '导出 Excel' }}</button>
+              <source-file-downloads :task-id="h.task_id" :files="h.source_files"></source-file-downloads>
               <button @click="delHistory(h.task_id)" class="btn-danger">删除</button>
             </td>
             <td class="history-note-cell">
@@ -427,7 +428,7 @@
     </h2>
     <label class="export-image-option"><input type="checkbox" v-model="exportIncludeImages" :disabled="!!exportingTaskId">单任务 Excel 包含原图（可选，文件较大）</label>
     <p class="hint">默认不嵌入回答截图和提问图片，评分、统计、图片明细及原图查看链接仍保留。</p>
-    <human-compare-panel v-if="mode==='compare' && taskId && !loadingTaskId" :key="taskId" :task-id="taskId"></human-compare-panel>
+    <human-compare-panel v-if="mode==='compare' && taskId && !loadingTaskId" :key="taskId" :task-id="taskId" :evaluation-profile="taskEvaluationProfile"></human-compare-panel>
     <details v-for="group in conversationGroups" :key="group.id" class="query-image-panel">
       <summary>会话 {{group.id}} · {{group.turns.length}} 轮结果</summary>
       <button v-for="turn in group.turns" :key="turn.index" @click="resultQuery=turn.item_id; resetResultPage()">第 {{turn.turn_index}} 轮 · {{turn.error?'失败':'完成'}} · {{turn.image_warning_count || 0}} 项图片诊断</button>
@@ -448,6 +449,22 @@
       <span v-if="summary.solved_ok_rate!=null">OK率 {{ (summary.solved_ok_rate*100).toFixed(0) }}%</span>
       <span v-if="summary.needs_review_count">需人工复核 {{ summary.needs_review_count }} 条</span>
     </div>
+    <section v-if="taskIsTimeliness && summary" class="timeliness-summary">
+      <h3>时效性评估 · 1–3分</h3>
+      <p class="hint">仅统计有效分数；NA不作0分。覆盖率分母包含证据不足，排除真正不适用和前置阻断。各产品均分应结合覆盖率及同题共同有效样本阅读。</p>
+      <p v-if="summary.conflict_total!=null"><strong>内容冲突</strong> · {{timelinessConflictSummary(summary)}}</p>
+      <p v-if="summary.conflict_total!=null" class="hint">每题跨产品判断一次，不归责产品，不自动扣分。明确冲突率 = yes / (yes + no)；不确定、旧协议未采集、采集失败及评测失败未完成不计入分母。</p>
+      <div class="table-scroll"><table class="grid">
+        <thead><tr><th>维度</th><th>产品</th><th>均分</th><th>有效 / 可评分范围</th><th>覆盖率</th><th>适用性待核验</th><th>未评分原因</th></tr></thead>
+        <tbody><tr v-for="row in timelinessSummaryRows(summary)" :key="row.key"><td>{{row.dimension}}</td><td>产品{{row.product}}</td><td>{{row.average}}</td><td>{{row.scored}} / {{row.eligible}}</td><td>{{row.coverage}}</td><td>{{row.unknown}}</td><td>{{row.states}}</td></tr></tbody>
+      </table></div>
+      <h4>同题同维共同可评分样本</h4>
+      <p class="hint">每一行只比较两个产品均有有效分数的相同题目。共同有效数为0时均分为N/A，不计算胜率或排名。</p>
+      <div class="table-scroll"><table class="grid">
+        <thead><tr><th>维度</th><th>比较产品</th><th>共同有效题数</th><th>A交集均分</th><th>B交集均分</th></tr></thead>
+        <tbody><tr v-for="row in timelinessPairedRows(summary)" :key="row.key"><td>{{row.dimension}}</td><td>A：产品{{row.a}} / B：产品{{row.b}}</td><td>{{row.count}}</td><td>{{row.averageA}}</td><td>{{row.averageB}}</td></tr></tbody>
+      </table></div>
+    </section>
     <div ref="resultBrowser" class="result-browser">
       <div v-if="mode!=='compare'" class="skill-tabs">
         <button v-for="s in skillTabs" :key="s.key" :class="{active:activeSkill===s.key}" @click="selectSkill(s.key)">
@@ -520,11 +537,16 @@
         <details v-if="summary && summary.by_input_modality">
           <summary>按题型查看汇总（沿用任务统一标准）</summary>
           <div v-for="(sub, key) in summary.by_input_modality" :key="key" class="query-image-panel">
-            <strong>{{ key==='text' ? '文字题' : '图文题' }}</strong> · 样本 {{ sub.total }} · 成功 {{ sub.done }} · 失败 {{ sub.failed }} · 可比较 {{ sub.comparable }}
-            <p v-for="dim in summaryDimensions" :key="dim.key">
+            <strong>{{ key==='text' ? '文字题' : '图文题' }}</strong> · 样本 {{ sub.total }} · 成功 {{ sub.done }} · 失败 {{ sub.failed }} <span v-if="!taskIsTimeliness">· 可比较 {{ sub.comparable }}</span>
+            <template v-if="taskIsTimeliness">
+              <p v-if="sub.conflict_total!=null">内容冲突 · {{timelinessConflictSummary(sub)}}</p>
+              <p v-for="row in timelinessSummaryRows(sub)" :key="row.key">{{row.dimension}} · 产品{{row.product}}均分 {{row.average}} · 有效 {{row.scored}} / {{row.eligible}} · 覆盖 {{row.coverage}} · 适用性待核验 {{row.unknown}} · {{row.states}}</p>
+              <p v-for="row in timelinessPairedRows(sub)" :key="row.key">{{row.dimension}} · 产品{{row.a}} / 产品{{row.b}}共同有效 {{row.count}} · 交集均分 {{row.averageA}} / {{row.averageB}}</p>
+            </template>
+            <template v-else><p v-for="dim in summaryDimensions" :key="dim.key">
               {{ dim.label }} · 全产品共同有效 {{ sub[dim.key+'_all_products_scored'] ?? sub[dim.key+'_scored'] }} ·
               <span v-for="n in sub.product_count" :key="n">产品{{ n }}均分 {{ sub[dim.key+'_answer'+n+'_avg'] ?? 'N/A' }} <span v-if="taskIsChat">（适用 {{sub[dim.key+'_answer'+n+'_applicable']}}，有效 {{sub[dim.key+'_answer'+n+'_scored']}}，覆盖 {{sub[dim.key+'_answer'+n+'_score_coverage'] ?? '—'}}）</span> </span>
-            </p>
+            </p></template>
           </div>
         </details>
         <table class="grid results compact-results" :style="{ width: resultTableWidth + 'px' }">
@@ -558,12 +580,27 @@
                   @mouseenter="c.key !== 'latency_s' && !reasonOnlyColumn(c) && showCellTooltip($event, cell(r, c))"
                   @mouseleave="scheduleHideCellTooltip"
                 >
+                  <div v-if="timelinessColumn(r,c)" class="timeliness-result">
+                    <div v-if="cellReasons(r,c).length" class="cell-reasons" :class="{'timeliness-evidence-preview':!reasonsExpanded(r,c)}">
+                      <p v-for="(reason,reasonIndex) in cellReasons(r,c)" :key="reasonIndex"><strong>{{reason.label}}</strong><span>{{reason.text}}</span></p>
+                    </div>
+                    <span v-else class="hint">未记录证据与理由</span>
+                    <button v-if="cellReasons(r,c).length" class="reason-toggle" :aria-expanded="reasonsExpanded(r,c)" @click="toggleCellReasons(r,c)">{{reasonsExpanded(r,c)?'收起依据':'展开全部证据与理由'}}</button>
+                    <div class="timeliness-score-list"><span v-for="entry in timelinessProductScores(r,c)" :key="entry.product" class="timeliness-score" :class="entry.className">P{{entry.product}}：{{entry.label}}</span></div>
+                  </div>
+                  <div v-if="timelinessConflictColumn(r,c)" class="timeliness-result">
+                    <div v-if="cellReasons(r,c).length" class="cell-reasons timeliness-conflict-reason" :class="{'timeliness-evidence-preview':!reasonsExpanded(r,c)}">
+                      <p v-for="(reason,reasonIndex) in cellReasons(r,c)" :key="reasonIndex"><strong>{{reason.label}}</strong><span>{{reason.text}}</span></p>
+                    </div>
+                    <button v-if="cellReasons(r,c).length" class="reason-toggle" :aria-expanded="reasonsExpanded(r,c)" @click="toggleCellReasons(r,c)">{{reasonsExpanded(r,c)?'收起理由':'展开全部理由'}}</button>
+                    <div class="timeliness-conflict-verdict"><strong>{{cell(r,c)}}</strong></div>
+                  </div>
                   <div
-                    v-if="!reasonOnlyColumn(c)"
+                    v-if="!reasonOnlyColumn(c) && !timelinessColumn(r,c) && !timelinessConflictColumn(r,c)"
                     class="cell-clamp"
                     :class="{'cell-center': ['card_presence','superlink_presence','card_count','superlink_count','answer_coverage','needs_review','problem_solved','card_suitability','superlink_suitability','has_conflict','relevance','safety','content_quality','need_closure','personalization','latency_s'].includes(c.key)}"
                   >{{ cell(r, c) }}</div>
-                  <template v-if="cellReasons(r, c).length">
+                  <template v-if="!timelinessColumn(r,c) && !timelinessConflictColumn(r,c) && cellReasons(r, c).length">
                     <button class="reason-toggle" :aria-expanded="reasonsExpanded(r, c)" @click="toggleCellReasons(r, c)">{{ reasonsExpanded(r, c) ? '收起理由' : '展开理由' }}</button>
                     <div v-if="reasonsExpanded(r, c)" class="cell-reasons">
                       <p v-for="(reason, reasonIndex) in cellReasons(r, c)" :key="reasonIndex"><strong>{{ reason.label }}</strong><span>{{ reason.text }}</span></p>
@@ -655,6 +692,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20261012_model_input_evidence"></script>
+  <script type="module" src="/static/app.js?v=20261020_timeliness_conflict"></script>
 </body>
 </html>

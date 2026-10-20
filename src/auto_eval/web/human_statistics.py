@@ -65,6 +65,8 @@ def _pair(a, b, keys):
 
 def build_human_statistics(rows: list[dict], task_ids: list[str], products: list[str], dimensions=None) -> dict:
     dimensions = list(dimensions or SCORE_DIMENSIONS)
+    timeliness = any(row.get("human_standard_id") == "timeliness_compare" or row.get("model_standard_id") == "timeliness_compare" or
+                     row.get("model_result_schema_version") in ("timeliness-result-1", "timeliness-result-2", "timeliness-result-3") for row in rows)
     grouped = defaultdict(list)
     for row in rows:
         grouped[row["task_id"], row["product_id"], row["dimension_id"]].append(row)
@@ -79,7 +81,7 @@ def build_human_statistics(rows: list[dict], task_ids: list[str], products: list
                 for scope in scopes:
                     eligible = common if scope == "common" else set(valid.get((task,product,dim), {}))
                     scores.append(dict(task_id=task, product_id=product, dimension_id=dim, scope=scope, **_single(group,eligible)))
-        for a, b in permutations(products, 2):
+        for a, b in (() if timeliness else permutations(products, 2)):
             all_pairs = {t: set(valid.get((t,a,dim), {})) & set(valid.get((t,b,dim), {})) for t in task_ids}
             common = set.intersection(*all_pairs.values())
             for task in task_ids:
@@ -91,7 +93,7 @@ def build_human_statistics(rows: list[dict], task_ids: list[str], products: list
                     pairs.append(dict(task_id=task, product_a=a, product_b=b, dimension_id=dim, scope=scope,
                                       human_n=hn, coverage=ratio(len(keys),hn),
                                       **_pair(valid.get((task,a,dim),{}),valid.get((task,b,dim),{}),keys)))
-        if len(products) == 3:
+        if len(products) == 3 and not timeliness:
             all_three = {t: set.intersection(*(set(valid.get((t,p,dim), {})) for p in products)) for t in task_ids}
             common = set.intersection(*all_three.values())
             for task in task_ids:
@@ -116,6 +118,9 @@ def build_human_statistics(rows: list[dict], task_ids: list[str], products: list
                 states.append(dict(task_id=task, dimension_id=dim, kind="applicability", product_id=product, n=len(values),
                                    agreement=ratio(sum(r["human_applicable"]==r["model_applicable"] for r in values),len(values))))
                 formal = {"scored", "not_applicable", "unverifiable", "gate_blocked", "input_failed"}
+                if timeliness:
+                    formal = {"scored", "not_applicable", "insufficient_evidence", "blocked_gate",
+                              "blocked_understanding", "input_failed"}
                 values = [r for r in group if r["identity_accepted"] and r.get("compatible", True) and
                           r.get("human_status") in formal and r.get("model_score_status") in formal]
                 states.append(dict(task_id=task, dimension_id=dim, kind="score_status", product_id=product, n=len(values),
@@ -126,7 +131,7 @@ def build_human_statistics(rows: list[dict], task_ids: list[str], products: list
                          r["identity_accepted"] and r.get("compatible", True) and r.get("human_gates",{}).get(gate) in ("pass","fail","unclear") and
                          r.get("model_gates",{}).get(gate) in ("pass","fail","unclear") and
                          (r.get("model_input_status") in ("complete","partial") or
-                          r.get("model_result_schema_version") == "qa-chat-result-2" and r.get("model_input_status") is None) and
+                          r.get("model_result_schema_version") in ("qa-chat-result-2", "timeliness-result-1", "timeliness-result-2", "timeliness-result-3") and r.get("model_input_status") is None) and
                          r.get("human_input_status") != "failed"}
                 values = list(group.values())
                 product_rows = [r for r in rows if r["task_id"] == task and r["product_id"] == product]

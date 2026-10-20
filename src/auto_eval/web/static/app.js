@@ -1,4 +1,4 @@
-import { createApp, ref, computed, onMounted, onUnmounted, nextTick, selectEvidenceMode } from "./compare-data.js?v=20260920_audit";
+import { createApp, ref, computed, onMounted, onUnmounted, nextTick, selectEvidenceMode } from "./compare-data.js?v=20261016_source_files";
 
 createApp({
   setup() {
@@ -12,9 +12,11 @@ createApp({
     const mode = ref("rich_content");
     const isVideoMode = computed(() => true);
     const datasetName = ref("");
+    const datasetSourceFileId = ref("");
     const datasetSourceTaskId = ref("");
     const datasetRevision = ref(0);
     let datasetBaseline = "", datasetImportVersion = 0;
+    let datasetImportController = null;
     const items = ref([]);
     let opItemSequence = 0;
     const opItems = ref([newOpItem()]);
@@ -61,11 +63,33 @@ createApp({
     const taskProtocolManifest = ref({});
     const taskProtocolDiagnostics = ref([]);
     const taskIsChat = computed(() => (taskEvaluationProfile.value || '').startsWith('qa_chat_compare@'));
+    const taskIsTimeliness = computed(() => (taskEvaluationProfile.value || '').startsWith('timeliness_compare@'));
+    function isTimelinessRow(row = {}) {
+      if (row.standard_id) return row.standard_id === 'timeliness_compare';
+      if (row.evaluation_profile) return row.evaluation_profile.startsWith('timeliness_compare@');
+      if (row.result_schema_version) return ['timeliness-result-1','timeliness-result-2','timeliness-result-3'].includes(row.result_schema_version);
+      return taskIsTimeliness.value;
+    }
     function chatUsesSharedReasons(row = {}) {
+      if (isTimelinessRow(row)) return true;
       if (row.result_schema_version) return row.result_schema_version === 'qa-chat-result-2';
       const profile = row.evaluation_profile || (row.standard_id === 'qa_chat_compare' && row.standard_version
         ? `qa_chat_compare@${row.standard_version}` : taskEvaluationProfile.value);
       return profile === 'qa_chat_compare@1.1';
+    }
+    function timelinessHasConflict(row = {}) {
+      return isTimelinessRow(row)
+        && (row.result_schema_version || taskProtocolManifest.value.result_schema_version) === 'timeliness-result-3';
+    }
+    function timelinessConflictColumn(row, column) {
+      return column.key === 'has_conflict' && isTimelinessRow(row);
+    }
+    function timelinessConflictSummary(data = {}) {
+      return `有冲突 ${data.conflict_yes ?? 0} · 无冲突 ${data.conflict_no ?? 0} · 不确定 ${data.conflict_unclear ?? 0}`
+        + ` · 未采集（旧协议）${data.conflict_not_collected ?? 0} · 结果缺失或异常 ${data.conflict_invalid_state ?? 0}`
+        + ` · 采集失败，待核验 ${data.conflict_input_failed ?? 0}`
+        + ` · 协议异常 ${data.conflict_identity_error ?? 0} · 技术失败 ${data.conflict_technical_failure ?? 0} · 未完成 ${data.conflict_unfinished ?? 0}`
+        + ` · 明确冲突率 ${summaryPercent(data.conflict_rate)}（有冲突 / 明确判断 ${data.conflict_known ?? 0}）`;
     }
     const compareProfiles = computed(() =>
       evaluationProfiles.value.filter((profile) => (profile.modes || []).includes("compare"))
@@ -174,10 +198,13 @@ createApp({
       {key:'emotional_expression',label:'情感表达恰当'}, {key:'style',label:'风格恰当'},
       {key:'scenario_fulfillment',label:'场景化满足'}, {key:'guided_recommendation',label:'引导推荐'},
     ];
+    const timelinessDimensions = [
+      {key:'understanding',label:'理解需求'}, {key:'authority',label:'权威性'}, {key:'timeliness',label:'时效性'},
+    ];
     const taskDimensions = computed(() => {
       const frozen = taskProtocolManifest.value.dimensions;
       const registered = evaluationProfiles.value.find(p => p.id === taskEvaluationProfile.value)?.dimensions;
-      return frozen?.length ? frozen : registered?.length ? registered : taskIsChat.value ? chatDimensions : legacyScoreDimensions.filter(d => !d.gate);
+      return frozen?.length ? frozen : registered?.length ? registered : taskIsTimeliness.value ? timelinessDimensions : taskIsChat.value ? chatDimensions : legacyScoreDimensions.filter(d => !d.gate);
     });
     const scoreDimensions = computed(() => [...legacyScoreDimensions.filter(d => d.gate), ...taskDimensions.value]);
     const summaryDimensions = computed(() => taskDimensions.value.filter(d => d.key !== 'accuracy'));
@@ -235,6 +262,31 @@ createApp({
       ? scoreRules.value.map((rule, i) => scoreRuleError(rule) ? `条件 ${i + 1}：${scoreRuleError(rule)}` : '').filter(Boolean).join('；') : '');
     function scoreValue(row, dimension, product) {
       if (taskProtocolDiagnostics.value.length) return null;
+      if (isTimelinessRow(row)) {
+        const prefix = `answer${product}_${dimension}`, value = row[`${prefix}_score`];
+        const verification = row[`${prefix}_verification_status`];
+        const compact = ['timeliness-result-2','timeliness-result-3'].includes(row.result_schema_version || taskProtocolManifest.value.result_schema_version);
+        const evidenceStateValid = compact
+          ? !Object.prototype.hasOwnProperty.call(row,`${prefix}_na_reason`)
+          : verification === 'verified' || (verification === 'partial' && (dimension === 'understanding' || value === 1));
+        const understandingPrefix = `answer${product}_understanding`;
+        const understandingScore = row[`${understandingPrefix}_score`];
+        const understandingStateValid = !compact || dimension === 'understanding'
+          || (row[`${understandingPrefix}_applicable`] === true
+            && !Object.prototype.hasOwnProperty.call(row,`${understandingPrefix}_na_reason`)
+            && (understandingScore === null
+              ? row[`${understandingPrefix}_score_status`] === 'insufficient_evidence'
+              : Number.isInteger(understandingScore) && understandingScore >= 1 && understandingScore <= 3
+                && row[`${understandingPrefix}_score_status`] === 'scored'));
+        const understandingBlocks = dimension !== 'understanding' && understandingScore === 1;
+        return !row.error && understandingStateValid && !understandingBlocks && row[`${prefix}_score_status`] === 'scored'
+          && row[`${prefix}_applicable`] === true
+          && evidenceStateValid
+          && ['pass','unclear'].includes(row[`answer${product}_response_gate`])
+          && ['pass','unclear'].includes(row[`answer${product}_safety_gate`])
+          && (row[`answer${product}_input_status`] == null || ['complete','partial'].includes(row[`answer${product}_input_status`]))
+          && Number.isInteger(value) && value >= 1 && value <= 3 ? value : null;
+      }
       if (taskIsChat.value || row.standard_id === 'qa_chat_compare') {
         const prefix = `answer${product}_${dimension}`;
         const value = row[`${prefix}_score`];
@@ -300,7 +352,10 @@ createApp({
         }
       } else if (column.key.endsWith('_summary')) {
         const dimension = column.key.replace('_summary', '');
-        if (taskIsChat.value || row.standard_id === 'qa_chat_compare') {
+        if (isTimelinessRow(row)) {
+          add('维度共享证据（保留原产品归属）', row[`${dimension}_evidence`]);
+          add('维度共享评分理由', row[`${dimension}_reason`]);
+        } else if (taskIsChat.value || row.standard_id === 'qa_chat_compare') {
           if (chatUsesSharedReasons(row)) {
             add('维度共享评分理由', row[`${dimension}_reason`]);
             add('维度共享证据（保留原产品归属）', row[`${dimension}_evidence`]);
@@ -806,7 +861,8 @@ createApp({
           { key: "response_gate_summary", label: "响应体验Gate" },
           { key: "safety_gate_summary", label: "安全稳定Gate" },
           ...taskDimensions.value.map(d => ({key:`${d.key}_summary`, label:d.key === 'accuracy' ? '内容准确（暂不汇总）' : d.label})),
-          ...(chatUsesSharedReasons() ? [] : [{ key: "has_conflict", label: "内容冲突" }]),
+          ...((taskIsTimeliness.value ? timelinessHasConflict() : !chatUsesSharedReasons())
+            ? [{ key: "has_conflict", label: "内容冲突" }] : []),
           { key: "needs_human_review", label: "需人工复核" },
           ...(chatUsesSharedReasons() ? [] : [{ key: "rationale", label: "理由" }]),
           { key: "latency_s", label: "总耗时" },
@@ -973,10 +1029,17 @@ createApp({
       return evaluationProfiles.value.find((profile) => profile.id === id)?.display || id;
     }
 
-    function switchMode(k) {
+    function cancelDatasetImport() {
       datasetImportVersion++;
+      datasetImportController?.abort();
+      datasetImportController = null;
+      opPreparing.value = false;
+    }
+
+    function switchMode(k) {
+      cancelDatasetImport();
       importReport.value = null;
-      opPreparing.value=false;
+      datasetSourceFileId.value = "";
       datasetSourceTaskId.value = "";
       datasetBaseline = "";
       cancelHistoryLoad();
@@ -1039,10 +1102,10 @@ createApp({
     }
     function useComparisonDataset(data) {
       if (mode.value !== 'compare' || !confirmDatasetReplacement()) return;
-      datasetImportVersion++;opPreparing.value=false;cancelHistoryLoad();detachResultView();
+      cancelDatasetImport();cancelHistoryLoad();detachResultView();
       items.value=JSON.parse(JSON.stringify(data.items));
       opItems.value=comparisonDraftRows(items.value);
-      datasetName.value=data.dataset_name || '历史测评数据';datasetSourceTaskId.value=data.task_id;
+      datasetName.value=data.dataset_name || '历史测评数据';datasetSourceFileId.value='';datasetSourceTaskId.value=data.task_id;
       opPage.value=1;errors.value=[];importReport.value=null;datasetBaseline=draftFingerprint();datasetRevision.value++;
     }
     async function onQueryImage(event, index) {
@@ -1110,25 +1173,31 @@ createApp({
       const file = e.target.files && e.target.files[0];
       e.target.value = "";
       if (!file) return;
-      const importVersion = ++datasetImportVersion;
+      cancelDatasetImport();
+      const importVersion = datasetImportVersion;
       const importMode = mode.value;
+      const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+      datasetImportController = controller;
+      const isCurrentImport = () => importVersion === datasetImportVersion && importMode === mode.value && !disposed;
       opPreparing.value = true;
       errors.value = [];
       importReport.value = null;
       try {
         const content = await file.text();
+        if (!isCurrentImport()) return;
         const isCsv = /\.csv$/i.test(file.name || "");
         console.log("[onOpManifestFile] mode:", mode.value, "csv:", isCsv, "file size:", content.length);
         const parseBody = isCsv
-          ? { mode: mode.value, csv: content }
-          : { mode: mode.value, jsonl: content };
+          ? { mode: importMode, csv: content }
+          : { mode: importMode, jsonl: content };
         const parseResponse = await fetch("/api/parse", {
           method: "POST",
+          ...(controller ? {signal: controller.signal} : {}),
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(parseBody),
         });
         const parsed = await parseResponse.json().catch(() => ({}));
-        if (importVersion !== datasetImportVersion || importMode !== mode.value) return;
+        if (!isCurrentImport()) return;
         console.log("[onOpManifestFile] response ok:", parseResponse.ok, "items:", (parsed.items || []).length, "errors:", (parsed.errors || []).length);
         if (!parseResponse.ok) throw new Error(parsed.detail || (isCsv ? "CSV 解析请求失败" : "JSON / JSONL 解析请求失败"));
         const importErrors = [...(parsed.errors || [])];
@@ -1144,9 +1213,21 @@ createApp({
         }
 
         if (mode.value === 'compare' && !confirmDatasetReplacement()) return;
+        const sourceForm = new FormData();
+        sourceForm.append("file", file);
+        const uploadResponse = await fetch("/api/upload/dataset-source", {
+          method: "POST", body: sourceForm,
+          ...(controller ? {signal: controller.signal} : {}),
+        });
+        const sourceFile = await uploadResponse.json().catch(() => ({}));
+        if (!isCurrentImport()) return;
+        if (!uploadResponse.ok || !sourceFile.id) {
+          throw new Error(typeof sourceFile.detail === "string" ? sourceFile.detail : "源文件保存失败，请重新导入");
+        }
         importReport.value = report;
         if (mode.value === 'compare') { cancelHistoryLoad();detachResultView(); }
         datasetName.value = file.name || '';
+        datasetSourceFileId.value = sourceFile.id;
         datasetSourceTaskId.value = '';
         errors.value = importErrors;
         const imported = parsed.items || [];
@@ -1191,10 +1272,13 @@ createApp({
         }
       } catch (error) {
         console.error("[onOpManifestFile] error:", error);
-        if (importVersion !== datasetImportVersion) return;
+        if (!isCurrentImport()) return;
         errors.value = ["批量导入失败：" + (error?.message || String(error))];
       } finally {
-        if (importVersion === datasetImportVersion) opPreparing.value = false;
+        if (importVersion === datasetImportVersion) {
+          opPreparing.value = false;
+          datasetImportController = null;
+        }
       }
     }
 
@@ -1274,6 +1358,8 @@ createApp({
         mode: mode.value,
         items: submittedItems,
         dataset_name: datasetName.value || "手动录入",
+        ...(datasetSourceFileId.value ? {source_file_id: datasetSourceFileId.value}
+          : datasetSourceTaskId.value ? {source_task_id: datasetSourceTaskId.value} : {}),
         evaluation_profile: mode.value === "compare" ? selectedEvaluationProfile.value : null,
         options: {
           ...(mode.value === 'compare' && datasetSourceTaskId.value ? {dataset_source_task_id:datasetSourceTaskId.value} : {}),
@@ -1689,7 +1775,63 @@ createApp({
       if (taskProtocolDiagnostics.value.length) return '协议待恢复';
       if (row.error) return '评估失败';
       const state = row[`answer${product}_${dimension}_score_status`];
-      return ({scored:'已评分',not_applicable:'不适用',gate_blocked:'门槛未通过',input_failed:'输入失败',unverifiable:'无法核验'})[state] || '待评估';
+      if (isTimelinessRow(row)) {
+        if (row[`answer${product}_input_status`] === 'failed') return '输入失败';
+        if ([row[`answer${product}_response_gate`], row[`answer${product}_safety_gate`]].includes('fail')) return 'NA · Gate阻断';
+        if (dimension !== 'understanding' && row[`answer${product}_understanding_score`] === 1) return 'NA · 理解1分阻断';
+        if (state === 'insufficient_evidence' && row[`answer${product}_${dimension}_na_reason`] === 'applicability_unknown') return 'NA · 适用性待核验';
+        if (state === 'scored' && scoreValue(row,dimension,product) == null) return 'NA · 评分状态待复核';
+      }
+      return ({scored:'已评分',not_applicable:'不适用',gate_blocked:'门槛未通过',input_failed:'输入失败',unverifiable:'无法核验',
+        insufficient_evidence:'NA · 证据不足',blocked_gate:'NA · Gate阻断',blocked_understanding:'NA · 理解1分阻断'})[state] || '待评估';
+    }
+    function timelinessColumn(row, column) {
+      return isTimelinessRow(row) && ['response_gate_summary','safety_gate_summary',
+        ...timelinessDimensions.map(d => `${d.key}_summary`)].includes(column.key);
+    }
+    function timelinessProductScores(row, column) {
+      const dimension = column.key.replace(/_summary$/, '');
+      const gate = dimension.endsWith('_gate');
+      return Array.from({length:Number(row.product_count || items.value[row.index]?.product_count || 2)}, (_,i) => {
+        const product = i + 1, value = gate ? row[`answer${product}_${dimension}`] : scoreValue(row,dimension,product);
+        const label = gate ? ({pass:'通过',fail:'不通过',unclear:'不确定'})[value] || 'N/A'
+          : value == null ? chatScoreStatus(row,dimension,product) : `${value}分`;
+        return {product,label,className:gate ? `gate-${value || 'unknown'}` : value == null ? 'score-na' : `score-${value}`};
+      });
+    }
+    function summaryPercent(value) {
+      return typeof value === 'number' && Number.isFinite(value) ? `${(value * 100).toFixed(1)}%` : 'N/A';
+    }
+    function timelinessSummaryRows(data) {
+      if (!data) return [];
+      return summaryDimensions.value.flatMap(d => Array.from({length:Number(data.product_count || 2)}, (_,i) => {
+        const prefix = `${d.key}_answer${i+1}`, counts = data[`${prefix}_score_status_counts`] || {};
+        const rates = data[`${prefix}_score_status_rates`] || {};
+        return {key:`${d.key}-${i+1}`,dimension:d.label,product:i+1,
+          average:data[`${prefix}_avg`] ?? 'N/A', scored:data[`${prefix}_scored`] ?? 0,
+          eligible:data[`${prefix}_eligible`] ?? 0, coverage:summaryPercent(data[`${prefix}_score_coverage`]),
+          states:['insufficient_evidence','not_applicable','blocked_gate','blocked_understanding','input_failed',
+            'technical_failure','unfinished','invalid_state','identity_error']
+            .map(state => `${({insufficient_evidence:'证据不足',not_applicable:'不适用',blocked_gate:'Gate阻断',
+              blocked_understanding:'理解阻断',input_failed:'输入失败',technical_failure:'技术失败',unfinished:'未完成',
+              invalid_state:'状态冲突',identity_error:'协议异常'})[state]} ${counts[state] || 0}` +
+                (['not_applicable','blocked_gate','blocked_understanding'].includes(state)
+                  ? `（占全部 ${summaryPercent(rates[state])}）` : '')).join(' · '),
+          unknown:data[`${prefix}_applicable_unknown`] ?? 0};
+      }));
+    }
+    function timelinessPairedRows(data) {
+      if (!data) return [];
+      const rows = [], count = Number(data.product_count || 2);
+      for (const d of summaryDimensions.value) {
+        for (let a = 1; a <= count; a++) for (let b = a + 1; b <= count; b++) {
+          const prefix = `${d.key}_answer${a}_answer${b}`;
+          rows.push({key:prefix,dimension:d.label,a,b,count:data[`${prefix}_paired_count`] ?? 0,
+            averageA:data[`${prefix}_paired_answer${a}_avg`] ?? 'N/A',
+            averageB:data[`${prefix}_paired_answer${b}_avg`] ?? 'N/A'});
+        }
+      }
+      return rows;
     }
     function cell(r, c) {
       const v = r[c.key];
@@ -1708,7 +1850,7 @@ createApp({
       }
       if (c.key.endsWith("_summary") && !["input_status_summary", "response_gate_summary", "safety_gate_summary"].includes(c.key)) {
         const dimension = c.key.slice(0, -"_summary".length);
-        if (taskIsChat.value || r.standard_id === 'qa_chat_compare') {
+        if (isTimelinessRow(r) || taskIsChat.value || r.standard_id === 'qa_chat_compare') {
           return Array.from({length:Number(r.product_count || items.value[r.index]?.product_count || 2)}, (_,i) => {
             const score = scoreValue(r,dimension,i+1);
             return `P${i+1}:${score === null ? chatScoreStatus(r,dimension,i+1) : score+'分（已评分）'}`;
@@ -1734,6 +1876,17 @@ createApp({
         return v || "";
       }
       if (c.key === "has_conflict") {
+        if (isTimelinessRow(r)) {
+          if (r.error) return "评估失败";
+          if (!timelinessHasConflict(r)) return "未采集（旧协议）";
+          if (taskProtocolDiagnostics.value.length) return "协议待恢复";
+          const count = Number(r.product_count || items.value[r.index]?.product_count || 2);
+          if (Array.from({length:count}, (_, i) => i + 1).some(n => r[`answer${n}_input_status`] === 'failed')) {
+            const model = ({yes:'有冲突',no:'无冲突',unclear:'不确定'})[v] || '结果缺失或异常';
+            return `采集失败，待核验（模型：${model}）`;
+          }
+          if (!['yes','no','unclear'].includes(v) || !String(r.conflict_reason || '').trim()) return "结果缺失或异常";
+        }
         if (v === "yes") return "有冲突";
         if (v === "no") return "无冲突";
         if (v === "unclear") return "不清楚";
@@ -2019,8 +2172,7 @@ createApp({
     }
 
     async function loadHistoryTask(id) {
-      datasetImportVersion++;
-      opPreparing.value=false;
+      cancelDatasetImport();
       cancelHistoryLoad();
       const version = historyLoadVersion;
       let loaded = false;
@@ -2052,6 +2204,8 @@ createApp({
           selectedEvaluationProfile.value = d.evaluation_profile || defaultEvaluationProfile();
         }
         datasetName.value = d.dataset_name || "";
+        datasetSourceFileId.value = "";
+        datasetSourceTaskId.value = d.task_id || id;
         items.value = d.items || [];
         if (d.mode === "compare") {
           opItems.value = items.value.map(item => ({
@@ -2071,8 +2225,16 @@ createApp({
         }
         if (d.mode === 'compare') {
           opItems.value = comparisonDraftRows(items.value);
-          datasetSourceTaskId.value = d.task_id || id;
           datasetBaseline = draftFingerprint();datasetRevision.value++;
+        } else {
+          opItems.value = items.value.map(item => ({...newOpItem(),
+            id: item.id || "", query: item.query || "", context: item.context || "", category: item.category || "",
+            videoPath: item.video_path || "", videoName: String(item.video_path || "").split(/[\\/]/).pop(),
+            frames: item.frames || [], answer: item.answer_text || "",
+            taskStartTime: item.task_start_time ?? null, taskEndTime: item.task_end_time ?? null,
+            sourceLine: item.source_line ?? null, sourceData: item.source_data || null,
+          }));
+          opPage.value = 1;
         }
         modalityFilter.value = "";
         results.value = d.results || [];
@@ -2215,7 +2377,7 @@ createApp({
     onUnmounted(() => {
       disposed = true;
       historyListVersion++;
-      datasetImportVersion++;
+      cancelDatasetImport();
       cancelHistoryLoad();
       if (progressClockTimer != null) window.clearInterval(progressClockTimer);
       if (queueRefreshTimer != null) window.clearInterval(queueRefreshTimer);
@@ -2228,9 +2390,11 @@ createApp({
       scoreDimensions, scoreRules, scoreRuleJoin, filterProducts, scoreOperators, scoreRuleNeedsNumber,
       addScoreRule, changeScoreDimension, removeScoreRule, clearScoreRules, scoreFilterError, resetResultFilters,
       reasonOnlyColumn, cellReasons, reasonsExpanded, toggleCellReasons, allReasonsExpanded, setAllReasonsExpanded,
-      datasetSourceTaskId, datasetRevision, useComparisonDataset,
+      datasetSourceFileId, datasetSourceTaskId, datasetRevision, useComparisonDataset,
       evaluationProfiles, compareProfiles, selectedEvaluationProfile, evaluationProfileLabel,
-      taskEvaluationProfile, taskProtocolManifest, taskProtocolDiagnostics, taskIsChat, summaryDimensions, setTaskProtocol,
+      taskEvaluationProfile, taskProtocolManifest, taskProtocolDiagnostics, taskIsChat, taskIsTimeliness, summaryDimensions, setTaskProtocol,
+      isTimelinessRow, timelinessColumn, timelinessProductScores, timelinessSummaryRows, timelinessPairedRows, summaryPercent,
+      timelinessHasConflict, timelinessConflictColumn, timelinessConflictSummary,
       judgeModelProfiles, selectedJudgeModelProfile, selectedModelProfile, enableThinking, changeJudgeModel,
       taskJudgeRuntime, taskJudgeSummary, thinkingLabel, judgeRuntimeLabel,
       mediaConcurrency, requestPacing, evalTimeout, submitting, running, progress, total, results, summary, taskId, runError,

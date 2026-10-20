@@ -70,6 +70,7 @@ class AggregatedResponse:
     model: str = ""
     usage: Any = None
     stream_stats: dict[str, Any] | None = None
+    system_fingerprint: str | None = None
 
 
 def build_openai_client(
@@ -207,6 +208,7 @@ async def _collect_stream(client, kwargs: dict, *, include_usage: bool):
     finish_reason = None
     usage = None
     model = kwargs.get("model", "")
+    system_fingerprint = None
     saw_choice = False
     stats = {
         "chunk数": 0,
@@ -223,6 +225,7 @@ async def _collect_stream(client, kwargs: dict, *, include_usage: bool):
             stats["chunk数"] += 1
             usage = getattr(chunk, "usage", None) or usage
             model = getattr(chunk, "model", None) or model
+            system_fingerprint = getattr(chunk, "system_fingerprint", None) or system_fingerprint
             chunk_error = getattr(chunk, "error", None)
             if chunk_error is None:
                 chunk_error = (getattr(chunk, "model_extra", None) or {}).get("error")
@@ -365,6 +368,7 @@ async def _collect_stream(client, kwargs: dict, *, include_usage: bool):
 
     response = AggregatedResponse(
         model=model,
+        system_fingerprint=system_fingerprint,
         usage=usage,
         stream_stats={**stats, "总耗时": round((time.perf_counter() - started) * 1000)},
         choices=[
@@ -492,6 +496,8 @@ async def stream_chat_completion(
                 "流式调用成功" if attempt == 0 else "重试成功",
                 details={
                     "模型": kwargs.get("model", ""),
+                    "响应模型": getattr(response, "model", None),
+                    "服务端指纹": getattr(response, "system_fingerprint", None),
                     "思考模式": (kwargs.get("extra_body") or {}).get("enable_thinking"),
                     "请求次数": f"{attempt + 1}/{max_attempts}",
                     "结束原因": getattr(choice, "finish_reason", None),

@@ -10,7 +10,7 @@ import time
 import traceback
 from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ..paths import RUNS_DIR
@@ -54,6 +54,7 @@ from .tasks import (
 
 
 logger = logging.getLogger(__name__)
+_EVALUATION_TIMEZONE = timezone(timedelta(hours=8))
 MAX_PROGRESS_EVENTS_PER_ITEM = 100
 COMPARE_DIMENSIONS = (
     "understanding",
@@ -320,6 +321,12 @@ def _make_item_evaluator(
     内）被 await，负责 append/merge、完成日志、SSE、持久化；缺省为完整跑批的原有行为。
     """
     runtime_options = options if options is not None else task.options
+    # Reuse the persisted task creation time across retries, resumes and updates.
+    # An explicit business timezone keeps the prompt independent of the host.
+    evaluation_time = (
+        datetime.fromtimestamp(task.created_at, tz=_EVALUATION_TIMEZONE)
+        if task.mode == "compare" else None
+    )
     compare_protocol = (
         require_snapshot_protocol(
             {"mode": task.mode, "evaluation_profile": task.evaluation_profile or runtime_options.get("evaluation_profile"),
@@ -341,6 +348,13 @@ def _make_item_evaluator(
                 raise ValueError("冻结裁判配置不可用，请恢复配置或新建任务")
             judges_cfg.append(configured[frozen["name"]].model_copy(update={
                 "enable_thinking": None,
+                # Legacy snapshots omitted these parameters. Do not inherit a
+                # new preset when restoring the original task's judge config.
+                "temperature": 0.0,
+                **{key: None for key in (
+                    "top_p", "top_k", "seed", "frequency_penalty",
+                    "presence_penalty", "max_tokens", "n",
+                )},
                 **{key: value for key, value in frozen.items() if key != "name"}
             }))
     # R3：构造中途失败（如某个 judge 缺 base_url）时，已建客户端的连接池会
@@ -646,6 +660,7 @@ def _make_item_evaluator(
                                     compare_judges=compare_judges,
                                     evidence_callback=save_evidence,
                                     category_display=category_display,
+                                    **({"evaluation_time": evaluation_time} if evaluation_time is not None else {}),
                                     **({"conversation_input": conversation_input} if conversation_input else {}),
                                 ),
                                 timeout=eval_timeout,
@@ -728,6 +743,11 @@ def _make_item_evaluator(
                        ("request_sha256", "judge_model", "evidence_mode", "images")},
                 }
             if task.mode == "compare":
+                if task.evaluation_profile == "timeliness_compare@1.0":
+                    # This is audit metadata, never the product's test date.
+                    res.setdefault("evaluation_run_at", datetime.now().astimezone().isoformat(timespec="seconds"))
+                else:
+                    res["evaluation_datetime"] = evaluation_time.isoformat(timespec="seconds")
                 for field in DIAGNOSTIC_FIELDS:
                     if field in item_dict:
                         res[field] = item_dict[field]
@@ -985,8 +1005,8 @@ async def run_resume(task: Task, cfg: AppConfig) -> None:
 async def run_retry(task: Task, cfg: AppConfig, retry_id: str) -> None:
     """执行人工失败补跑；候选成功才写回原任务，失败仅进入 attempt 审计。"""
     retry = task.retry_runs[retry_id]
-    shared_chat_output = (task.evaluation_profile == "qa_chat_compare@1.1" or
-                          task.protocol_manifest.get("result_schema_version") == "qa-chat-result-2")
+    shared_chat_output = (task.evaluation_profile in {"qa_chat_compare@1.1", "timeliness_compare@1.0"} or
+                          task.protocol_manifest.get("result_schema_version") in {"qa-chat-result-2", "timeliness-result-1", "timeliness-result-2", "timeliness-result-3"})
     retry["status"] = "running"
     retry["started_at"] = time.time()
     task.repair_status = "running"
@@ -1391,6 +1411,7 @@ async def _eval_one(
     conversation_input=None,
     evidence_callback=None,
     trusted_collection_metadata=None,
+    evaluation_time: datetime | None = None,
 ) -> dict:
     t0 = time.perf_counter()
     item = _to_evalitem(item_dict, idx)
@@ -1466,8 +1487,9 @@ async def _eval_one(
             # columns, copied answers, and successful decoding do not prove it.
             **({"trusted_collection_metadata": trusted_collection_metadata}
                if trusted_collection_metadata is not None and
-               getattr(getattr(compare_judges[0], "protocol", None), "result_schema_version", None) == "qa-chat-result-2" else {}),
+               getattr(getattr(compare_judges[0], "protocol", None), "result_schema_version", None) in {"qa-chat-result-2", "timeliness-result-1", "timeliness-result-2", "timeliness-result-3"} else {}),
             **({"conversation_input": conversation_input} if conversation_input else {}),
+            **({"evaluation_time": evaluation_time} if evaluation_time is not None else {}),
             **({"query_image_meta": item_dict["query_image_meta"]} if item.query_images else {}),
             question=item.question,
             context=(item.context or "").strip(),
@@ -1498,11 +1520,15 @@ async def _eval_one(
             "视觉对比完成",
             details={
                 "产品数": product_count,
-                **{f"{result_protocol.dimension_names[dimension]}排名": compare_result.get(f"{dimension}_rank_groups")
-                   for dimension in result_protocol.score_dimensions},
+                **({f"{result_protocol.dimension_names[dimension]}排名": compare_result.get(f"{dimension}_rank_groups")
+                    for dimension in result_protocol.score_dimensions}
+                   if result_protocol.standard_id != "timeliness_compare" else
+                   {f"产品{product_no}{result_protocol.dimension_names[dimension]}分": compare_result.get(f"answer{product_no}_{dimension}_score")
+                    for product_no in range(1, product_count + 1)
+                    for dimension in result_protocol.score_dimensions}),
                 "需要复核": compare_result.get("needs_human_review"),
                 **({"内容冲突": compare_result.get("has_conflict")}
-                   if result_protocol.result_schema_version != "qa-chat-result-2" else {}),
+                   if result_protocol.result_schema_version not in {"qa-chat-result-2", "timeliness-result-1", "timeliness-result-2"} else {}),
             },
             progress=90,
             progress_message="垂域视觉对比评测完成",
@@ -1524,6 +1550,9 @@ def _summarize(task: Task, *, include_subsets: bool = True) -> dict:
     from .protocol_identity import recover_protocol_identity
     recovered = recover_protocol_identity({"mode": task.mode, "evaluation_profile": task.evaluation_profile,
         "protocol_manifest": task.protocol_manifest, "results": task.results, "options": task.options})
+    if recovered["evaluation_profile"].startswith("timeliness_compare@") or recovered.get("is_timeliness"):
+        from .timeliness_summary import summarize_timeliness
+        return summarize_timeliness(task, include_subsets=include_subsets)
     if recovered["is_chat"] or recovered["diagnostics"]:
         from .qa_chat_summary import summarize_chat
         return summarize_chat(task, include_subsets=include_subsets)

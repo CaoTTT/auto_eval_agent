@@ -13,6 +13,8 @@
 
 升级、配置示例、历史兼容和限流说明见 [裁判模型与思考模式](docs/judge-model-thinking.md)。
 
+推理参数的位置、稳定采样组合、任务时间基准和复跑边界见 [推理一致性配置](docs/inference-reproducibility.md)。默认配置将低温采样、单候选采样、输出预算和思考开关显式固定，正常评审与 JSON 修复共用这些设置。
+
 ## 数据流
 
 ```
@@ -57,6 +59,12 @@ python -m uvicorn auto_eval.web.server:app --host 0.0.0.0 --port 8054
 
 界面操作：选择评测模式 → 导入 JSONL（多轮会话可导入 CSV，按 `session_group` 串行、`turn_index` 排序）→ 选择裁判模型、思考模式、评测标准与并发数 → 开始评测，SSE 实时出结果，完成后可导出。
 
+新导入的 JSON / JSONL / CSV 会保留上传时的原始文件。历史记录和“选择历史数据”中可点击“下载源文件”，下载的文件名、格式和字节内容与上传一致；复用历史数据新建测评也会保留源文件。升级前未保存源文件的历史任务及手动录入任务显示“未保存源文件”，不会从测评结果重建文件。
+
+源文件单文件上限为 100 MiB，归档与临时上传均保存在 `runs/web_history` 下。迁移或备份时需保留整个目录；删除历史会清理该任务的源文件副本，其他复用任务不受影响。临时上传保留以支持同一页面重复提交评测。
+
+![历史记录源文件下载](docs/images/history-source-download.png)
+
 垂域视觉对比提供两个可并存的评测协议：`qa_competitor_compare@0.2-simplified`（稳定默认，1–5 分）和 `qa_competitor_compare@0.3`（实验版，0–3 分）。协议不仅冻结 Prompt，还冻结输出 Schema、Gate 规则和分数范围。任务一旦创建就不能更换协议；失败补跑强制继承原任务协议。若要用另一标准重评同一数据，应新建任务，避免不同口径的结果写入同一任务。
 
 运行中仍可继续提交新的全量评测任务。后端按 FIFO 队列逐个启动任务，任意时刻只运行一个队列项；每个任务开始后，仍按它提交时设置的 `concurrency` 并发评测内部题目。页面顶部的“任务队列”会显示当前运行项、等待顺序和进度，尚未开始的任务可取消、上移或置顶（不会打断当前运行项）。`GET /api/queue` 可获取队列状态，`DELETE /api/queue/{job_id}` 可取消等待项，`PATCH /api/queue/{job_id}/position` 可调整等待位置。队列驻留在当前服务进程中，服务关闭时尚未开始的排队任务会标记为中断。
@@ -73,6 +81,8 @@ python -m uvicorn auto_eval.web.server:app --host 0.0.0.0 --port 8054
 ### 输入格式（JSONL，每行一题）
 
 问答闲聊新增 **V2·1-5分（候选）**，可在对比模式的评测标准中选择 `qa_chat_compare@1.1`。V1 和默认标准保留；V2 使用独立的 56/78 键输出合同，统计、导出与人工基准同步支持。[使用与版本说明](docs/qa-chat-compare-v2-implementation.md)。
+
+**时效性评估V1·1-3分（候选）**使用 `timeliness_compare@1.0`，当前修订 `1.0.2 / timeliness-result-3`。在原有两个Gate和三个评分维度之外，同次调用输出整组“内容冲突理由”和“有冲突／无冲突／不确定”；检测规则沿用v0.2稳定plus，冲突不自动改变分数。页面、历史、CSV/XLSX及统计同步展示，旧修订仍按原合同读取和续跑；使用新规则重评旧数据需新建任务。见[内容冲突标准](docs/timeliness-content-conflict.md)和[完整Prompt](docs/timeliness-evaluation-prompt-final.md)。
 
 - **垂域视觉评测**：`query`（必填）、`video_path`（必填）、可选 `id` / `context`（可信背景条件，可写当前时间地点）/ `category`（垂域）/ `answer_text` / `task_start_time`+`task_end_time`（截取作答区间）。
 - **垂域视觉对比评测**：`query`、`video1`+`video2`（必填）、`answer1`+`answer2`、可选 `context` / `context1` / `context2`。

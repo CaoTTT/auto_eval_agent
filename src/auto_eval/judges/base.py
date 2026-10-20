@@ -37,6 +37,7 @@ _TRACE_FIELDS = {
     "judge",
     "model",
     "enable_thinking",
+    "inference_parameters",
     "system",
     "user",
     "rounds",
@@ -133,6 +134,22 @@ def _usage_dict(usage) -> dict | None:
         "image_tokens": image_tokens,
         "reasoning_tokens": value(value(usage, "completion_tokens_details"), "reasoning_tokens"),
     }
+
+
+def _inference_parameters(request: dict) -> dict[str, Any]:
+    """Audit only generation settings, never credentials or message/image bodies."""
+    fields = (
+        "model", "temperature", "top_p", "seed", "frequency_penalty",
+        "presence_penalty", "max_tokens", "n",
+    )
+    parameters = {key: request[key] for key in fields if key in request}
+    extras = request.get("extra_body") or {}
+    parameters.update({
+        key: extras[key] for key in (
+            "top_k", "enable_thinking", "vl_high_resolution_images",
+        ) if key in extras
+    })
+    return parameters
 
 
 def _redact_data_urls(value):
@@ -245,13 +262,12 @@ class JudgeClient:
                 progress=82,
                 progress_message=f"{judge_label} · 修复JSON格式",
             )
-            response = await self._llm_create(
-                {
-                    "model": self.model,
-                    "messages": messages,
-                    "temperature": 0,
-                }
-            )
+            request = self._request_kwargs({
+                "model": self.model,
+                "messages": messages,
+                "temperature": 0,
+            })
+            response = await self._llm_create(request)
             content = response.choices[0].message.content or ""
             log_event(
                 "模型裁判",
@@ -266,6 +282,7 @@ class JudgeClient:
                     "status": "success",
                     "judge": self.cfg.name,
                     "purpose": "json_repair",
+                    "inference_parameters": _inference_parameters(request),
                     "rounds": 1,
                     "llm_rounds": [{
                         "round": max(1, round_no),
@@ -274,6 +291,8 @@ class JudgeClient:
                         "finish_reason": getattr(response.choices[0], "finish_reason", None),
                         "usage": _usage_dict(getattr(response, "usage", None)),
                         "stream_stats": getattr(response, "stream_stats", None),
+                        "response_model": getattr(response, "model", None),
+                        "system_fingerprint": getattr(response, "system_fingerprint", None),
                     }],
                     "messages": messages,
                 })
@@ -312,6 +331,7 @@ class JudgeClient:
                     **kwargs.get("extra_body", {}), "vl_high_resolution_images": True,
                 }
                 kwargs["extra_body"].pop("max_pixels", None)
+            kwargs = self._request_kwargs(kwargs)
             resp = await self._llm_create(kwargs, stream_callback=stream_callback)
         msg = resp.choices[0].message
         content = msg.content or ""
@@ -325,6 +345,7 @@ class JudgeClient:
                 "status": "success",
                 "judge": self.cfg.name,
                 "model": self.model,
+                "inference_parameters": _inference_parameters(kwargs),
                 "system": system,
                 "user": user,
                 "rounds": 1,
@@ -335,6 +356,8 @@ class JudgeClient:
                     "finish_reason": getattr(resp.choices[0], "finish_reason", None),
                     "usage": _usage_dict(getattr(resp, "usage", None)),
                     "stream_stats": getattr(resp, "stream_stats", None),
+                    "response_model": getattr(resp, "model", None),
+                    "system_fingerprint": getattr(resp, "system_fingerprint", None),
                 }],
                 # trace 不存 base64（每帧 ~30KB×N 会让 jsonl 膨胀），image_url 换成帧路径引用
                 "image_refs": user_image_refs,
@@ -371,24 +394,36 @@ class JudgeClient:
     def _sampling_kwargs(self) -> dict:
         """构造采样参数：只包含配置里非空的项（None=不发送，避免不支持该参数的网关 400）。"""
         k: dict = {"temperature": self.cfg.temperature}
-        if self.cfg.top_p is not None:
-            k["top_p"] = self.cfg.top_p
-        if self.cfg.seed is not None:
-            k["seed"] = self.cfg.seed
+        for key in ("top_p", "seed", "frequency_penalty", "presence_penalty", "max_tokens", "n"):
+            value = getattr(self.cfg, key)
+            if value is not None:
+                k[key] = value
+        if self.cfg.top_k is not None:
+            # top_k is a provider extension, not an OpenAI SDK keyword.
+            k["extra_body"] = {"top_k": self.cfg.top_k}
         return k
+
+    def _request_kwargs(self, kwargs: dict) -> dict:
+        """Share sampling settings across judging, repairs and direct callers.
+
+        A call may override e.g. temperature for JSON repair. Merge provider
+        extras separately so image options cannot discard top_k (or vice versa).
+        """
+        defaults = self._sampling_kwargs()
+        request = {**defaults, **kwargs}
+        extras = {**(defaults.get("extra_body") or {}), **(kwargs.get("extra_body") or {})}
+        if self.cfg.enable_thinking is not None:
+            extras["enable_thinking"] = self.cfg.enable_thinking
+        if extras:
+            request["extra_body"] = extras
+        return request
 
     async def _llm_create(self, kwargs: dict, max_attempts: int | None = None,
                           stream_callback: Callable[[str], None] | None = None):
         """始终使用流式接口；callback 只负责可选的前端分片通知。"""
         # Use one request boundary for both judging and JSON repair. Preserve
         # visual/provider extras and send False explicitly (None means omitted).
-        kwargs = dict(kwargs)
-        enable_thinking = getattr(self.cfg, "enable_thinking", None)
-        if enable_thinking is not None:
-            kwargs["extra_body"] = {
-                **(kwargs.get("extra_body") or {}),
-                "enable_thinking": enable_thinking,
-            }
+        kwargs = self._request_kwargs(kwargs)
         try:
             return await self._llm_create_stream(
                 kwargs,
@@ -402,6 +437,7 @@ class JudgeClient:
                     "status": "error",
                     "judge": self.cfg.name,
                     "model": self.model,
+                    "inference_parameters": _inference_parameters(kwargs),
                     "error_type": type(exc).__name__,
                     "error": str(exc),
                     "usage": _usage_dict(getattr(exc, "_auto_eval_usage", None)),

@@ -124,6 +124,7 @@ def task_to_snapshot(task) -> dict:
         "session_name": task.session_name,
         "mode": task.mode,
         "dataset_name": getattr(task, "dataset_name", ""),
+        "source_files": getattr(task, "source_files", []),
         "note": getattr(task, "note", ""),
         "items": task.items,
         "options": task.options,
@@ -209,6 +210,12 @@ def delete_snapshot(task_id: str) -> bool:
         _meta_path(path).unlink(missing_ok=True)
     except Exception:
         pass
+    from .source_files import delete_task_sources
+
+    try:
+        delete_task_sources(task_id)
+    except (OSError, ValueError) as exc:
+        logger.warning("删除任务源文件失败: task_id=%s error=%s", task_id, exc)
     return True
 
 
@@ -236,7 +243,7 @@ def _apply_interrupted_status(status, error):
 def _snapshot_evaluation_profile(data: dict) -> str:
     """恢复任务冻结的协议；无版本旧记录沿用原有 V0.2/V0.3 回退。"""
     recovered = recover_protocol_identity(data)
-    if recovered["is_chat"]:
+    if recovered["is_chat"] or recovered["is_timeliness"]:
         return recovered["evaluation_profile"]
     explicit = data.get("evaluation_profile") or (data.get("options") or {}).get(
         "evaluation_profile"
@@ -293,6 +300,7 @@ def _snapshot_meta_row(data: dict, path: Path) -> dict:
         "task_id": task_id,
         "session_name": session_name,
         "dataset_name": data.get("dataset_name") or "",
+        "source_files": data.get("source_files") or [],
         "note": data.get("note") or "",
         "mode": data.get("mode"),
         "status": data.get("status"),
@@ -339,7 +347,10 @@ def _load_meta_row(path: Path) -> dict | None:
     if meta_path.exists():
         try:
             data = json.loads(meta_path.read_text(encoding="utf-8"))
-            if isinstance(data, dict) and data.get("meta_version") == 2:
+            # source_files is additive: old cached summaries remain valid.
+            # Also accept v3 summaries written by the initial source-export
+            # release, without forcing another full-history rebuild.
+            if isinstance(data, dict) and data.get("meta_version") in {2, 3}:
                 row = data
         except Exception:
             row = None
@@ -351,6 +362,7 @@ def _load_meta_row(path: Path) -> dict | None:
         row = _snapshot_meta_row(data, path)
         _write_meta(path, row)
     row.pop("meta_version", None)  # 版本号只落侧车，响应形状与旧实现一致
+    row.setdefault("source_files", [])
     status, error = _apply_interrupted_status(row.get("status"), row.get("error"))
     row["status"] = status
     row["error"] = error
@@ -386,12 +398,13 @@ def snapshot_payload(data: dict) -> dict:
         "task_id": data.get("task_id"),
         "session_name": data.get("session_name"),
         "dataset_name": data.get("dataset_name") or "",
+        "source_files": data.get("source_files") or [],
         "note": data.get("note") or "",
         "mode": data.get("mode"),
         "items": data.get("items") or [],
         "options": data.get("options") or {},
         "evaluation_profile": _snapshot_evaluation_profile(data),
-        "protocol_manifest": (recovered["manifest"] if recovered["is_chat"] else data.get("protocol_manifest") or {}),
+        "protocol_manifest": (recovered["manifest"] if recovered["is_chat"] or recovered["is_timeliness"] else data.get("protocol_manifest") or {}),
         "protocol_diagnostics": recovered["diagnostics"],
         "protocol_executable": recovered["executable"],
         "judge_runtime": data.get("judge_runtime") or {},
@@ -401,7 +414,7 @@ def snapshot_payload(data: dict) -> dict:
         "item_progress": data.get("item_progress") or {},
         "progress_events": data.get("progress_events") or {},
         "summary": _readable_summary(data, recovered),
-        **({"raw_summary": data.get("summary") or {}} if recovered["is_chat"] and not recovered["executable"] else {}),
+        **({"raw_summary": data.get("summary") or {}} if (recovered["is_chat"] or recovered["is_timeliness"]) and not recovered["executable"] else {}),
         "created_at": data.get("created_at"),
         "task_timing": snapshot_task_timing(data),
         "updated_at": data.get("updated_at"),
@@ -416,7 +429,7 @@ def snapshot_payload(data: dict) -> dict:
 def _readable_summary(data: dict, recovered: dict | None = None) -> dict:
     recovered = recovered or recover_protocol_identity(data)
     summary = data.get("summary") or {}
-    if not recovered["is_chat"] or recovered["executable"]:
+    if not (recovered["is_chat"] or recovered["is_timeliness"]) or recovered["executable"]:
         return summary
     return {**{key: summary[key] for key in ("total", "done", "failed", "unfinished", "mode") if key in summary},
             "protocol_diagnostics": recovered["diagnostics"]}
@@ -520,7 +533,10 @@ def export_rows(snapshot: dict) -> dict[str, list[dict]]:
         result_rows = _rich_content_export_rows(aligned_results)
     elif mode == "compare":
         recovered = recover_protocol_identity(snapshot)
-        if recovered["is_chat"]:
+        if recovered["is_timeliness"]:
+            from .timeliness_export import timeliness_export_rows
+            result_rows = timeliness_export_rows(snapshot, aligned_results)
+        elif recovered["is_chat"]:
             from .qa_chat_export import chat_export_rows
             result_rows = chat_export_rows(snapshot, aligned_results)
         else:
@@ -544,13 +560,13 @@ def export_rows(snapshot: dict) -> dict[str, list[dict]]:
                                "提问图片": item.get("query_images", []),
                                "提问图片元数据": item.get("query_image_meta", []),
                                "输入指纹": (aligned_results[index].get("input_manifest_sha256") or item.get("input_manifest_sha256", ""))
-                               if recovery["evaluation_profile"] == "qa_chat_compare@1.1"
+                               if recovery["evaluation_profile"] == "qa_chat_compare@1.1" or recovery["is_timeliness"]
                                else item.get("input_manifest_sha256", "")})
     if frame_rows:
         has_screenshots = any(item.get("evidence_mode") == "long_screenshot" for item in snapshot.get("items", []))
         rows["视觉证据清单" if has_screenshots else "抽帧清单"] = frame_rows
     rows["运行信息"] = [_run_info(snapshot)]
-    if recovery["is_chat"] and not recovery["executable"]:
+    if (recovery["is_chat"] or recovery["is_timeliness"]) and not recovery["executable"]:
         rows["原始汇总（协议待恢复）"] = [{"协议恢复诊断": recovery["diagnostics"], "原始记录（不作正式统计解释）": snapshot.get("summary") or {}}]
     if summary:
         rows["汇总指标"] = [_flatten_dict(summary, skip_keys={"by_category"})]
@@ -1266,7 +1282,10 @@ def result_export_row(mode: str, result: dict, index: int, items: list[dict],
         row["query"] = item.get("query") or item.get("question") or ""
     snapshot = {"mode": mode, "items": items, "evaluation_profile": evaluation_profile,
                 "protocol_manifest": protocol_manifest or {}, "results": task_results if task_results is not None else [row]}
-    if mode == "compare" and recover_protocol_identity(snapshot)["is_chat"]:
+    if mode == "compare" and recover_protocol_identity(snapshot)["is_timeliness"]:
+        from .timeliness_export import timeliness_export_rows
+        export = timeliness_export_rows(snapshot, [dict(row, index=index)])[0]
+    elif mode == "compare" and recover_protocol_identity(snapshot)["is_chat"]:
         from .qa_chat_export import chat_export_rows
         export = chat_export_rows(snapshot, [dict(row, index=index)])[0]
     else:

@@ -163,7 +163,7 @@ def _identity(case: dict, item: dict, pid: str, n: int):
 def _policy(snapshot: dict, row: dict, recovered_identity: dict | None = None):
     recovered = recovered_identity if recovered_identity is not None else recover_protocol_identity(
         {**snapshot, "results": snapshot.get("results") or [row]})
-    if recovered["is_chat"]:
+    if recovered["is_chat"] or recovered["is_timeliness"]:
         if not recovered["executable"]:
             return None
         frozen = recovered["manifest"]
@@ -227,14 +227,14 @@ def align_baseline_to_run(baseline: dict, snapshot: dict, mapping: TaskMapping, 
         result_runtime_summary = (judge_runtime_summary({}, result)
                                   if result.get("judge_runtime") or result.get("judge_model") else runtime_summary)
         policy = _policy(snapshot,result,recovered_identity)
-        shared_reasons = bool(policy and policy.result_schema_version == "qa-chat-result-2")
+        shared_reasons = bool(policy and policy.result_schema_version in ("qa-chat-result-2", "timeliness-result-1", "timeliness-result-2", "timeliness-result-3"))
         same_family = bool(policy and policy.standard_id == human_policy.standard_id)
         compatible = bool(policy and same_family and [policy.score_min,policy.score_max]==baseline["score_range"] and (
             policy.standard_version==baseline["human_standard_version"] or mode=="regression"))
         if policy and not same_family:
             raise HumanError("人工与模型标准家族不同，回归模式也不能跨家族生成数字一致性")
-        if policy and human_policy.standard_id == "qa_chat_compare" and (policy.id, policy.bundle_revision) != (human_policy.id, human_policy.bundle_revision):
-            raise HumanError("问答闲聊必须使用相同完整标准与冻结修订号")
+        if policy and human_policy.standard_id in ("qa_chat_compare", "timeliness_compare") and (policy.id, policy.bundle_revision) != (human_policy.id, human_policy.bundle_revision):
+            raise HumanError("此评测必须使用相同完整标准与冻结修订号")
         if policy and [policy.score_min,policy.score_max] != baseline["score_range"]:
             raise HumanError("人工与模型分制不兼容，不能进行线性换分或生成数字一致性报告")
         if policy and policy.standard_version != baseline["human_standard_version"] and mode != "regression":
@@ -269,10 +269,13 @@ def align_baseline_to_run(baseline: dict, snapshot: dict, mapping: TaskMapping, 
                         formal_status = "scored" if model is not None else {
                             "输入失败": "input_failed", "响应Gate阻断": "gate_blocked", "安全Gate阻断": "gate_blocked",
                             "维度不适用": "not_applicable", "无法核验": "unverifiable"}.get(model_status)
+                    elif policy.standard_id == "timeliness_compare":
+                        from .timeliness_statistics import timeliness_score_state
+                        formal_status = timeliness_score_state(model_case, slot, dim, policy)[0]
                 human_applicable = label.get("applicable")
                 if human_applicable is None:
                     human_applicable = ((True if label.get("score_status") == "scored" else False if label.get("score_status") == "not_applicable" else None)
-                                        if human_policy.standard_id == "qa_chat_compare" else state.get("applicability",{}).get(dim))
+                                        if human_policy.standard_id in ("qa_chat_compare", "timeliness_compare") else state.get("applicability",{}).get(dim))
                 mid = digest([snapshot["task_id"],snapshot["snapshot_sha256"],ck,pid,dim])[:32]
                 identity_accepted = status=="verified" and binding=="verified"
                 row = dict(match_id=mid, task_id=snapshot["task_id"], task_snapshot_sha256=snapshot["snapshot_sha256"],
@@ -289,6 +292,7 @@ def align_baseline_to_run(baseline: dict, snapshot: dict, mapping: TaskMapping, 
                            model_evidence_scope="dimension_shared" if shared_reasons else "product",
                            model_result_schema_version=policy.result_schema_version if policy else result.get("result_schema_version"),
                            model_verification_status=result.get(f"answer{slot}_{dim}_verification_status"),
+                           model_na_reason=result.get(f"answer{slot}_{dim}_na_reason"),
                            human_verification_status=label.get("verification_status"),
                            model_gates={g:result.get(f"answer{slot}_{g}_gate") for g in ("response","safety")},
                            human_gates=state.get("gates",{}).get(pid,{}), human_applicable=human_applicable,
@@ -299,9 +303,20 @@ def align_baseline_to_run(baseline: dict, snapshot: dict, mapping: TaskMapping, 
                            compatible=compatible, identity_accepted=identity_accepted,
                            prompt_sha256=result.get("prompt_sha256",""), evidence=response_identity(item,slot)["evidence"] if slot else "")
                 row.update(model_standard=policy.standard_version if policy else "unknown",
+                           human_standard_id=human_policy.standard_id,
                            model_standard_id=policy.standard_id if policy else "unknown",
                            bundle_revision=policy.bundle_revision if policy else "unknown",
                            **result_runtime_summary)
+                if policy and policy.result_schema_version == "timeliness-result-3":
+                    from .timeliness_statistics import CONFLICT_LABELS, conflict_state
+                    conflict_case = Case(i or 0, item, result,
+                        "failed" if result.get("error") else "done" if result else "unfinished",
+                        product_count, policy.standard_version, policy.bundle_revision, policy.standard_id)
+                    # Task-level context is repeated for audit only; it is not a
+                    # fourth product score or a human agreement observation.
+                    row.update(model_conflict_reason=result.get("conflict_reason", ""),
+                               model_has_conflict=result.get("has_conflict"),
+                               model_conflict_status=CONFLICT_LABELS[conflict_state(conflict_case, policy)])
                 finalize_row(row)
                 rows.append(row)
     return rows
