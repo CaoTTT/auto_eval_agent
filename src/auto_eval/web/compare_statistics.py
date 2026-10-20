@@ -86,7 +86,7 @@ def gate_observable(case: Case, product: int, protocol: CompareProtocol | None) 
     if case.status != "done" or product not in range(1, case.product_count + 1):
         return False
     status = case.result.get(f"answer{product}_input_status")
-    return status in (None, "complete", "partial") if balanced_chat(protocol) else status in ("complete", "partial")
+    return status in (None, "complete", "partial") if balanced_chat(protocol) or (protocol and protocol.standard_id == "timeliness_compare") else status in ("complete", "partial")
 
 
 def _score_dimensions(protocol: CompareProtocol) -> tuple[str, ...]:
@@ -106,7 +106,7 @@ def _ratio(numerator: float, denominator: float) -> float | None:
 
 
 def _finite_score(value: Any, protocol: CompareProtocol) -> bool:
-    if _chat(protocol):
+    if _chat(protocol) or protocol.standard_id == "timeliness_compare":
         return type(value) is int and protocol.score_min <= value <= protocol.score_max
     return (
         isinstance(value, (int, float)) and not isinstance(value, bool)
@@ -127,8 +127,8 @@ def _cases(snapshot: dict, aligned_results: list[dict]) -> list[Case]:
     manifest = snapshot.get("protocol_manifest") or {}
     selected = snapshot.get("evaluation_profile") or manifest.get("id") or ""
     records = [snapshot, manifest, snapshot.get("options") or {}, *aligned_results]
-    chat_present = any(record.get("standard_id") == "qa_chat_compare" or
-                       str(record.get("evaluation_profile") or record.get("id") or "").startswith("qa_chat_compare@")
+    chat_present = any(record.get("standard_id") in ("qa_chat_compare", "timeliness_compare") or
+                       str(record.get("evaluation_profile") or record.get("id") or "").startswith(("qa_chat_compare@", "timeliness_compare@"))
                        for record in records)
     recovered = recover_protocol_identity({**snapshot, "results": aligned_results}) if chat_present else None
     if recovered is not None:
@@ -167,7 +167,7 @@ def _cases(snapshot: dict, aligned_results: list[dict]) -> list[Case]:
 
 
 def _policy(standard: str, revision: str, standard_id: str = "qa_competitor_compare") -> CompareProtocol | None:
-    if standard_id == "qa_chat_compare" and revision in ("", "未记录实现版本", None):
+    if standard_id in ("qa_chat_compare", "timeliness_compare") and revision in ("", "未记录实现版本", None):
         return None
     try:
         return resolve_compare_standard(
@@ -180,7 +180,7 @@ def _policy(standard: str, revision: str, standard_id: str = "qa_competitor_comp
 
 def product_applicable(case: Case, product: int, dimension: str, protocol: CompareProtocol) -> bool | None:
     """The stored applicability, independent of score availability and gates."""
-    key = f"answer{product}_{dimension}_applicable" if _chat(protocol) else f"{dimension}_applicable"
+    key = f"answer{product}_{dimension}_applicable" if _chat(protocol) or protocol.standard_id == "timeliness_compare" else f"{dimension}_applicable"
     value = case.result.get(key)
     return value if type(value) is bool else None
 
@@ -223,6 +223,10 @@ def _chat_score_state(case: Case, product: int, dimension: str, protocol: Compar
 
 def score_state(case: Case, product: int, dimension: str, protocol: CompareProtocol) -> tuple[str, float | None]:
     """Mutually exclusive reasons, following the frozen protocol's actual gates."""
+    if protocol.standard_id == "timeliness_compare":
+        from .timeliness_statistics import STATUS_LABELS, timeliness_score_state
+        state, value = timeliness_score_state(case, product, dimension, protocol)
+        return STATUS_LABELS.get(state, state), value
     if case.status != "done":
         return ("技术失败" if case.status == "failed" else "未完成"), None
     if case.identity_diagnostic:
@@ -614,6 +618,9 @@ def _subgroups(cases: list[Case]) -> list[tuple[str, list[Case]]]:
 
 def build_compare_statistics(snapshot: dict, aligned_results: list[dict]) -> list[StatisticsTable]:
     """One worksheet, several compact tables; never consume cached summary values."""
+    if recover_protocol_identity({**snapshot, "results": aligned_results})["is_timeliness"]:
+        from .timeliness_statistics import timeliness_statistics
+        return timeliness_statistics(snapshot, aligned_results)
     cases = _cases(snapshot, aligned_results)
     info = StatisticsTable("对比评估统计", ("项目", "内容"))
     info.rows = [
@@ -677,6 +684,9 @@ def build_compare_statistics(snapshot: dict, aligned_results: list[dict]) -> lis
 
 
 def conversation_statistics(snapshot: dict, aligned_results: list[dict]) -> list[StatisticsTable]:
+    if recover_protocol_identity({**snapshot, "results": aligned_results})["is_timeliness"]:
+        from .timeliness_statistics import timeliness_conversation_statistics
+        return timeliness_conversation_statistics(snapshot, aligned_results)
     cases = _cases(snapshot, aligned_results)
     if not any(c.statistic_unit.startswith("conversation:") or c.conversation_diagnostic or c.standard_id == "qa_chat_compare" for c in cases):
         return []

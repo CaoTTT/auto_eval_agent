@@ -185,6 +185,9 @@ table.grid.progress-table td { height: 58px; vertical-align: middle; }
 table.grid th { background: #f3f4f6; color: #374151; }
 table.grid tbody tr:nth-child(even) { background: #fafbfc; }
 .table-scroll { width: 100%; overflow-x: auto; }
+.timeliness-summary table.grid { min-width: 860px; }
+.timeliness-summary table.grid th { white-space: nowrap; }
+.timeliness-summary table.grid td:not(:last-child) { white-space: nowrap; }
 .auto-table { width: max-content !important; min-width: 100%; table-layout: auto; }
 .auto-table th, .auto-table td { min-width: 72px; max-width: 420px; }
 .auto-table th:first-child, .auto-table td:first-child { min-width: 48px; }
@@ -249,6 +252,16 @@ pre { background: #fef2f2; padding: 10px; border-radius: 6px; font-size: 12px; w
 .cell-reasons p { margin: 0 0 10px; }
 .cell-reasons strong, .cell-reasons span { display: block; }
 .cell-reasons strong { color: #475569; font-size: 12px; }
+.timeliness-summary { margin: 16px 0; padding: 14px; border: 1px solid #cbd9ed; border-radius: 8px; background: #f8fafc; }
+.timeliness-summary h3 { margin-top: 0; }
+.timeliness-result .cell-reasons { margin-top: 0; }
+.timeliness-result .timeliness-evidence-preview { max-height: 110px; overflow: hidden; }
+.timeliness-score-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.timeliness-score { padding: 3px 7px; border-radius: 5px; border: 1px solid transparent; font-size: 12px; }
+.timeliness-score.score-3, .timeliness-score.gate-pass { color: #166534; background: #dcfce7; border-color: #86efac; }
+.timeliness-score.score-2, .timeliness-score.gate-unclear { color: #854d0e; background: #fef9c3; border-color: #fde047; }
+.timeliness-score.score-1, .timeliness-score.gate-fail { color: #991b1b; background: #fee2e2; border-color: #fca5a5; }
+.timeliness-score.score-na, .timeliness-score.gate-unknown { color: #475569; background: #f1f5f9; border-color: #cbd5e1; }
 .result-table-wrap { width: 100%; overflow-x: auto; border: 1px solid #e5e7eb; border-radius: 8px; }
 .result-table-wrap table.grid { margin-top: 0; }
 .result-table-wrap th { position: sticky; top: 0; z-index: 1; white-space: nowrap; }

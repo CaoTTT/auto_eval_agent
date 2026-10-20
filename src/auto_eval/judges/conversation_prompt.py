@@ -28,7 +28,14 @@ def assemble_conversation(system: str, bundle: dict, protocol, evaluation_dateti
         raise QueryImageError("conversation_protocol_unsupported", "旧评分实现不支持多轮，请新建任务")
     target, turns = bundle["target_turn"], bundle["turns"]
     profile, limits = bundle["profile"], bundle["limits"]
-    system = INSTRUCTIONS + "\n【本轮评分协议】\n" + system
+    is_timeliness = protocol.standard_id == "timeliness_compare"
+    instructions = INSTRUCTIONS
+    if is_timeliness:
+        instructions = instructions.replace(
+            "每个产品只能用自身历史解释承接和指代，不能借其他产品历史补全遗漏。先分别绝对评分，再比较。",
+            "每个产品只能用自身历史解释承接和指代，不能借其他产品历史补全遗漏。"
+            "理解和权威性逐产品判断，时效性按本协议使用组内有效可比证据。")
+    system = instructions + "\n【本轮评分协议】\n" + system
     parts, metadata, refs = [], [], []
     def text(value):
         parts.append({"type": "text", "text": value})
@@ -37,7 +44,11 @@ def assemble_conversation(system: str, bundle: dict, protocol, evaluation_dateti
         metadata.append(meta)
         refs.append(meta["ref_path"])
     text(f"target_turn={target}；只评价第{target}轮。公共用户原始轨迹开始。")
-    text("评测基准时间 evaluation_datetime：" + (evaluation_datetime or datetime.now().astimezone().isoformat(timespec="seconds")))
+    if is_timeliness:
+        text("时间依据：仅采用各产品各轮材料中的明确测试条件和用户目标时间。"
+             "未提供测试时间时保留未知；任务创建时间和审核时间不是产品测试时间。")
+    else:
+        text("评测基准时间 evaluation_datetime：" + (evaluation_datetime or datetime.now().astimezone().isoformat(timespec="seconds")))
     for turn in turns:
         t = turn["turn_index"]
         role = "current" if t == target else "history"
@@ -71,7 +82,7 @@ def assemble_conversation(system: str, bundle: dict, protocol, evaluation_dateti
         bundle["diagnostics"]["input_diagnostic_status"] = "blocked"
         raise QueryImageError("conversation_request_budget_exceeded", "完整历史请求超过平台保护预算：" + ", ".join(report["blocking_reasons"]))
     manifest = digest({"prefix": bundle["diagnostics"]["history_prefix_sha256"], "protocol": protocol.request_metadata(),
-                       "system": system, "roles": [p["text"] for i, p in enumerate(parts) if p["type"] == "text" and i != 1],
+                       "system": system, "roles": [p["text"] for i, p in enumerate(parts) if p["type"] == "text" and (is_timeliness or i != 1)],
                        "images": [{k: m.get(k) for k in ("asset_id", "sha256", "request_role")} for m in metadata],
                        "limits": limits, "adapter": VERSION})
     return system, parts, metadata, refs, manifest

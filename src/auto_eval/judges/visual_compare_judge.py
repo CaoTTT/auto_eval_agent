@@ -28,6 +28,17 @@ from .qa_chat_v2_schema import (
     QA_CHAT_V2_RESULT_SCHEMA_VERSION, QAChatV2Observation,
     collection_metadata, expected_output_keys, finalize_qa_chat_v2_observation,
 )
+from .timeliness_schema import (
+    TIMELINESS_RESULT_SCHEMA_VERSION, TimelinessObservation,
+    expected_output_keys as timeliness_output_keys, allowed_output_keys as timeliness_allowed_keys,
+    finalize_timeliness_observation,
+)
+from .timeliness_schema_r100 import (
+    TIMELINESS_RESULT_SCHEMA_VERSION as TIMELINESS_V1_RESULT_SCHEMA_VERSION,
+    TimelinessObservation as TimelinessV1Observation,
+    expected_output_keys as timeliness_v1_output_keys,
+    finalize_timeliness_observation as finalize_timeliness_v1_observation,
+)
 from .compare_protocols import (
     CompareProtocol,
     DIMENSIONS,
@@ -236,6 +247,16 @@ def visual_compare_result_fields(
         resolve_compare_protocol(protocol) if isinstance(protocol, str)
         else protocol or resolve_compare_protocol(None)
     )
+    if selected_protocol.result_schema_version == TIMELINESS_RESULT_SCHEMA_VERSION:
+        if not isinstance(observation, TimelinessObservation):
+            raise ValueError("时效性协议需要独立TimelinessObservation结果模型")
+        return finalize_timeliness_observation(
+            observation, selected_protocol, trusted_collection_metadata=trusted_collection_metadata)
+    if selected_protocol.result_schema_version == TIMELINESS_V1_RESULT_SCHEMA_VERSION:
+        if not isinstance(observation, TimelinessV1Observation):
+            raise ValueError("旧时效性协议需要冻结的TimelinessV1Observation结果模型")
+        return finalize_timeliness_v1_observation(
+            observation, selected_protocol, trusted_collection_metadata=trusted_collection_metadata)
     if selected_protocol.result_schema_version == QA_CHAT_V2_RESULT_SCHEMA_VERSION:
         if not isinstance(observation, QAChatV2Observation):
             raise ValueError("问答闲聊V2需要独立QAChatV2Observation结果模型")
@@ -303,7 +324,13 @@ class VisualCompareJudge:
             3 if (context3 or answer3 or frames3 is not None) else 2
         )
         is_chat_v2 = self.protocol.result_schema_version == QA_CHAT_V2_RESULT_SCHEMA_VERSION
-        trusted_collection = collection_metadata(trusted_collection_metadata, actual_product_count) if is_chat_v2 else None
+        is_timeliness = self.protocol.standard_id == "timeliness_compare"
+        is_timeliness_v2 = self.protocol.result_schema_version == TIMELINESS_RESULT_SCHEMA_VERSION
+        is_strict_output = is_chat_v2 or is_timeliness
+        strict_output_keys = (timeliness_output_keys if is_timeliness_v2 else
+                              timeliness_v1_output_keys if is_timeliness else expected_output_keys)
+        output_label = "时效性评估V1" if is_timeliness else "问答闲聊V2"
+        trusted_collection = collection_metadata(trusted_collection_metadata, actual_product_count) if is_strict_output else None
         if evidence_mode not in ("video_frames", "long_screenshot"):
             raise ValueError("未知视觉证据模式")
         is_screenshot = evidence_mode == "long_screenshot"
@@ -398,7 +425,7 @@ class VisualCompareJudge:
                     )
                     for path in frames
                 )
-                if query_metas:
+                if query_metas or is_timeliness:
                     for frame_no, (path, encoded) in enumerate(zip(frames, encoded_frames), 1):
                         content_parts.extend([
                             {"type": "text", "text": f"产品{product_no}回答录屏第{frame_no}帧开始"},
@@ -430,7 +457,7 @@ class VisualCompareJudge:
 
         started = time.perf_counter()
         v2_input_manifest = None
-        if is_chat_v2:
+        if is_strict_output:
             # Collection conclusions influence final scores, so they must be
             # bound to the request even when media bytes are identical. Frozen
             # V1 request and conversation fingerprints remain untouched.
@@ -438,7 +465,7 @@ class VisualCompareJudge:
             if conversation_manifest:
                 binding["conversation_input_manifest_sha256"] = conversation_manifest
             else:
-                actual_parts = content_parts if is_screenshot or query_metas else [
+                actual_parts = content_parts if is_screenshot or query_metas or is_timeliness else [
                     {"type": "text", "text": user},
                     *({"type": "image_url", "image_url": {"url": url}} for url in user_images),
                 ]
@@ -455,7 +482,7 @@ class VisualCompareJudge:
                                   for turn in conversation_input["turns"]
                                   for n in range(1, actual_product_count + 1)] if conversation_input else
                                  [{"product_no": n, "metadata": meta} for n, meta in enumerate(metas, 1)])
-            request_parts = content_parts if is_screenshot or query_metas else [
+            request_parts = content_parts if is_screenshot or query_metas or is_timeliness else [
                 {"type": "text", "text": user},
                 *({"type": "image_url", "image_url": {"url": url}} for url in user_images),
             ]
@@ -463,7 +490,7 @@ class VisualCompareJudge:
                                           preprocessing, self.protocol.public_metadata(), timeout=60)
             audit["judge_model"] = getattr(self.client, "model", None)
             audit["evidence_mode"] = evidence_mode
-            if is_chat_v2:
+            if is_strict_output:
                 audit["trusted_collection_metadata"] = trusted_collection
                 audit["input_manifest_sha256"] = v2_input_manifest
             if evidence_callback:
@@ -480,7 +507,7 @@ class VisualCompareJudge:
             audit["record_status"] = "model_call_started"
             if evidence_callback:
                 evidence_callback(audit)
-        if is_screenshot or query_metas:
+        if is_screenshot or query_metas or is_timeliness:
             raw_output = await self.client.complete(
                 system, user, stream_callback=stream_callback,
                 content_parts=content_parts, image_metadata=image_metadata,
@@ -496,10 +523,10 @@ class VisualCompareJudge:
             audit["record_status"] = "model_response_received"
             if evidence_callback:
                 evidence_callback(audit)
-        parsed_pairs = parse_json_preserving_pairs(raw_output) if is_chat_v2 else None
+        parsed_pairs = parse_json_preserving_pairs(raw_output) if is_strict_output else None
         original_parsed_pairs = parsed_pairs
         repair_parsed_pairs = None
-        if is_chat_v2:
+        if is_strict_output:
             data = parsed_pairs["data"] if parsed_pairs else None
         else:
             data = parse_json_loose(raw_output)
@@ -511,12 +538,13 @@ class VisualCompareJudge:
             # duplicate-key object into a dict even to run field diagnostics.
             diagnostic_pairs = parsed["raw_key_pairs"] or parsed["locally_repaired_key_pairs"]
             keys = {pair[0] for pair in diagnostic_pairs}
-            expected = set(expected_output_keys(actual_product_count))
+            expected = set(strict_output_keys(actual_product_count))
+            allowed = set(timeliness_allowed_keys(actual_product_count)) if is_timeliness_v2 else expected
             diagnostics = list(parsed["structural_diagnostics"])
             if expected - keys:
                 diagnostics.append(f"缺少字段：{sorted(expected - keys)}")
-            if keys - expected:
-                diagnostics.append(f"多余字段：{sorted(keys - expected)}")
+            if keys - allowed:
+                diagnostics.append(f"多余字段：{sorted(keys - allowed)}")
             return diagnostics
 
         def v2_parse_error(message, diagnostics):
@@ -535,16 +563,16 @@ class VisualCompareJudge:
             error.input_manifest_sha256 = v2_input_manifest
             return error
 
-        if is_chat_v2 and parsed_pairs and parsed_pairs["top_level_type"] != "object":
-            raise v2_parse_error("问答闲聊V2输出必须为JSON对象", parsed_pairs["structural_diagnostics"])
-        if is_chat_v2 and parsed_pairs and parsed_pairs["duplicate_keys"]:
-            raise v2_parse_error("问答闲聊V2输出存在重复键", duplicate_diagnostics(parsed_pairs))
+        if is_strict_output and parsed_pairs and parsed_pairs["top_level_type"] != "object":
+            raise v2_parse_error(f"{output_label}输出必须为JSON对象", parsed_pairs["structural_diagnostics"])
+        if is_strict_output and parsed_pairs and parsed_pairs["duplicate_keys"]:
+            raise v2_parse_error(f"{output_label}输出存在重复键", duplicate_diagnostics(parsed_pairs))
         if data is None:
-            if is_chat_v2:
+            if is_strict_output:
                 recovered = scan_recoverable_json_object(raw_output)
                 original_parsed_pairs = {**recovered, "locally_repaired_key_pairs": [], "duplicate_keys": []}
                 if recovered["structural_diagnostics"]:
-                    raise v2_parse_error("问答闲聊V2原始字段不可安全恢复，禁止语义补判", recovered["structural_diagnostics"])
+                    raise v2_parse_error(f"{output_label}原始字段不可安全恢复，禁止语义补判", recovered["structural_diagnostics"])
                 # All original fields, values, types and state relations must
                 # already be determined. A syntax repair cannot supply a gate,
                 # score, reason or applicability that the model never provided.
@@ -553,20 +581,28 @@ class VisualCompareJudge:
                         recovered["data"], context={"product_count": actual_product_count,
                                                     "trusted_collection_metadata": trusted_collection})
                 except ValidationError as exc:
-                    raise v2_parse_error(f"问答闲聊V2原始结构不合法，禁止语义补判：{exc}", [str(exc)]) from exc
+                    raise v2_parse_error(f"{output_label}原始结构不合法，禁止语义补判：{exc}", [str(exc)]) from exc
                 repair_original_data = recovered["data"]
+            if is_timeliness:
+                # This protocol has exactly one semantic model response per
+                # attempt. Local lossless JSON cleanup is allowed above, but
+                # malformed output never triggers another model invocation.
+                raise v2_parse_error(
+                    "时效性评估V1输出JSON语法不完整，未调用模型修复",
+                    ["本地无损解析未成功；保留原始响应，按技术失败处理"],
+                )
             repaired = await self.client.repair_json(
                 raw_output,
                 label="垂域视觉对比评测输出",
                 round_no=2,
             )
-            if is_chat_v2:
+            if is_strict_output:
                 parsed_pairs = parse_json_preserving_pairs(repaired)
                 repair_parsed_pairs = parsed_pairs
                 if parsed_pairs and parsed_pairs["top_level_type"] != "object":
-                    raise v2_parse_error("问答闲聊V2修复输出必须为JSON对象", parsed_pairs["structural_diagnostics"])
+                    raise v2_parse_error(f"{output_label}修复输出必须为JSON对象", parsed_pairs["structural_diagnostics"])
                 if parsed_pairs and parsed_pairs["duplicate_keys"]:
-                    raise v2_parse_error("问答闲聊V2修复输出存在重复键", duplicate_diagnostics(parsed_pairs))
+                    raise v2_parse_error(f"{output_label}修复输出存在重复键", duplicate_diagnostics(parsed_pairs))
                 data = parsed_pairs["data"] if parsed_pairs else None
                 if data is not None and repair_original_data is not None:
                     expected = set(repair_original_data)
@@ -575,13 +611,13 @@ class VisualCompareJudge:
                         data[key], sort_keys=True, ensure_ascii=False)]
                     extra = sorted(set(data) - expected)
                     if changed or extra:
-                        raise v2_parse_error("问答闲聊V2语法修复改变了原始判定，禁止采用", [
+                        raise v2_parse_error(f"{output_label}语法修复改变了原始判定，禁止采用", [
                             f"修复改变或删除原字段：{sorted(changed)}；新增字段：{extra}"])
             else:
                 data = parse_json_loose(repaired)
         if data is None:
-            if is_chat_v2:
-                raise v2_parse_error("问答闲聊V2输出无法解析为JSON对象", ["模型输出及语法修复后仍无法解析"])
+            if is_strict_output:
+                raise v2_parse_error(f"{output_label}输出无法解析为JSON对象", ["模型输出及语法修复后仍无法解析"])
             raise JudgeOutputParseError(
                 "垂域视觉对比评测输出无法解析为 JSON",
                 raw_output=raw_output,
@@ -590,13 +626,13 @@ class VisualCompareJudge:
                 model=self.client.model,
             )
 
-        if not is_chat_v2 and "content_conflict" in data and "has_conflict" not in data:
+        if not is_strict_output and "content_conflict" in data and "has_conflict" not in data:
             data["has_conflict"] = data.pop("content_conflict")
-        if not is_chat_v2:
+        if not is_strict_output:
             data["product_count"] = actual_product_count
 
         try:
-            if is_chat_v2:
+            if is_strict_output:
                 observation = self.protocol.observation_model.model_validate(
                     data, context={"product_count": actual_product_count,
                                    "trusted_collection_metadata": trusted_collection})
@@ -604,8 +640,8 @@ class VisualCompareJudge:
                 observation = self.protocol.observation_model.model_validate(data)
                 observation.evaluation_datetime = evaluation_datetime
         except ValidationError as exc:
-            if is_chat_v2:
-                raise v2_parse_error(f"问答闲聊V2字段不合法：{exc}", [str(exc)]) from exc
+            if is_strict_output:
+                raise v2_parse_error(f"{output_label}字段不合法：{exc}", [str(exc)]) from exc
             raise JudgeOutputParseError(
                 f"垂域视觉对比评测字段不合法：{exc}",
                 raw_output=raw_output,
@@ -618,13 +654,13 @@ class VisualCompareJudge:
             meta.get("split_status") == "risky" or any(b.get("status") == "risky" for b in meta.get("boundaries", []))
             for meta in metas
         )
-        if risky_screenshot and not is_chat_v2:
+        if risky_screenshot and not is_strict_output:
             observation.needs_human_review = True
             observation.review_reasons = list(dict.fromkeys([*observation.review_reasons, RISKY_REVIEW_REASON]))
         result = visual_compare_result_fields(
-            observation, self.protocol, **({"trusted_collection_metadata": trusted_collection} if is_chat_v2 else {}))
-        if is_chat_v2:
-            result.update(evaluation_datetime=evaluation_datetime, raw_model_output=raw_output,
+            observation, self.protocol, **({"trusted_collection_metadata": trusted_collection} if is_strict_output else {}))
+        if is_strict_output:
+            result.update(raw_model_output=raw_output,
                           repaired_model_output=repaired,
                           raw_key_pairs=original_parsed_pairs["raw_key_pairs"] if original_parsed_pairs else [],
                           original_raw_key_pairs=original_parsed_pairs["raw_key_pairs"] if original_parsed_pairs else [],
@@ -633,6 +669,12 @@ class VisualCompareJudge:
                           repair_locally_repaired_key_pairs=repair_parsed_pairs["locally_repaired_key_pairs"] if repair_parsed_pairs else [],
                           duplicate_keys=[], structural_diagnostics=parsed_pairs["structural_diagnostics"],
                           locally_repaired_json=parsed_pairs["locally_repaired"])
+            if is_timeliness:
+                # Audit time is never evidence of when a product was tested.
+                result["evaluation_run_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+                result["test_time_policy"] = "provided_evidence_only"
+            else:
+                result["evaluation_datetime"] = evaluation_datetime
             if risky_screenshot:
                 result["review_reasons"] = list(dict.fromkeys([*result["review_reasons"], RISKY_REVIEW_REASON]))
                 result.update(needs_human_review=True, needs_review=True, needs_review_label="T",
@@ -645,7 +687,7 @@ class VisualCompareJudge:
                 f"{system}\0{user}".encode("utf-8")
             ).hexdigest(),
         })
-        if is_chat_v2:
+        if is_strict_output:
             result["input_manifest_sha256"] = v2_input_manifest
         elif conversation_manifest:
             result["input_manifest_sha256"] = conversation_manifest

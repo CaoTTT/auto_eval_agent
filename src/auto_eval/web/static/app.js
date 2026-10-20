@@ -64,7 +64,15 @@ createApp({
     const taskProtocolManifest = ref({});
     const taskProtocolDiagnostics = ref([]);
     const taskIsChat = computed(() => (taskEvaluationProfile.value || '').startsWith('qa_chat_compare@'));
+    const taskIsTimeliness = computed(() => (taskEvaluationProfile.value || '').startsWith('timeliness_compare@'));
+    function isTimelinessRow(row = {}) {
+      if (row.standard_id) return row.standard_id === 'timeliness_compare';
+      if (row.evaluation_profile) return row.evaluation_profile.startsWith('timeliness_compare@');
+      if (row.result_schema_version) return ['timeliness-result-1','timeliness-result-2'].includes(row.result_schema_version);
+      return taskIsTimeliness.value;
+    }
     function chatUsesSharedReasons(row = {}) {
+      if (isTimelinessRow(row)) return true;
       if (row.result_schema_version) return row.result_schema_version === 'qa-chat-result-2';
       const profile = row.evaluation_profile || (row.standard_id === 'qa_chat_compare' && row.standard_version
         ? `qa_chat_compare@${row.standard_version}` : taskEvaluationProfile.value);
@@ -145,10 +153,13 @@ createApp({
       {key:'emotional_expression',label:'情感表达恰当'}, {key:'style',label:'风格恰当'},
       {key:'scenario_fulfillment',label:'场景化满足'}, {key:'guided_recommendation',label:'引导推荐'},
     ];
+    const timelinessDimensions = [
+      {key:'understanding',label:'理解需求'}, {key:'authority',label:'权威性'}, {key:'timeliness',label:'时效性'},
+    ];
     const taskDimensions = computed(() => {
       const frozen = taskProtocolManifest.value.dimensions;
       const registered = evaluationProfiles.value.find(p => p.id === taskEvaluationProfile.value)?.dimensions;
-      return frozen?.length ? frozen : registered?.length ? registered : taskIsChat.value ? chatDimensions : legacyScoreDimensions.filter(d => !d.gate);
+      return frozen?.length ? frozen : registered?.length ? registered : taskIsTimeliness.value ? timelinessDimensions : taskIsChat.value ? chatDimensions : legacyScoreDimensions.filter(d => !d.gate);
     });
     const scoreDimensions = computed(() => [...legacyScoreDimensions.filter(d => d.gate), ...taskDimensions.value]);
     const summaryDimensions = computed(() => taskDimensions.value.filter(d => d.key !== 'accuracy'));
@@ -206,6 +217,31 @@ createApp({
       ? scoreRules.value.map((rule, i) => scoreRuleError(rule) ? `条件 ${i + 1}：${scoreRuleError(rule)}` : '').filter(Boolean).join('；') : '');
     function scoreValue(row, dimension, product) {
       if (taskProtocolDiagnostics.value.length) return null;
+      if (isTimelinessRow(row)) {
+        const prefix = `answer${product}_${dimension}`, value = row[`${prefix}_score`];
+        const verification = row[`${prefix}_verification_status`];
+        const compact = (row.result_schema_version || taskProtocolManifest.value.result_schema_version) === 'timeliness-result-2';
+        const evidenceStateValid = compact
+          ? !Object.prototype.hasOwnProperty.call(row,`${prefix}_na_reason`)
+          : verification === 'verified' || (verification === 'partial' && (dimension === 'understanding' || value === 1));
+        const understandingPrefix = `answer${product}_understanding`;
+        const understandingScore = row[`${understandingPrefix}_score`];
+        const understandingStateValid = !compact || dimension === 'understanding'
+          || (row[`${understandingPrefix}_applicable`] === true
+            && !Object.prototype.hasOwnProperty.call(row,`${understandingPrefix}_na_reason`)
+            && (understandingScore === null
+              ? row[`${understandingPrefix}_score_status`] === 'insufficient_evidence'
+              : Number.isInteger(understandingScore) && understandingScore >= 1 && understandingScore <= 3
+                && row[`${understandingPrefix}_score_status`] === 'scored'));
+        const understandingBlocks = dimension !== 'understanding' && understandingScore === 1;
+        return !row.error && understandingStateValid && !understandingBlocks && row[`${prefix}_score_status`] === 'scored'
+          && row[`${prefix}_applicable`] === true
+          && evidenceStateValid
+          && ['pass','unclear'].includes(row[`answer${product}_response_gate`])
+          && ['pass','unclear'].includes(row[`answer${product}_safety_gate`])
+          && (row[`answer${product}_input_status`] == null || ['complete','partial'].includes(row[`answer${product}_input_status`]))
+          && Number.isInteger(value) && value >= 1 && value <= 3 ? value : null;
+      }
       if (taskIsChat.value || row.standard_id === 'qa_chat_compare') {
         const prefix = `answer${product}_${dimension}`;
         const value = row[`${prefix}_score`];
@@ -271,7 +307,10 @@ createApp({
         }
       } else if (column.key.endsWith('_summary')) {
         const dimension = column.key.replace('_summary', '');
-        if (taskIsChat.value || row.standard_id === 'qa_chat_compare') {
+        if (isTimelinessRow(row)) {
+          add('维度共享证据（保留原产品归属）', row[`${dimension}_evidence`]);
+          add('维度共享评分理由', row[`${dimension}_reason`]);
+        } else if (taskIsChat.value || row.standard_id === 'qa_chat_compare') {
           if (chatUsesSharedReasons(row)) {
             add('维度共享评分理由', row[`${dimension}_reason`]);
             add('维度共享证据（保留原产品归属）', row[`${dimension}_evidence`]);
@@ -1671,7 +1710,63 @@ createApp({
       if (taskProtocolDiagnostics.value.length) return '协议待恢复';
       if (row.error) return '评估失败';
       const state = row[`answer${product}_${dimension}_score_status`];
-      return ({scored:'已评分',not_applicable:'不适用',gate_blocked:'门槛未通过',input_failed:'输入失败',unverifiable:'无法核验'})[state] || '待评估';
+      if (isTimelinessRow(row)) {
+        if (row[`answer${product}_input_status`] === 'failed') return '输入失败';
+        if ([row[`answer${product}_response_gate`], row[`answer${product}_safety_gate`]].includes('fail')) return 'NA · Gate阻断';
+        if (dimension !== 'understanding' && row[`answer${product}_understanding_score`] === 1) return 'NA · 理解1分阻断';
+        if (state === 'insufficient_evidence' && row[`answer${product}_${dimension}_na_reason`] === 'applicability_unknown') return 'NA · 适用性待核验';
+        if (state === 'scored' && scoreValue(row,dimension,product) == null) return 'NA · 评分状态待复核';
+      }
+      return ({scored:'已评分',not_applicable:'不适用',gate_blocked:'门槛未通过',input_failed:'输入失败',unverifiable:'无法核验',
+        insufficient_evidence:'NA · 证据不足',blocked_gate:'NA · Gate阻断',blocked_understanding:'NA · 理解1分阻断'})[state] || '待评估';
+    }
+    function timelinessColumn(row, column) {
+      return isTimelinessRow(row) && ['response_gate_summary','safety_gate_summary',
+        ...timelinessDimensions.map(d => `${d.key}_summary`)].includes(column.key);
+    }
+    function timelinessProductScores(row, column) {
+      const dimension = column.key.replace(/_summary$/, '');
+      const gate = dimension.endsWith('_gate');
+      return Array.from({length:Number(row.product_count || items.value[row.index]?.product_count || 2)}, (_,i) => {
+        const product = i + 1, value = gate ? row[`answer${product}_${dimension}`] : scoreValue(row,dimension,product);
+        const label = gate ? ({pass:'通过',fail:'不通过',unclear:'不确定'})[value] || 'N/A'
+          : value == null ? chatScoreStatus(row,dimension,product) : `${value}分`;
+        return {product,label,className:gate ? `gate-${value || 'unknown'}` : value == null ? 'score-na' : `score-${value}`};
+      });
+    }
+    function summaryPercent(value) {
+      return typeof value === 'number' && Number.isFinite(value) ? `${(value * 100).toFixed(1)}%` : 'N/A';
+    }
+    function timelinessSummaryRows(data) {
+      if (!data) return [];
+      return summaryDimensions.value.flatMap(d => Array.from({length:Number(data.product_count || 2)}, (_,i) => {
+        const prefix = `${d.key}_answer${i+1}`, counts = data[`${prefix}_score_status_counts`] || {};
+        const rates = data[`${prefix}_score_status_rates`] || {};
+        return {key:`${d.key}-${i+1}`,dimension:d.label,product:i+1,
+          average:data[`${prefix}_avg`] ?? 'N/A', scored:data[`${prefix}_scored`] ?? 0,
+          eligible:data[`${prefix}_eligible`] ?? 0, coverage:summaryPercent(data[`${prefix}_score_coverage`]),
+          states:['insufficient_evidence','not_applicable','blocked_gate','blocked_understanding','input_failed',
+            'technical_failure','unfinished','invalid_state','identity_error']
+            .map(state => `${({insufficient_evidence:'证据不足',not_applicable:'不适用',blocked_gate:'Gate阻断',
+              blocked_understanding:'理解阻断',input_failed:'输入失败',technical_failure:'技术失败',unfinished:'未完成',
+              invalid_state:'状态冲突',identity_error:'协议异常'})[state]} ${counts[state] || 0}` +
+                (['not_applicable','blocked_gate','blocked_understanding'].includes(state)
+                  ? `（占全部 ${summaryPercent(rates[state])}）` : '')).join(' · '),
+          unknown:data[`${prefix}_applicable_unknown`] ?? 0};
+      }));
+    }
+    function timelinessPairedRows(data) {
+      if (!data) return [];
+      const rows = [], count = Number(data.product_count || 2);
+      for (const d of summaryDimensions.value) {
+        for (let a = 1; a <= count; a++) for (let b = a + 1; b <= count; b++) {
+          const prefix = `${d.key}_answer${a}_answer${b}`;
+          rows.push({key:prefix,dimension:d.label,a,b,count:data[`${prefix}_paired_count`] ?? 0,
+            averageA:data[`${prefix}_paired_answer${a}_avg`] ?? 'N/A',
+            averageB:data[`${prefix}_paired_answer${b}_avg`] ?? 'N/A'});
+        }
+      }
+      return rows;
     }
     function cell(r, c) {
       const v = r[c.key];
@@ -1690,7 +1785,7 @@ createApp({
       }
       if (c.key.endsWith("_summary") && !["input_status_summary", "response_gate_summary", "safety_gate_summary"].includes(c.key)) {
         const dimension = c.key.slice(0, -"_summary".length);
-        if (taskIsChat.value || r.standard_id === 'qa_chat_compare') {
+        if (isTimelinessRow(r) || taskIsChat.value || r.standard_id === 'qa_chat_compare') {
           return Array.from({length:Number(r.product_count || items.value[r.index]?.product_count || 2)}, (_,i) => {
             const score = scoreValue(r,dimension,i+1);
             return `P${i+1}:${score === null ? chatScoreStatus(r,dimension,i+1) : score+'分（已评分）'}`;
@@ -2203,7 +2298,8 @@ createApp({
       reasonOnlyColumn, cellReasons, reasonsExpanded, toggleCellReasons, allReasonsExpanded, setAllReasonsExpanded,
       datasetSourceTaskId, datasetRevision, useComparisonDataset,
       evaluationProfiles, compareProfiles, selectedEvaluationProfile, evaluationProfileLabel,
-      taskEvaluationProfile, taskProtocolManifest, taskProtocolDiagnostics, taskIsChat, summaryDimensions, setTaskProtocol,
+      taskEvaluationProfile, taskProtocolManifest, taskProtocolDiagnostics, taskIsChat, taskIsTimeliness, summaryDimensions, setTaskProtocol,
+      isTimelinessRow, timelinessColumn, timelinessProductScores, timelinessSummaryRows, timelinessPairedRows, summaryPercent,
       judgeModelProfiles, selectedJudgeModelProfile, selectedModelProfile, enableThinking, changeJudgeModel,
       taskJudgeRuntime, taskJudgeSummary, thinkingLabel, judgeRuntimeLabel,
       concurrency, mediaConcurrency, requestPacing, evalTimeout, submitting, running, progress, total, results, summary, taskId, runError,

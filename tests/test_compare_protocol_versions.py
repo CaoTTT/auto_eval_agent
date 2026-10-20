@@ -10,6 +10,7 @@ from auto_eval.judges.compare_protocols import (
     V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID,
     QA_CHAT_COMPARE_PROTOCOL_ID,
     QA_CHAT_V2_COMPARE_PROTOCOL_ID,
+    TIMELINESS_COMPARE_PROTOCOL_ID,
     VisualCompareObservationV02,
     list_compare_protocols,
     resolve_compare_protocol,
@@ -46,6 +47,7 @@ def test_registry_defaults_to_stable_v02_and_exposes_experimental_versions():
         V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID,
         QA_CHAT_COMPARE_PROTOCOL_ID,
         QA_CHAT_V2_COMPARE_PROTOCOL_ID,
+        TIMELINESS_COMPARE_PROTOCOL_ID,
     }
     assert resolve_compare_protocol(V03_COMPARE_PROTOCOL_ID).status == "experimental"
     plus = resolve_compare_protocol(V02_PLUS_COMPARE_PROTOCOL_ID)
@@ -189,10 +191,22 @@ async def test_eval_api_freezes_selected_protocol_on_new_task(monkeypatch):
         V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID,
         QA_CHAT_COMPARE_PROTOCOL_ID,
         QA_CHAT_V2_COMPARE_PROTOCOL_ID,
+        TIMELINESS_COMPARE_PROTOCOL_ID,
     ]
     assert [p["id"] for p in public if p["status"] == "stable"] == [
         DEFAULT_COMPARE_PROTOCOL_ID, V02_PLUS_COMPARE_PROTOCOL_ID,
     ]
+    timeliness_response = await server_module.api_eval(
+        server_module.EvalReq(
+            mode="compare", items=[item], evaluation_profile=TIMELINESS_COMPARE_PROTOCOL_ID,
+        )
+    )
+    assert timeliness_response["evaluation_profile"] == TIMELINESS_COMPARE_PROTOCOL_ID
+    manifest = created[-1].protocol_manifest
+    assert manifest["bundle_revision"] == "1.0.1"
+    assert manifest["result_schema_version"] == "timeliness-result-2"
+    assert manifest["score_range"] == [1, 3]
+    assert [dim["key"] for dim in manifest["dimensions"]] == ["understanding", "authority", "timeliness"]
 
     with pytest.raises(HTTPException) as exc_info:
         await server_module.api_eval(

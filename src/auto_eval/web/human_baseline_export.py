@@ -40,7 +40,8 @@ def export_baseline_answers(baseline: dict) -> bytes:
     products = baseline["products"]
     protocol = baseline_protocol(baseline)
     dimension_names = baseline.get("dimension_names") or human_dimension_names(protocol)
-    chat = protocol.standard_id == "qa_chat_compare"
+    timeliness = protocol.standard_id == "timeliness_compare"
+    chat = protocol.standard_id in ("qa_chat_compare", "timeliness_compare")
     labels = {(r["case_key"], r["product_id"], r["dimension_id"]): r
               for r in baseline["labels"]}
     states = {r["case_key"]: r for r in baseline["states"]}
@@ -113,8 +114,8 @@ def export_baseline_answers(baseline: dict) -> bytes:
         ["用途", baseline.get("purpose", "")],
         ["产品映射", _json(products)],
         ["答案范围", "该版本已保存的全部 Case 与已接受标签；不包含导入时被排除的评分。"],
-        ["分数规则", "数字为最终有效人工分（复核优先），只接受1—5严格整数；空分保持空白，原因保存在独立评分状态列，不补0。" if chat else "数字为最终有效人工分（复核优先，保留 0）；N/A 按评分状态区分原因；未标注分数留空，不补 0。"],
-        ["人工评分状态", "scored=已评分；not_applicable=不适用；unverifiable=无法核验；gate_blocked=Gate阻断；" +
+        ["分数规则", f"数字为最终有效人工分（复核优先），只接受{protocol.score_min}—{protocol.score_max}严格整数；空分保持空白，原因保存在独立评分状态列，不补0。" if chat else "数字为最终有效人工分（复核优先，保留 0）；N/A 按评分状态区分原因；未标注分数留空，不补 0。"],
+        ["人工评分状态", ("scored=已评分；not_applicable=不适用；insufficient_evidence=证据不足；blocked_gate=Gate阻断；blocked_understanding=理解阻断；" if timeliness else "scored=已评分；not_applicable=不适用；unverifiable=无法核验；gate_blocked=Gate阻断；") +
                          ("input_failed=输入失败；" if chat else "") + "unlabeled=未标注；na_unspecified=NA原因未知。"],
         ["Gate/适用性", "保留每产品适用性、核验与输入状态；空白代表未提供。" if chat else "保留已保存的显式状态；空白代表未提供。内容准确性人工数字标签仅留档，不计人机数字一致率。"],
         ["人工标签摘要", baseline.get("labels_sha256", "")],

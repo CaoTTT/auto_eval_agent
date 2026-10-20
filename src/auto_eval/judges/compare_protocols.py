@@ -47,6 +47,14 @@ from .visual_compare_prompt_qa_chat_v2 import (
     VISUAL_COMPARE_SYSTEM as QA_CHAT_V2_SYSTEM,
     VISUAL_COMPARE_USER as QA_CHAT_V2_USER,
 )
+from .timeliness_schema import (
+    TIMELINESS_STANDARD_ID, TIMELINESS_COMPARE_PROTOCOL_ID, TIMELINESS_RESULT_SCHEMA_VERSION,
+    TIMELINESS_DIMENSIONS, TIMELINESS_DIMENSION_NAMES, TimelinessObservation,
+)
+from .visual_compare_prompt_timeliness import (
+    VISUAL_COMPARE_SYSTEM as TIMELINESS_SYSTEM,
+    VISUAL_COMPARE_USER as TIMELINESS_USER,
+)
 
 
 STANDARD_ID = "qa_competitor_compare"
@@ -67,8 +75,8 @@ DIMENSIONS = (
 DIMENSION_NAMES = dict(zip(DIMENSIONS, (
     "理解需求", "内容准确性", "服务闭环", "场景化满足", "直观高效", "有理有据", "引导推荐",
 )))
-ALL_DIMENSIONS = tuple(dict.fromkeys((*DIMENSIONS, *QA_CHAT_DIMENSIONS)))
-DIMENSION_LABELS = {**DIMENSION_NAMES, **QA_CHAT_DIMENSION_NAMES}
+ALL_DIMENSIONS = tuple(dict.fromkeys((*DIMENSIONS, *QA_CHAT_DIMENSIONS, *TIMELINESS_DIMENSIONS)))
+DIMENSION_LABELS = {**DIMENSION_NAMES, **QA_CHAT_DIMENSION_NAMES, **TIMELINESS_DIMENSION_NAMES}
 
 V02QualityScore: TypeAlias = Literal[1, 2, 3, 4, 5]
 
@@ -278,6 +286,24 @@ _PROTOCOLS = {
         score_dimensions=QA_CHAT_DIMENSIONS,
         result_schema_version=QA_CHAT_V2_RESULT_SCHEMA_VERSION,
     ),
+    TIMELINESS_COMPARE_PROTOCOL_ID: CompareProtocol(
+        id=TIMELINESS_COMPARE_PROTOCOL_ID,
+        standard_id=TIMELINESS_STANDARD_ID,
+        standard_version="1.0",
+        bundle_revision="1.0.1",
+        display="时效性评估V1·1-3分（候选）",
+        status="experimental",
+        system_template=TIMELINESS_SYSTEM,
+        user_template=TIMELINESS_USER,
+        observation_model=TimelinessObservation,
+        require_response_pass=False,
+        score_min=1,
+        score_max=3,
+        dimensions=TIMELINESS_DIMENSIONS,
+        dimension_names=dict(TIMELINESS_DIMENSION_NAMES),
+        score_dimensions=TIMELINESS_DIMENSIONS,
+        result_schema_version=TIMELINESS_RESULT_SCHEMA_VERSION,
+    ),
 }
 
 
@@ -290,6 +316,22 @@ def resolve_compare_protocol(protocol_id: str | None, bundle_revision: str | Non
     try:
         protocol = _PROTOCOLS[selected]
         if bundle_revision and bundle_revision != protocol.bundle_revision:
+            if selected == TIMELINESS_COMPARE_PROTOCOL_ID and bundle_revision == "1.0.0":
+                # Historical observations retain their complete original JSON
+                # contract and rubric; only new tasks use the compact contract.
+                from .timeliness_schema_r100 import TimelinessObservation as legacy_observation
+                from .visual_compare_prompt_timeliness_r100 import (
+                    VISUAL_COMPARE_SYSTEM as legacy_system,
+                    VISUAL_COMPARE_USER as legacy_user,
+                )
+                return replace(
+                    protocol,
+                    bundle_revision=bundle_revision,
+                    result_schema_version="timeliness-result-1",
+                    observation_model=legacy_observation,
+                    system_template=legacy_system,
+                    user_template=legacy_user,
+                )
             if selected == V02_PLUS_COMPARE_PROTOCOL_ID and bundle_revision == "0.2.1":
                 # Preserve the frozen rubric for historical stable-plus tasks.
                 from .visual_compare_prompt_v02_simplified_plus_r021 import (

@@ -86,11 +86,16 @@ def case_comparison_tables(report: dict) -> tuple[StatisticsTable, StatisticsTab
                    ("排除原因","exclusion"),("匹配ID","match_id"),("证据引用","evidence"),
                    ("人工适用性","human_applicable"),("模型适用性","model_applicable"),
                    ("人工Gate","human_gates"),("模型Gate","model_gates"),("模型输入状态","model_input_status")]
-    if report["baseline"].get("human_standard_id") == "qa_chat_compare":
+    if report["baseline"].get("human_standard_id") in ("qa_chat_compare", "timeliness_compare"):
         detail_fields.extend((("人工输入状态", "human_input_status"), ("人工核验状态", "human_verification_status"),
                               ("模型核验状态", "model_verification_status"), ("模型证据", "model_evidence"),
                               ("模型标准家族", "model_standard_id"), ("模型评分状态", "model_score_status")))
-    if baseline_protocol(report["baseline"]).result_schema_version == "qa-chat-result-2":
+    result_schema = baseline_protocol(report["baseline"]).result_schema_version
+    if result_schema == "timeliness-result-2":
+        detail_fields = [(label, field) for label, field in detail_fields
+                         if field not in ("model_applicable", "model_verification_status")]
+        detail_fields.append(("模型NA原因", "model_na_reason"))
+    if result_schema in ("qa-chat-result-2", "timeliness-result-1", "timeliness-result-2"):
         detail_fields = [("模型理由（维度共享完整原文）" if field == "model_reason" else
                           "模型证据（维度共享，保留产品归属）" if field == "model_evidence" else label, field)
                          for label, field in detail_fields]
@@ -130,7 +135,8 @@ def export_report(report: dict) -> bytes:
     baseline=report["baseline"]
     protocol = baseline_protocol(baseline)
     dimension_names = baseline.get("dimension_names") or human_dimension_names(protocol)
-    chat = protocol.standard_id == "qa_chat_compare"
+    timeliness = protocol.standard_id == "timeliness_compare"
+    chat = protocol.standard_id in ("qa_chat_compare", "timeliness_compare")
     names={p["product_id"]:p["display_name"] for p in baseline["products"]}
     def product(pid):return names.get(pid,pid)
     def dim(d):return dimension_names.get(d,d)
@@ -179,5 +185,13 @@ def export_report(report: dict) -> bytes:
         ["范围与映射",json.dumps(report["config"],ensure_ascii=False)],
         ["身份确认",json.dumps(report["confirmation"],ensure_ascii=False)],
         ["人工标签摘要",baseline["labels_sha256"]]])
-    return tables_workbook({"逐题评分对比":[detail],"对比概览":[summary,coverage,states],"人机评分统计":[score,confusion],
-                            "产品差距对比":[pair,ranking],"匹配与排除":[matches],"统计口径":[policy]})
+    sheets = {"逐题评分对比":[detail],"对比概览":[summary,coverage,states],"人机评分统计":[score,confusion],
+              "匹配与排除":[matches],"统计口径":[policy]}
+    if timeliness:
+        policy.rows = [row for row in policy.rows if row[0] != "产品配对"]
+        policy.rows.append(["时效性边界", "不输出产品胜率、排名或加权总分；人机一致性仅比较同题同产品同维度有效评分。"])
+    else:
+        # Retain the historical worksheet order for existing protocols.
+        sheets = {"逐题评分对比":[detail],"对比概览":[summary,coverage,states],"人机评分统计":[score,confusion],
+                  "产品差距对比":[pair,ranking],"匹配与排除":[matches],"统计口径":[policy]}
+    return tables_workbook(sheets)
