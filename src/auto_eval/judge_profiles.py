@@ -175,6 +175,11 @@ def legacy_runtime(config: AppConfig, task) -> dict:
         raise ValueError("旧任务裁判连接配置不可用，请新建任务")
     data = base.model_dump()
     data.update(record, model=model, enable_thinking=record.get("enable_thinking"))
+    # Missing historical sampling fields must not inherit today's defaults.
+    # Older requests omitted these optional settings; keep that wire behavior.
+    for field in ("top_p", "top_k", "seed", "frequency_penalty", "presence_penalty", "max_tokens", "n"):
+        data[field] = record.get(field)
+    data["temperature"] = record.get("temperature", 0.0)
     if model != base.model:
         data["rate_limit"] = None
     judge = JudgeConfig.model_validate(data)

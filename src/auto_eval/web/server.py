@@ -187,7 +187,12 @@ def _protocol_manifest(protocol, app_cfg, options: dict, resolved_judges=None) -
             "model": judge.model,
             "temperature": judge.temperature,
             "top_p": judge.top_p,
+            "top_k": judge.top_k,
             "seed": judge.seed,
+            "frequency_penalty": judge.frequency_penalty,
+            "presence_penalty": judge.presence_penalty,
+            "max_tokens": judge.max_tokens,
+            "n": judge.n,
             "vl_high_resolution_images": judge.vl_high_resolution_images,
             "enable_thinking": judge.enable_thinking,
         }

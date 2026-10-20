@@ -10,7 +10,7 @@ import time
 import traceback
 from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ..paths import RUNS_DIR
@@ -57,6 +57,7 @@ from .tasks import (
 
 
 logger = logging.getLogger(__name__)
+_EVALUATION_TIMEZONE = timezone(timedelta(hours=8))
 MAX_PROGRESS_EVENTS_PER_ITEM = 100
 COMPARE_DIMENSIONS = (
     "understanding",
@@ -325,6 +326,12 @@ def _make_item_evaluator(
     内）被 await，负责 append/merge、完成日志、SSE、持久化；缺省为完整跑批的原有行为。
     """
     runtime_options = options if options is not None else task.options
+    # Reuse the persisted task creation time across retries, resumes and updates.
+    # An explicit business timezone keeps the prompt independent of the host.
+    evaluation_time = (
+        datetime.fromtimestamp(task.created_at, tz=_EVALUATION_TIMEZONE)
+        if task.mode == "compare" else None
+    )
     compare_protocol = (
         require_snapshot_protocol(
             {"mode": task.mode, "evaluation_profile": task.evaluation_profile or runtime_options.get("evaluation_profile"),
@@ -346,6 +353,13 @@ def _make_item_evaluator(
                 raise ValueError("冻结裁判配置不可用，请恢复配置或新建任务")
             judges_cfg.append(configured[frozen["name"]].model_copy(update={
                 "enable_thinking": None,
+                # Legacy snapshots omitted these parameters. Do not inherit a
+                # new preset when restoring the original task's judge config.
+                "temperature": 0.0,
+                **{key: None for key in (
+                    "top_p", "top_k", "seed", "frequency_penalty",
+                    "presence_penalty", "max_tokens", "n",
+                )},
                 **{key: value for key, value in frozen.items() if key != "name"}
             }))
     # R3：构造中途失败（如某个 judge 缺 base_url）时，已建客户端的连接池会
@@ -644,6 +658,7 @@ def _make_item_evaluator(
                                     compare_judges=compare_judges,
                                     evidence_callback=save_evidence,
                                     category_display=category_display,
+                                    **({"evaluation_time": evaluation_time} if evaluation_time is not None else {}),
                                     **({"conversation_input": conversation_input} if conversation_input else {}),
                                 ),
                                 timeout=eval_timeout,
@@ -726,6 +741,7 @@ def _make_item_evaluator(
                        ("request_sha256", "judge_model", "evidence_mode", "images")},
                 }
             if task.mode == "compare":
+                res["evaluation_datetime"] = evaluation_time.isoformat(timespec="seconds")
                 for field in DIAGNOSTIC_FIELDS:
                     if field in item_dict:
                         res[field] = item_dict[field]
@@ -1382,6 +1398,7 @@ async def _eval_one(
     conversation_input=None,
     evidence_callback=None,
     trusted_collection_metadata=None,
+    evaluation_time: datetime | None = None,
 ) -> dict:
     t0 = time.perf_counter()
     item = _to_evalitem(item_dict, idx)
@@ -1459,6 +1476,7 @@ async def _eval_one(
                if trusted_collection_metadata is not None and
                getattr(getattr(compare_judges[0], "protocol", None), "result_schema_version", None) == "qa-chat-result-2" else {}),
             **({"conversation_input": conversation_input} if conversation_input else {}),
+            **({"evaluation_time": evaluation_time} if evaluation_time is not None else {}),
             **({"query_image_meta": item_dict["query_image_meta"]} if item.query_images else {}),
             question=item.question,
             context=(item.context or "").strip(),

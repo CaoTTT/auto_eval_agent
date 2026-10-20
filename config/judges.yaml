@@ -8,7 +8,14 @@ judges:
     base_url: https://api.siliconflow.cn/v1
     api_key_env: SILICON_FLOW_API_KEY
     model: Qwen/Qwen3.5-397B-A17B
-    temperature: 0            # SiliconFlow Qwen 支持低温采样且复跑逐字一致（探针实测）
-    seed: 42                  # 固定种子 + temperature=0 → 可复现，消除"时好时坏"
+    # 尽力减少同输入的输出波动；服务端计算、路由或模型更新仍可能产生差异。
+    temperature: 0
+    top_p: 1
+    top_k: 1
+    seed: 42                  # 固定请求种子；SiliconFlow 文档未保证支持或逐字复现
+    frequency_penalty: 0
+    n: 1
+    max_tokens: 8192
+    enable_thinking: false
     persona: end_user
     concurrency: 3

@@ -420,7 +420,7 @@ async def test_bailian_request_parameters_repair_and_trace(tmp_path, monkeypatch
     assert requests[0]["extra_body"].get("vl_high_resolution_images") is (True if enabled else None)
     assert requests[0]["extra_body"]["enable_thinking"] is False
     await client.repair_json("invalid")
-    assert "extra_body" not in requests[1]
+    assert requests[1]["extra_body"] == {"enable_thinking": False}
     await client.complete("s", "text only")
     assert "vl_high_resolution_images" not in requests[2].get("extra_body", {})
     trace = Path(client.trace_path).read_text(encoding="utf-8")

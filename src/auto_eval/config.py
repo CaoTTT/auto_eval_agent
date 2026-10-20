@@ -40,9 +40,15 @@ class JudgeConfig(BaseModel):
     api_key_env: str | None = None
     model: str | None = None
     persona: str | None = None  # end_user | ...
-    temperature: float = 0.0
-    top_p: float | None = None  # None=不发送，避免不支持该参数的网关 400
-    seed: int | None = None  # None=不发送；同 seed 可复现但不降跨 seed 方差
+    temperature: float = Field(default=0.0, ge=0, le=2, allow_inf_nan=False)
+    top_p: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    # Optional sampling settings are omitted when None for gateway compatibility.
+    top_k: int | None = Field(default=None, ge=1, strict=True)
+    seed: int | None = Field(default=None, strict=True)  # 固定种子仅尽力稳定，服务端可能不支持
+    frequency_penalty: float | None = Field(default=None, ge=-2, le=2, allow_inf_nan=False)
+    presence_penalty: float | None = Field(default=None, ge=-2, le=2, allow_inf_nan=False)
+    max_tokens: int | None = Field(default=None, gt=0, strict=True)
+    n: int | None = Field(default=None, ge=1, le=1, strict=True)
     concurrency: int = 4
     connect_timeout_s: float = 10.0
     read_timeout_s: float = 90.0

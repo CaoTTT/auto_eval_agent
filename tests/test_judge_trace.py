@@ -1,8 +1,8 @@
 import json
-from types import SimpleNamespace
 
 import pytest
 
+from auto_eval.config import JudgeConfig
 from auto_eval.judges.base import (
     JudgeClient,
     flush_web_trace_records,
@@ -13,7 +13,7 @@ from auto_eval.observability import bind_chain_context
 def _trace_client(path):
     client = object.__new__(JudgeClient)
     client.trace_path = str(path)
-    client.cfg = SimpleNamespace(name="judge_1")
+    client.cfg = JudgeConfig(name="judge_1")
     client.model = "judge-model"
     return client
 
