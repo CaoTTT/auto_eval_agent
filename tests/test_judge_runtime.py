@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
-from auto_eval.config import AppConfig, EndpointPreset, JudgeConfig, JudgeModelProfile, RateLimitConfig, VisualModeProfile
+from auto_eval.config import AppConfig, JudgeConfig, JudgeModelProfile, RateLimitConfig, VisualModeProfile
 from auto_eval.judge_profiles import (
     check_frozen_options, default_profile_id, model_profiles, resolve_new_runtime, restore_runtime, legacy_runtime,
 )
@@ -56,40 +56,24 @@ def test_bailian_auto_discovers_models_with_model_name_ids():
     assert default_profile_id(app) == "qwen3.8-flash"
 
 
-def test_api_endpoint_frozen_into_runtime_and_rejected_on_change():
+def test_profile_binds_api_credentials_and_rejects_legacy_endpoint_override():
     app = config()
-    app.endpoints = [
-        EndpointPreset(name="proxy-a", base_url="https://proxy-a.invalid/v1", api_key_env="PROXY_A_KEY"),
-        EndpointPreset(name="proxy-b", base_url="https://proxy-b.invalid/v1", api_key_env="PROXY_B_KEY"),
-    ]
-    # 选中端点：base_url/api_key_env 冻结进 runtime
+    app.judge_model_profiles = [JudgeModelProfile(
+        id="flash-proxy", display="Flash Proxy", judge_name="judge_2", model="qwen3.8-flash",
+        supports_thinking=True, default_enable_thinking=True,
+        base_url="https://proxy-a.invalid/v1", api_key_env="PROXY_A_KEY",
+    )]
     runtime, judges = resolve_new_runtime(
-        app, {"judge_model_profile": "qwen3.5-397b-a17b", "enable_thinking": False, "api_endpoint": "proxy-a"}
+        app, {"judge_model_profile": "flash-proxy", "enable_thinking": False}
     )
     assert judges[0].base_url == "https://proxy-a.invalid/v1"
-    assert runtime["api_endpoint"] == "proxy-a"
-    # 缺省（不选端点）沿用裁判自身配置
-    default_runtime, default_judges = resolve_new_runtime(
-        app, {"judge_model_profile": "qwen3.5-397b-a17b", "enable_thinking": False}
-    )
-    assert default_judges[0].base_url == app.judges[0].base_url
-    assert default_runtime.get("api_endpoint") is None
-    # 未知端点拒绝
-    with pytest.raises(ValueError):
-        resolve_new_runtime(app, {"judge_model_profile": "qwen3.5-397b-a17b", "api_endpoint": "nope"})
-    # 冻结后不可改端点
+    assert judges[0].api_key_env == "PROXY_A_KEY"
+    assert "api_endpoint" not in runtime
     task = Task(id="t", mode="rich_content", items=[], options={}, judge_runtime=runtime)
-    check_frozen_options(task, {"api_endpoint": "proxy-a"})  # 一致可通过
+    with pytest.raises(ValueError, match="api_endpoint is merged"):
+        resolve_new_runtime(app, {"judge_model_profile": "flash-proxy", "api_endpoint": "proxy-a"})
     with pytest.raises(ValueError):
-        check_frozen_options(task, {"api_endpoint": "proxy-b"})
-    with pytest.raises(ValueError):
-        check_frozen_options(task, {"api_endpoint": ""})
-    # 未选端点的任务要求空，不能补选
-    with pytest.raises(ValueError):
-        check_frozen_options(
-            Task(id="t2", mode="rich_content", items=[], options={}, judge_runtime=default_runtime),
-            {"api_endpoint": "proxy-a"},
-        )
+        check_frozen_options(task, {"api_endpoint": "proxy-a"})
 
 
 def test_restore_preserves_frozen_judge_runtime():
@@ -133,7 +117,7 @@ def test_restore_does_not_apply_an_unrelated_connection_or_model_quota(change):
     if change == "model":
         flash.model = "another-model"
     else:
-        setattr(app.judges[0], change, "changed")
+        setattr(flash, change, "changed")
     restored = restore_runtime(app, runtime)[0]
     assert restored.model_dump() == runtime["judges"][0]
 

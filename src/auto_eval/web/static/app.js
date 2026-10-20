@@ -70,11 +70,9 @@ createApp({
     const compareProfiles = computed(() =>
       evaluationProfiles.value.filter((profile) => (profile.modes || []).includes("compare"))
     );
-    const selectedEndpoint = ref("");  // 新建任务选择的 API/端点（空=用裁判配置默认）
     const globalConcurrency = ref(5);
     const maxInFlight = ref(40);
     const waitingCapacity = ref(10);
-    const endpointOptions = ref([]);
     const mediaConcurrency = ref(4);
     const showGlobalSettings = ref(false);
     const savingGlobalSettings = ref(false);
@@ -1279,7 +1277,6 @@ createApp({
         evaluation_profile: mode.value === "compare" ? selectedEvaluationProfile.value : null,
         options: {
           ...(mode.value === 'compare' && datasetSourceTaskId.value ? {dataset_source_task_id:datasetSourceTaskId.value} : {}),
-          ...(selectedEndpoint.value ? { api_endpoint: selectedEndpoint.value } : {}),
           judges: selectedJudges.value,
           ...(selectedModelProfile.value ? {
             judge_model_profile: selectedModelProfile.value.id,
@@ -2208,8 +2205,6 @@ createApp({
       evaluationProfiles.value = d.evaluation_profiles || [];
       selectedEvaluationProfile.value = defaultEvaluationProfile();
       selectedJudges.value = defaultJudgeSelection();
-      endpointOptions.value = d.endpoints || [];
-      selectedEndpoint.value = "";  // 默认：用裁判配置自身的端点
       await loadGlobalSettings();  // 加载全局 并发/在途/等待容量
       if (selectedModelProfile.value) changeJudgeModel();
       loadHistory();
@@ -2243,7 +2238,7 @@ createApp({
       queueState, queueEntries, selectedTaskStatus, queueNotice, taskStatusLabel, queueKindLabel,
       selectedTaskTiming, taskElapsedSeconds, formatTaskDuration,
       executionControl, controlSubmitting, resumeFailed, isPausing, canPauseTask, canResumeTask, controlTask,
-      selectedEndpoint, globalConcurrency, maxInFlight, waitingCapacity, endpointOptions, saveGlobalSettings,
+      globalConcurrency, maxInFlight, waitingCapacity, saveGlobalSettings,
       showGlobalSettings, savingGlobalSettings, globalSaveMsg, globalSaveError,
       repairStatus, retryStatusLabel, retrySubmitting, selectedRetryIndexes, activeRetry,
       failedResultIndexes, retryIndexSelected, toggleRetryIndex, retryFailedCases,

@@ -296,25 +296,6 @@ async def run_eval(task: Task, cfg: AppConfig) -> None:
             await _persist_task_and_wait(task)  # 退休前最后一次落盘，磁盘先于内存下线
             retire_task(task)
 
-
-
-def _overridden_judge(judge: JudgeConfig, settings, endpoints) -> JudgeConfig:
-    """把全局设置的端点预设（base_url+api_key_env 成对）与 model 覆盖到裁判配置。
-
-    选中 active_endpoint 时以其 base_url/api_key_env 覆盖裁判自身值；设了全局
-    model 时覆盖 model。三者均未覆盖时返回原对象（不复制）。纯函数，便于单测。
-    """
-    update: dict = {}
-    if settings.active_endpoint:
-        preset = next(
-            (e for e in endpoints if e.name == settings.active_endpoint), None
-        )
-        if preset:
-            update["base_url"] = preset.base_url
-            update["api_key_env"] = preset.api_key_env  # 成对一起覆盖
-    if settings.model:
-        update["model"] = settings.model
-    return judge.model_copy(update=update) if update else judge
 def _runtime_conversation(item: dict) -> bool:
     # Historical CSV bookkeeping used a zero-based turn without session_id.
     # A business session_id alone also does not declare a conversation.

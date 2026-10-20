@@ -222,14 +222,6 @@
       <span class="lbl">裁判视角：</span>
       <span v-for="j in visibleJudges.filter(j => selectedJudges.includes(j.name))" :key="j.name" class="chip">{{ j.display || j.name }}</span>
     </div>
-    <div v-if="endpointOptions.length" class="row">
-      <label class="lbl" for="task-endpoint">API / 端点：</label>
-      <select id="task-endpoint" v-model="selectedEndpoint" :disabled="submitting" aria-describedby="task-endpoint-help">
-        <option value="">用裁判配置默认</option>
-        <option v-for="ep in endpointOptions" :key="ep.name" :value="ep.name">{{ ep.display || ep.name }}</option>
-      </select>
-      <span id="task-endpoint-help" class="hint">随本任务冻结；默认走裁判自身的地址与密钥。</span>
-    </div>
     <div v-if="judgeModelProfiles.length" class="row judge-model-options">
       <label class="lbl" for="judge-model-profile">裁判模型：</label>
       <select id="judge-model-profile" v-model="selectedJudgeModelProfile" @change="changeJudgeModel" :disabled="submitting" aria-describedby="judge-model-help">

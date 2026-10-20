@@ -368,12 +368,6 @@ def api_config():
         "evaluation_profiles": [
             profile.public_metadata() for profile in list_compare_protocols()
         ],
-        # API/端点预设：前端按任务选择并随新建任务冻结进 judge_runtime。
-        "endpoints": [
-            {"name": e.name, "display": e.display or e.name,
-             "base_url": e.base_url, "api_key_env": e.api_key_env}
-            for e in c.endpoints
-        ],
     }
 
 
@@ -472,15 +466,6 @@ def _settings_payload() -> dict:
         "waiting_capacity": s.waiting_capacity,
         "eval_timeout_s": s.eval_timeout_s,
         "judges": judges,
-        "endpoints": [
-            {
-                "name": e.name,
-                "display": e.display or e.name,
-                "base_url": e.base_url,
-                "api_key_env": e.api_key_env,
-            }
-            for e in cfg().endpoints
-        ],
     }
 
 

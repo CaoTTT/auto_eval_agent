@@ -125,23 +125,12 @@ class JudgeModelProfile(BaseModel):
     default_enable_thinking: StrictBool | None = None
     rate_limit: RateLimitConfig | None = None
     total_timeout_s: float | None = Field(default=None, gt=0)
-
-
-class EndpointPreset(BaseModel):
-    """命名端点预设：一对 base_url + api_key_env（env 变量名）打包成名字。
-
-    供全局设置选择：选中名字即同时采用其 base_url 与 api_key_env（成对修改）。
-    """
-
-    name: str
-    display: str | None = None  # 前端显示名（如中文），缺省回落 name
-    base_url: str
+    base_url: str | None = None
     api_key_env: str | None = None
 
 
 class AppConfig(BaseModel):
     judges: list[JudgeConfig]
-    endpoints: list[EndpointPreset] = Field(default_factory=list)  # 命名端点预设
     models: list[str] = Field(default_factory=list)  # 可选模型名列表（全局设置只能从中选择）
     visual_modes: dict[str, VisualModeProfile] = Field(default_factory=dict)
     judge_model_profiles: list[JudgeModelProfile] = Field(default_factory=list)
@@ -171,13 +160,10 @@ def load_config(config_dir: str | Path) -> AppConfig:
     judges_data = _read_yaml(config_dir / "judges.yaml") or {}
 
     judges = [JudgeConfig(**j) for j in (judges_data.get("judges") or [])]
-    endpoints = [
-        EndpointPreset(**e) for e in (judges_data.get("endpoints") or [])
-    ]
     models = [str(m) for m in (judges_data.get("models") or [])]
     visual_modes = _load_visual_modes(config_dir)
     config = AppConfig(
-        judges=judges, endpoints=endpoints, models=models, visual_modes=visual_modes,
+        judges=judges, models=models, visual_modes=visual_modes,
         judge_model_profiles=judges_data.get("judge_model_profiles") or [],
         default_judge_model_profile=judges_data.get("default_judge_model_profile"),
     )

@@ -47,6 +47,7 @@ def model_profiles(config: AppConfig) -> list[JudgeModelProfile]:
                         id=profile_id if len(config.judges) == 1 else f"{judge.name}_{profile_id}",
                         display=display, judge_name=judge.name, model=ml,
                         supports_thinking=True, default_enable_thinking=thinking, rate_limit=rate,
+                        base_url=judge.base_url, api_key_env=judge.api_key_env,
                     ))
                 else:
                     profiles.append(JudgeModelProfile(
@@ -54,6 +55,7 @@ def model_profiles(config: AppConfig) -> list[JudgeModelProfile]:
                         model=str(model),
                         supports_thinking=judge.enable_thinking is not None,
                         default_enable_thinking=judge.enable_thinking, rate_limit=judge.rate_limit,
+                        base_url=judge.base_url, api_key_env=judge.api_key_env,
                     ))
     names = {j.name for j in config.judges}
     if len({p.id for p in profiles}) != len(profiles):
@@ -84,6 +86,10 @@ def configured_profile(config: AppConfig, profile: JudgeModelProfile, thinking=N
     base = next(j for j in config.judges if j.name == profile.judge_name)
     data = base.model_dump()
     data.update(model=profile.model, enable_thinking=thinking, rate_limit=profile.rate_limit)
+    if profile.base_url is not None:
+        data["base_url"] = profile.base_url
+    if profile.api_key_env is not None:
+        data["api_key_env"] = profile.api_key_env
     if profile.total_timeout_s is not None:
         data["total_timeout_s"] = profile.total_timeout_s
     return JudgeConfig.model_validate(data)
@@ -120,18 +126,12 @@ def resolve_new_runtime(config: AppConfig, options: dict) -> tuple[dict, list[Ju
     judge = configured_profile(config, profile, thinking)
     # API 跟随任务：选中端点（base_url+api_key_env 成对）冻结进裁判配置，随任务持久；
     # 缺省（空）沿用裁判自身 base_url/api_key_env。运行期不再被任何全局设置改写。
-    api_endpoint = options.get("api_endpoint") or ""
-    if api_endpoint:
-        endpoint = next((e for e in config.endpoints if e.name == api_endpoint), None)
-        if endpoint is None:
-            raise ValueError("端点预设不存在")
-        judge = judge.model_copy(update={
-            "base_url": endpoint.base_url,
-            "api_key_env": endpoint.api_key_env,
-        })
+    if options.get("api_endpoint"):
+        raise ValueError("api_endpoint is merged into judge_model_profile; select the model profile instead")
+
     # Reference the credential slot without writing the secret value.
     snapshot = {"version": 1, "profile_id": profile.id,
-                "api_endpoint": api_endpoint or None, "judges": [judge.model_dump()]}
+                "judges": [judge.model_dump()]}
     return snapshot, [judge]
 
 
@@ -143,12 +143,19 @@ def restore_runtime(config: AppConfig, runtime: dict) -> list[JudgeConfig]:
     profiles = model_profiles(config)
     for index, judge in enumerate(judges):
         base = next((j for j in config.judges if j.name == judge.name), None)
-        if base is None or (base.base_url, base.api_key_env) != (judge.base_url, judge.api_key_env):
+        if base is None:
             continue
         matches = [p for p in profiles if p.judge_name == judge.name and p.model == judge.model]
         profile = next((p for p in matches if p.id == runtime.get("profile_id")), None)
         if profile is None and len(matches) == 1:
             profile = matches[0]
+        if profile is not None:
+            current_url = profile.base_url if profile.base_url is not None else base.base_url
+            current_key = profile.api_key_env if profile.api_key_env is not None else base.api_key_env
+        else:
+            current_url, current_key = base.base_url, base.api_key_env
+        if (current_url, current_key) != (judge.base_url, judge.api_key_env):
+            continue
         if profile is not None:
             # Quotas are operational settings, not scoring parameters. Refresh
             # only the current quota so an old task cannot pin the shared model

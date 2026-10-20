@@ -39,7 +39,7 @@ async function main() {
       })};
       if (url === '/api/settings') return {ok: true, json: async () => ({
         concurrency: 5, max_in_flight: 40, waiting_capacity: 10,
-        active_endpoint: '', model: null, judges: ['judge_2'], endpoints: [],
+        judges: ['judge_2'],
       })};
       if (url.startsWith('/api/history?')) return {ok: true, json: async () => ({items: []})};
       if (url.startsWith('/api/history/')) return {ok: true, json: async () => snapshot};
@@ -58,7 +58,6 @@ async function main() {
   assert.equal(app.selectedJudges.value.join(), 'judge_2');
   assert.equal(app.globalConcurrency.value, 5);
   assert.equal(app.maxInFlight.value, 40);
-  assert.equal(app.endpointOptions.value.length, 0);
 
   for (const mode of ['rich_content', 'compare']) {
     app.mode.value = mode;
@@ -126,6 +125,7 @@ async function main() {
   assert.match(html, /保存全局设置/);
   assert.doesNotMatch(html, /评估并发数/);
   assert.doesNotMatch(html, /恢复并发数/);
+  assert.doesNotMatch(html, /task-endpoint/);
   console.log('Judge model UI: model/thinking, frozen display, legacy records, collapsed global settings with Save passed');
 }
 
