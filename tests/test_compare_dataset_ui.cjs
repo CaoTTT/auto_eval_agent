@@ -7,12 +7,13 @@ async function main(){
   const raw=Array.from({length:25},(_,i)=>({id:`q${i}`,query:`question ${i}`,product_count:2,
     screenshot1:'a.png',screenshot2:'b.png',answer1:'answer',query_images:i%2?['q.png']:[]}));
   const context={ref:value=>({value}),computed:fn=>({get value(){return fn();}}),
-    onMounted(){},onUnmounted(){},nextTick(){},AbortController,console,
+    onMounted(){},onUnmounted(){},nextTick(){},AbortController,FormData,console,
     confirm(){confirmations++;return allowReplace;},alert(message){throw Error(message);},
     createApp(options){app=options.setup();return {mount(){}};},
     async fetch(url,options){
       if(url==='/api/eval'){submitted=JSON.parse(options.body);return {ok:false,json:async()=>({detail:'test stop'})};}
       if(url==='/api/parse')return {ok:true,json:async()=>parsed};
+      if(url==='/api/upload/dataset-source')return {ok:true,json:async()=>({id:'uploaded-source'})};
       throw Error(url);
     }};
   vm.runInNewContext(strip(read('compare-cases.js')),context);

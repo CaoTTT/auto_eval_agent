@@ -27,6 +27,7 @@ class Task:
     judge_runtime: dict = field(default_factory=dict)
     session_name: str = ""
     dataset_name: str = ""
+    source_files: list[dict] = field(default_factory=list)
     note: str = ""
     status: str = "pending"  # pending | queued | running | paused | done | error | cancelled
     results: list[dict] = field(default_factory=list)
@@ -155,6 +156,7 @@ def new_task(
     evaluation_profile: str = "",
     protocol_manifest: dict | None = None,
     judge_runtime: dict | None = None,
+    source_files: list[dict] | None = None,
 ) -> Task:
     task_id = task_id or uuid.uuid4().hex[:12]
     created_at = time.time()
@@ -167,6 +169,7 @@ def new_task(
         protocol_manifest=dict(protocol_manifest or {}),
         judge_runtime=dict(judge_runtime or {}),
         dataset_name=dataset_name,
+        source_files=[dict(source) for source in source_files or []],
         session_name=make_session_name(created_at, mode, task_id),
         created_at=created_at,
     )
@@ -259,6 +262,7 @@ def _task_from_snapshot(snapshot: dict, task_id: str) -> Task:
                            else snapshot.get("protocol_manifest") or {}),
         judge_runtime=snapshot.get("judge_runtime") or {},
         dataset_name=snapshot.get("dataset_name") or "",
+        source_files=snapshot.get("source_files") or [],
         note=snapshot.get("note") or "",
         session_name=snapshot.get("session_name") or "",
         status=status,

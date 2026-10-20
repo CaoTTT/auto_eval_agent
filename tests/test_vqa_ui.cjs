@@ -20,6 +20,7 @@ async function main() {
     alert(message) {throw Error(message);},
     async fetch(url, options) {
       if(url === '/api/parse') return {ok:true, json:async()=>({items,errors:[]})};
+      if(url === '/api/upload/dataset-source') return {ok:true, json:async()=>({id:'uploaded-source'})};
       if(url === '/api/eval') {
         submitted=JSON.parse(options.body);
         return {ok:false,json:async()=>({detail:'test stop'})};

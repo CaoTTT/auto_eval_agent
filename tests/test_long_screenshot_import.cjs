@@ -17,12 +17,13 @@ async function check(kind, count) {
   const sandbox = {
     ref: value => ({ value }),
     computed: getter => ({ get value() { return getter(); } }),
-    onMounted() {}, onUnmounted() {}, nextTick: async () => {},
+    onMounted() {}, onUnmounted() {}, nextTick: async () => {}, FormData,
     createApp(options) { app = options.setup(); return { mount() {} }; },
     console: { log() {}, warn() {}, error() {} },
     alert(message) { throw new Error(message); },
     async fetch(url, options) {
       if (url === "/api/parse") return { ok: true, json: async () => ({ items: [item], errors: [] }) };
+      if (url === "/api/upload/dataset-source") return { ok: true, json: async () => ({ id: "uploaded-source" }) };
       assert.equal(url, "/api/eval");
       submitted = JSON.parse(options.body);
       // Stop before task streaming; only input serialization is under test.

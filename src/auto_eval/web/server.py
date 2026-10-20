@@ -60,6 +60,7 @@ from .execution_control import resume_indexes
 from .scheduler import EvalScheduler
 from .exports import XlsxExports
 from .dataset_media import DatasetMedia, file_hash
+from .source_files import prepare_task_sources, source_file_path, store_upload
 from .human_baselines import HumanStore
 from .human_compare import HumanComparisons
 from .human_routes import install_human_routes
@@ -84,6 +85,7 @@ load_dotenv(BASE_DIR / ".env", override=True)  # 注入 .env 的 key；以 .env 
 
 app = FastAPI(title="auto_eval 评估台")
 _state: dict = {}
+_source_archive_pending: set[str] = set()
 EVAL_SCHEDULER = EvalScheduler()
 XLSX_EXPORTS = XlsxExports(RUNS_DIR / "exports")
 DATASET_MEDIA = DatasetMedia()
@@ -121,6 +123,8 @@ class EvalReq(BaseModel):
     items: list[dict]
     options: dict = {}
     dataset_name: str = ""
+    source_file_id: str = Field(default="", max_length=32)
+    source_task_id: str = Field(default="", max_length=128)
     evaluation_profile: str | None = None
 
 
@@ -132,6 +136,8 @@ class EvalItemsReq(BaseModel):
     items: list[dict]
     options: dict = {}
     dataset_name: str = ""  # 仅新建时生效，更新时忽略
+    source_file_id: str = Field(default="", max_length=32)
+    source_task_id: str = Field(default="", max_length=128)
     evaluation_profile: str | None = None
 
 
@@ -448,6 +454,29 @@ async def api_request_pacing(model: str | None = None) -> dict:
     return result
 
 
+async def _request_source_files(req: EvalReq | EvalItemsReq, task_id: str) -> list[dict]:
+    """Archive original uploads independently of mutable evaluation inputs."""
+    source_task = None
+    source_task_id = req.source_task_id or req.options.get("dataset_source_task_id", "")
+    if not req.source_file_id and source_task_id:
+        if not isinstance(source_task_id, str):
+            raise HTTPException(422, "source_task_id 必须是字符串")
+        source_task = await peek_task_async(_validate_param_id(source_task_id, "source_task_id"))
+        if source_task is None:
+            raise HTTPException(404, "来源历史不存在或已删除，请重新上传源文件")
+    if not req.source_file_id and source_task is None:
+        return []
+    try:
+        return await asyncio.to_thread(
+            prepare_task_sources, task_id,
+            source_file_id=req.source_file_id, source_task=source_task,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(500, "源文件归档失败，请稍后重试") from exc
+
+
 @app.post("/api/eval")
 async def api_eval(req: EvalReq):
     if not req.items:
@@ -469,11 +498,15 @@ async def api_eval(req: EvalReq):
         if req.mode == "compare"
         else None
     )
+    task_id = uuid.uuid4().hex[:12]
+    source_files = await _request_source_files(req, task_id)
     task = new_task(
         req.mode,
         req.items,
         req.options,
         dataset_name=req.dataset_name.strip(),
+        task_id=task_id,
+        source_files=source_files,
         evaluation_profile=protocol.id if protocol else "",
         protocol_manifest=(
             _protocol_manifest(protocol, app_cfg, req.options, judges) if protocol else {}
@@ -721,6 +754,15 @@ async def api_eval_items(req: EvalItemsReq):
     if not req.items:
         raise HTTPException(400, "items 为空")
     _validate_batch_item_ids(req.items)
+    # Complete file I/O before inspecting mutable task state. From get_task to
+    # the batch pin below, validation/merge must stay atomic on the event loop.
+    if task_id in _source_archive_pending:
+        raise HTTPException(409, "任务正在归档源文件，请稍后再更新")
+    _source_archive_pending.add(task_id)
+    try:
+        source_files = await _request_source_files(req, task_id)
+    finally:
+        _source_archive_pending.discard(task_id)
     app_cfg = cfg()
     task = get_task(task_id)
     created = task is None
@@ -796,12 +838,16 @@ async def api_eval_items(req: EvalItemsReq):
             dict(req.options),
             dataset_name=req.dataset_name.strip(),
             task_id=task_id,
+            source_files=source_files,
             evaluation_profile=protocol.id if protocol else "",
             protocol_manifest=(
                 _protocol_manifest(protocol, app_cfg, req.options, judges) if protocol else {}
             ),
             judge_runtime=judge_runtime,
         )
+    elif source_files:
+        existing_ids = {source["id"] for source in task.source_files}
+        task.source_files.extend(source for source in source_files if source["id"] not in existing_ids)
     _freeze_legacy_judge(task, app_cfg)
     batch, replaced_ids, added_ids = merge_items_by_id(task, req.items)
     effective_options = {**task.options, **req.options}
@@ -885,6 +931,18 @@ async def api_item_result(task_id: str, item_id: str):
 
 _MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 模块常量便于测试 monkeypatch
 _UPLOAD_CHUNK = 1024 * 1024
+
+
+@app.post("/api/upload/dataset-source")
+async def api_upload_dataset_source(file: UploadFile = File(...)):
+    try:
+        return await store_upload(file)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(500, "源文件保存失败，请稍后重试") from exc
+    finally:
+        await file.close()
 
 
 @app.post("/api/upload/query-image")
@@ -1093,6 +1151,7 @@ async def api_dataset(task_id: str):
     fields.update(f"{name}{n}" for name in ("video", "screenshot", "answer", "context", "screenshot_meta", "video_source")
                   for n in range(1, 4))
     return {"task_id": task.id, "dataset_name": task.dataset_name, "created_at": task.created_at,
+            "source_files": copy.deepcopy(task.source_files),
             "note": task.note, "items": copy.deepcopy([
                 {key: value for key, value in item.items() if key in fields} for item in task.items
             ])}
@@ -1170,8 +1229,28 @@ def api_history_detail(task_id: str):
     return snapshot_payload(snapshot)
 
 
+@app.get("/api/history/{task_id}/source-files/{file_id}")
+def api_history_source_file(task_id: str, file_id: str):
+    task = peek_task(_validate_param_id(task_id, "task_id"), touch=False)
+    if task is None:
+        raise HTTPException(404, "历史数据不存在或已删除")
+    source = next((entry for entry in task.source_files if entry.get("id") == file_id), None)
+    if source is None:
+        raise HTTPException(404, "未保存该源文件")
+    try:
+        path = source_file_path(task.id, file_id)
+    except (ValueError, OSError) as exc:
+        raise HTTPException(404, "源文件不存在或已损坏，请重新上传") from exc
+    return FileResponse(
+        path, media_type="application/octet-stream", filename=source["filename"],
+        headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+    )
+
+
 @app.delete("/api/history/{task_id}")
 async def api_history_delete(task_id: str):
+    if task_id in _source_archive_pending:
+        raise HTTPException(409, "任务正在归档源文件，请稍后再删除")
     if task_save_pending(task_id):
         raise HTTPException(409, "任务正在保存，请稍后再删除")
     # R6：TASKS 增删必须发生在事件循环线程（原同步 def 在线程池执行，与
