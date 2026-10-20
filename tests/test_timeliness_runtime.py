@@ -51,7 +51,7 @@ async def test_original_media_is_sent_once_with_explicit_product_roles(tmp_path,
     text = "\n".join(p["text"] for p in parts if p["type"] == "text")
     for p in range(1, count + 1):
         assert f"产品{p}" in text
-    assert len(result["raw_key_pairs"]) == 7 * count + 6
+    assert len(result["raw_key_pairs"]) == 7 * count + 8
     assert result[f"answer{count}_timeliness_score"] == 3
     assert "evaluation_datetime" not in result
     assert result["test_time_policy"] == "provided_evidence_only"
@@ -141,7 +141,7 @@ async def test_conditional_na_fields_pass_in_the_same_single_call():
     client = FakeClient(data)
     result = await VisualCompareJudge(client, profile(), PROFILE).evaluate(question="q", product_count=3)
     assert len(client.calls) == 1 and not client.repairs
-    assert len(result["raw_key_pairs"]) == 30
+    assert len(result["raw_key_pairs"]) == 32
     assert result["answer1_understanding_score_status"] == "insufficient_evidence"
     assert result["answer1_authority_score_status"] == "not_applicable"
     assert result["answer2_timeliness_score_status"] == "insufficient_evidence"
@@ -177,3 +177,92 @@ async def test_frozen_legacy_task_still_uses_32_key_prompt_and_schema():
     assert len(result["raw_key_pairs"]) == 32
     assert result["answer1_authority_verification_status"] == "verified"
     assert '"answer1_understanding_applicable"' in client.calls[0][0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("count", [2, 3])
+async def test_frozen_compact_task_keeps_conditional_na_and_has_no_conflict_fields(count):
+    from auto_eval.judges.visual_compare_prompt_timeliness_r101 import output_example as compact_example
+    frozen = resolve_compare_protocol(PROFILE, "1.0.1")
+    data = json.loads(compact_example(count))
+    data.update(answer1_authority_score=None, answer1_authority_na_reason="not_applicable")
+    client = FakeClient(data)
+    result = await VisualCompareJudge(client, profile(), frozen).evaluate(question="q", product_count=count)
+    assert len(client.calls) == 1 and not client.repairs
+    assert result["bundle_revision"] == "1.0.1"
+    assert result["result_schema_version"] == "timeliness-result-2"
+    assert len(result["raw_key_pairs"]) == 7 * count + 7
+    assert result["answer1_authority_score_status"] == "not_applicable"
+    assert "has_conflict" not in result and "conflict_reason" not in result
+    assert '"has_conflict"' not in client.calls[0][0]
+    assert '"answer1_understanding_applicable"' not in client.calls[0][0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("count", [2, 3])
+@pytest.mark.parametrize("status", ["yes", "no", "unclear"])
+async def test_conflict_is_preserved_in_raw_and_final_results_with_one_call(count, status):
+    data = payload(count)
+    reasons = {
+        "yes": "产品1首段称“今日开放”，产品2末段称“今日关闭”；日期和对象相同。",
+        "no": "产品1首段与产品2末段均称“今日开放”，同一日期、同一园区的状态一致。",
+        "unclear": "产品1首段称“今日开放”，产品2末段称“今日关闭”；测试日期缺失，无法确认同日。",
+    }
+    data.update(conflict_reason=reasons[status],
+                has_conflict=status)
+    raw = json.dumps(data, ensure_ascii=False)
+    client = RawClient(raw)
+    result = await VisualCompareJudge(client, profile(), PROFILE).evaluate(question="q", product_count=count)
+    assert len(client.calls) == 1 and not client.repairs
+    assert result["raw_model_output"] == raw
+    assert dict(result["raw_key_pairs"]) == data
+    assert result["conflict_reason"] == data["conflict_reason"]
+    assert result["has_conflict"] == status
+    assert result["needs_human_review"] is (status == "unclear")
+    assert result["bundle_revision"] == "1.0.2"
+    assert result["result_schema_version"] == "timeliness-result-3"
+    for product in range(1, count + 1):
+        for dimension in ("understanding", "authority", "timeliness"):
+            assert result[f"answer{product}_{dimension}_score"] == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changes", [
+    {"has_conflict": "unknown"}, {"has_conflict": True}, {"has_conflict": None},
+    {"conflict_reason": " "}, {"conflict_reason": ""},
+])
+async def test_conflict_contract_errors_never_trigger_model_repair(changes):
+    client = FakeClient({**payload(), **changes})
+    with pytest.raises(JudgeOutputParseError):
+        await VisualCompareJudge(client, profile(), PROFILE).evaluate(question="q")
+    assert len(client.calls) == 1 and not client.repairs
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing", ["has_conflict", "conflict_reason"])
+async def test_missing_conflict_fields_fail_without_model_repair(missing):
+    data = payload()
+    data.pop(missing)
+    client = FakeClient(data)
+    with pytest.raises(JudgeOutputParseError):
+        await VisualCompareJudge(client, profile(), PROFILE).evaluate(question="q")
+    assert len(client.calls) == 1 and not client.repairs
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("revision", ["1.0.1", "1.0.2"])
+async def test_duplicate_diagnostics_accept_only_the_frozen_revision_keys(revision):
+    protocol = resolve_compare_protocol(PROFILE, revision)
+    if revision == "1.0.1":
+        from auto_eval.judges.visual_compare_prompt_timeliness_r101 import output_example
+        data = json.loads(output_example(2))
+    else:
+        data = payload()
+    data.update(answer1_authority_score=None, answer1_authority_na_reason="not_applicable")
+    raw = json.dumps(data)[:-1] + ',"answer1_response_gate":"fail"}'
+    client = RawClient(raw)
+    with pytest.raises(JudgeOutputParseError) as exc:
+        await VisualCompareJudge(client, profile(), protocol).evaluate(question="q")
+    assert len(client.calls) == 1 and not client.repairs
+    assert not any("缺少字段" in diagnostic or "多余字段" in diagnostic
+                   for diagnostic in exc.value.structural_diagnostics)

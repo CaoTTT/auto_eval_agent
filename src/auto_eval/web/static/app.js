@@ -70,7 +70,7 @@ createApp({
     function isTimelinessRow(row = {}) {
       if (row.standard_id) return row.standard_id === 'timeliness_compare';
       if (row.evaluation_profile) return row.evaluation_profile.startsWith('timeliness_compare@');
-      if (row.result_schema_version) return ['timeliness-result-1','timeliness-result-2'].includes(row.result_schema_version);
+      if (row.result_schema_version) return ['timeliness-result-1','timeliness-result-2','timeliness-result-3'].includes(row.result_schema_version);
       return taskIsTimeliness.value;
     }
     function chatUsesSharedReasons(row = {}) {
@@ -79,6 +79,20 @@ createApp({
       const profile = row.evaluation_profile || (row.standard_id === 'qa_chat_compare' && row.standard_version
         ? `qa_chat_compare@${row.standard_version}` : taskEvaluationProfile.value);
       return profile === 'qa_chat_compare@1.1';
+    }
+    function timelinessHasConflict(row = {}) {
+      return isTimelinessRow(row)
+        && (row.result_schema_version || taskProtocolManifest.value.result_schema_version) === 'timeliness-result-3';
+    }
+    function timelinessConflictColumn(row, column) {
+      return column.key === 'has_conflict' && isTimelinessRow(row);
+    }
+    function timelinessConflictSummary(data = {}) {
+      return `有冲突 ${data.conflict_yes ?? 0} · 无冲突 ${data.conflict_no ?? 0} · 不确定 ${data.conflict_unclear ?? 0}`
+        + ` · 未采集（旧协议）${data.conflict_not_collected ?? 0} · 结果缺失或异常 ${data.conflict_invalid_state ?? 0}`
+        + ` · 采集失败，待核验 ${data.conflict_input_failed ?? 0}`
+        + ` · 协议异常 ${data.conflict_identity_error ?? 0} · 技术失败 ${data.conflict_technical_failure ?? 0} · 未完成 ${data.conflict_unfinished ?? 0}`
+        + ` · 明确冲突率 ${summaryPercent(data.conflict_rate)}（有冲突 / 明确判断 ${data.conflict_known ?? 0}）`;
     }
     const compareProfiles = computed(() =>
       evaluationProfiles.value.filter((profile) => (profile.modes || []).includes("compare"))
@@ -222,7 +236,7 @@ createApp({
       if (isTimelinessRow(row)) {
         const prefix = `answer${product}_${dimension}`, value = row[`${prefix}_score`];
         const verification = row[`${prefix}_verification_status`];
-        const compact = (row.result_schema_version || taskProtocolManifest.value.result_schema_version) === 'timeliness-result-2';
+        const compact = ['timeliness-result-2','timeliness-result-3'].includes(row.result_schema_version || taskProtocolManifest.value.result_schema_version);
         const evidenceStateValid = compact
           ? !Object.prototype.hasOwnProperty.call(row,`${prefix}_na_reason`)
           : verification === 'verified' || (verification === 'partial' && (dimension === 'understanding' || value === 1));
@@ -819,7 +833,8 @@ createApp({
           { key: "response_gate_summary", label: "响应体验Gate" },
           { key: "safety_gate_summary", label: "安全稳定Gate" },
           ...taskDimensions.value.map(d => ({key:`${d.key}_summary`, label:d.key === 'accuracy' ? '内容准确（暂不汇总）' : d.label})),
-          ...(chatUsesSharedReasons() ? [] : [{ key: "has_conflict", label: "内容冲突" }]),
+          ...((taskIsTimeliness.value ? timelinessHasConflict() : !chatUsesSharedReasons())
+            ? [{ key: "has_conflict", label: "内容冲突" }] : []),
           { key: "needs_human_review", label: "需人工复核" },
           ...(chatUsesSharedReasons() ? [] : [{ key: "rationale", label: "理由" }]),
           { key: "latency_s", label: "总耗时" },
@@ -1843,6 +1858,17 @@ createApp({
         return v || "";
       }
       if (c.key === "has_conflict") {
+        if (isTimelinessRow(r)) {
+          if (r.error) return "评估失败";
+          if (!timelinessHasConflict(r)) return "未采集（旧协议）";
+          if (taskProtocolDiagnostics.value.length) return "协议待恢复";
+          const count = Number(r.product_count || items.value[r.index]?.product_count || 2);
+          if (Array.from({length:count}, (_, i) => i + 1).some(n => r[`answer${n}_input_status`] === 'failed')) {
+            const model = ({yes:'有冲突',no:'无冲突',unclear:'不确定'})[v] || '结果缺失或异常';
+            return `采集失败，待核验（模型：${model}）`;
+          }
+          if (!['yes','no','unclear'].includes(v) || !String(r.conflict_reason || '').trim()) return "结果缺失或异常";
+        }
         if (v === "yes") return "有冲突";
         if (v === "no") return "无冲突";
         if (v === "unclear") return "不清楚";
@@ -2341,6 +2367,7 @@ createApp({
       evaluationProfiles, compareProfiles, selectedEvaluationProfile, evaluationProfileLabel,
       taskEvaluationProfile, taskProtocolManifest, taskProtocolDiagnostics, taskIsChat, taskIsTimeliness, summaryDimensions, setTaskProtocol,
       isTimelinessRow, timelinessColumn, timelinessProductScores, timelinessSummaryRows, timelinessPairedRows, summaryPercent,
+      timelinessHasConflict, timelinessConflictColumn, timelinessConflictSummary,
       judgeModelProfiles, selectedJudgeModelProfile, selectedModelProfile, enableThinking, changeJudgeModel,
       taskJudgeRuntime, taskJudgeSummary, thinkingLabel, judgeRuntimeLabel,
       concurrency, mediaConcurrency, requestPacing, evalTimeout, submitting, running, progress, total, results, summary, taskId, runError,

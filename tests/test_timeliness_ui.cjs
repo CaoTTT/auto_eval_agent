@@ -78,6 +78,30 @@ assert.equal(app.filteredResults.value.length,1,'old result uses its own frozen 
 app.results.value=[{...row,answer1_timeliness_verification_status:null}];
 assert.equal(app.filteredResults.value.length,0,'old result must still satisfy old verification rules');
 app.results.value=[row];
+app.setTaskProtocol({evaluation_profile:'timeliness_compare@1.0',
+  protocol_manifest:{bundle_revision:'1.0.2',result_schema_version:'timeliness-result-3'}});
+const conflictRow={...compact,result_schema_version:'timeliness-result-3',bundle_revision:'1.0.2',
+  conflict_reason:'产品1给出18点，产品2给出20点；同日同一公园闭园时间互斥。',has_conflict:'yes'};
+app.results.value=[conflictRow];
+assert.equal(app.filteredResults.value.length,1,'result3 keeps compact valid scores');
+assert.equal(app.resultCols.value.filter(c=>c.key==='has_conflict').length,1);
+assert.equal(app.cell(conflictRow,{key:'has_conflict'}),'有冲突');
+assert.equal(app.cellReasons(conflictRow,{key:'has_conflict'})[0].text,conflictRow.conflict_reason);
+assert.equal(app.cell({...conflictRow,has_conflict:'unclear'},{key:'has_conflict'}),'不清楚');
+assert.equal(app.cell({...conflictRow,conflict_reason:''},{key:'has_conflict'}),'结果缺失或异常');
+assert.equal(app.cell({...conflictRow,has_conflict:'no',answer2_input_status:'failed'},{key:'has_conflict'}),
+  '采集失败，待核验（模型：无冲突）');
+assert.equal(app.cell({...conflictRow,product_count:3,answer3_input_status:'failed'},{key:'has_conflict'}),
+  '采集失败，待核验（模型：有冲突）');
+assert.equal(app.cell({...conflictRow,answer3_input_status:'failed'},{key:'has_conflict'}),'有冲突');
+assert.match(app.timelinessConflictSummary({conflict_input_failed:1}),/采集失败，待核验 1/);
+assert.equal(app.cell(compact,{key:'has_conflict'}),'未采集（旧协议）');
+assert.ok(!app.scoreDimensions.value.some(dim=>dim.key==='has_conflict'),'classification is not a product score');
+assert.match(app.timelinessConflictSummary({conflict_yes:1,conflict_no:2,conflict_unclear:1,
+  conflict_not_collected:3,conflict_known:3,conflict_rate:1/3}),/33.3%.*明确判断 3/);
+app.setTaskProtocol({evaluation_profile:'timeliness_compare@1.0',
+  protocol_manifest:{bundle_revision:'1.0.1',result_schema_version:'timeliness-result-2'}});
+assert.ok(!app.resultCols.value.some(c=>c.key==='has_conflict'),'frozen result2 has no newly invented conflict column');
 const summary={product_count:2,
   timeliness_answer1_avg:3,timeliness_answer1_scored:1,timeliness_answer1_eligible:2,
   timeliness_answer1_score_coverage:0.5,timeliness_answer1_applicable_unknown:1,
@@ -96,6 +120,7 @@ const three=Array.from(app.timelinessPairedRows({product_count:3}));
 assert.equal(three.length,9,'three dimensions times three product pairs');
 const html=fs.readFileSync(path.join(__dirname,'../src/auto_eval/web/static/index.html'),'utf8');
 assert.ok(html.indexOf('timeliness-evidence-preview')<html.indexOf('timeliness-score-list'));
+assert.ok(html.indexOf('timeliness-conflict-reason')<html.indexOf('timeliness-conflict-verdict'));
 assert.match(html,/timelinessPairedRows\(summary\)/);
 app.setTaskProtocol({evaluation_profile:'qa_chat_compare@1.1',protocol_manifest:{
   bundle_revision:'1.1.0',result_schema_version:'qa-chat-result-2'}});

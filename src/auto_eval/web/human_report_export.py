@@ -91,11 +91,15 @@ def case_comparison_tables(report: dict) -> tuple[StatisticsTable, StatisticsTab
                               ("模型核验状态", "model_verification_status"), ("模型证据", "model_evidence"),
                               ("模型标准家族", "model_standard_id"), ("模型评分状态", "model_score_status")))
     result_schema = baseline_protocol(report["baseline"]).result_schema_version
-    if result_schema == "timeliness-result-2":
+    if result_schema in ("timeliness-result-2", "timeliness-result-3"):
         detail_fields = [(label, field) for label, field in detail_fields
                          if field not in ("model_applicable", "model_verification_status")]
         detail_fields.append(("模型NA原因", "model_na_reason"))
-    if result_schema in ("qa-chat-result-2", "timeliness-result-1", "timeliness-result-2"):
+    if result_schema == "timeliness-result-3":
+        detail_fields.extend((("模型内容冲突理由（同题跨产品）", "model_conflict_reason"),
+                              ("模型内容冲突状态（程序判定）", "model_conflict_status"),
+                              ("模型内容冲突（不计入数字一致性）", "model_has_conflict")))
+    if result_schema in ("qa-chat-result-2", "timeliness-result-1", "timeliness-result-2", "timeliness-result-3"):
         detail_fields = [("模型理由（维度共享完整原文）" if field == "model_reason" else
                           "模型证据（维度共享，保留产品归属）" if field == "model_evidence" else label, field)
                          for label, field in detail_fields]

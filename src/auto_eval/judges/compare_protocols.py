@@ -290,7 +290,7 @@ _PROTOCOLS = {
         id=TIMELINESS_COMPARE_PROTOCOL_ID,
         standard_id=TIMELINESS_STANDARD_ID,
         standard_version="1.0",
-        bundle_revision="1.0.1",
+        bundle_revision="1.0.2",
         display="时效性评估V1·1-3分（候选）",
         status="experimental",
         system_template=TIMELINESS_SYSTEM,
@@ -316,6 +316,20 @@ def resolve_compare_protocol(protocol_id: str | None, bundle_revision: str | Non
     try:
         protocol = _PROTOCOLS[selected]
         if bundle_revision and bundle_revision != protocol.bundle_revision:
+            if selected == TIMELINESS_COMPARE_PROTOCOL_ID and bundle_revision == "1.0.1":
+                from .timeliness_schema_r101 import TimelinessObservation as legacy_observation
+                from .visual_compare_prompt_timeliness_r101 import (
+                    VISUAL_COMPARE_SYSTEM as legacy_system,
+                    VISUAL_COMPARE_USER as legacy_user,
+                )
+                return replace(
+                    protocol,
+                    bundle_revision=bundle_revision,
+                    result_schema_version="timeliness-result-2",
+                    observation_model=legacy_observation,
+                    system_template=legacy_system,
+                    user_template=legacy_user,
+                )
             if selected == TIMELINESS_COMPARE_PROTOCOL_ID and bundle_revision == "1.0.0":
                 # Historical observations retain their complete original JSON
                 # contract and rubric; only new tasks use the compact contract.

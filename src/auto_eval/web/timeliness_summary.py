@@ -7,7 +7,7 @@ from statistics import mean
 
 from .protocol_identity import recover_protocol_identity, require_snapshot_protocol
 from .qa_chat_summary import task_snapshot
-from .timeliness_statistics import DIMENSIONS, GATES, dimension_metrics, gate_observable, timeliness_score_state
+from .timeliness_statistics import DIMENSIONS, GATES, conflict_metrics, dimension_metrics, gate_observable, timeliness_score_state
 
 
 def summarize_timeliness(task, *, include_subsets: bool = True) -> dict:
@@ -31,6 +31,7 @@ def summarize_timeliness(task, *, include_subsets: bool = True) -> dict:
                   "failed" if latest.get(i, {}).get("error") else "done" if i in latest else "pending",
                   int(item.get("product_count") or 2), protocol.standard_version, protocol.bundle_revision,
                   protocol.standard_id) for i, item in enumerate(task.items)]
+    summary.update(conflict_metrics(cases, protocol))
     for p in range(1, count + 1):
         observed = [c for c in cases if gate_observable(c, p)]
         combined = []

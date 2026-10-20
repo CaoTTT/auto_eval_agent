@@ -227,7 +227,7 @@ def align_baseline_to_run(baseline: dict, snapshot: dict, mapping: TaskMapping, 
         result_runtime_summary = (judge_runtime_summary({}, result)
                                   if result.get("judge_runtime") or result.get("judge_model") else runtime_summary)
         policy = _policy(snapshot,result,recovered_identity)
-        shared_reasons = bool(policy and policy.result_schema_version in ("qa-chat-result-2", "timeliness-result-1", "timeliness-result-2"))
+        shared_reasons = bool(policy and policy.result_schema_version in ("qa-chat-result-2", "timeliness-result-1", "timeliness-result-2", "timeliness-result-3"))
         same_family = bool(policy and policy.standard_id == human_policy.standard_id)
         compatible = bool(policy and same_family and [policy.score_min,policy.score_max]==baseline["score_range"] and (
             policy.standard_version==baseline["human_standard_version"] or mode=="regression"))
@@ -307,6 +307,16 @@ def align_baseline_to_run(baseline: dict, snapshot: dict, mapping: TaskMapping, 
                            model_standard_id=policy.standard_id if policy else "unknown",
                            bundle_revision=policy.bundle_revision if policy else "unknown",
                            **result_runtime_summary)
+                if policy and policy.result_schema_version == "timeliness-result-3":
+                    from .timeliness_statistics import CONFLICT_LABELS, conflict_state
+                    conflict_case = Case(i or 0, item, result,
+                        "failed" if result.get("error") else "done" if result else "unfinished",
+                        product_count, policy.standard_version, policy.bundle_revision, policy.standard_id)
+                    # Task-level context is repeated for audit only; it is not a
+                    # fourth product score or a human agreement observation.
+                    row.update(model_conflict_reason=result.get("conflict_reason", ""),
+                               model_has_conflict=result.get("has_conflict"),
+                               model_conflict_status=CONFLICT_LABELS[conflict_state(conflict_case, policy)])
                 finalize_row(row)
                 rows.append(row)
     return rows

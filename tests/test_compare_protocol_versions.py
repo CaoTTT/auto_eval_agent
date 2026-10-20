@@ -203,8 +203,8 @@ async def test_eval_api_freezes_selected_protocol_on_new_task(monkeypatch):
     )
     assert timeliness_response["evaluation_profile"] == TIMELINESS_COMPARE_PROTOCOL_ID
     manifest = created[-1].protocol_manifest
-    assert manifest["bundle_revision"] == "1.0.1"
-    assert manifest["result_schema_version"] == "timeliness-result-2"
+    assert manifest["bundle_revision"] == "1.0.2"
+    assert manifest["result_schema_version"] == "timeliness-result-3"
     assert manifest["score_range"] == [1, 3]
     assert [dim["key"] for dim in manifest["dimensions"]] == ["understanding", "authority", "timeliness"]
 

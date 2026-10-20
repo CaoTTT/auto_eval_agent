@@ -184,7 +184,7 @@ def parse_human_labels(path: Path, mapping: ImportMapping) -> dict:
         if metadata.get("human_standard_version"):
             recorded_protocol = human_protocol(metadata["human_standard_version"], metadata.get("human_standard_id", ""),
                                                metadata.get("human_bundle_revision") or None)
-            frozen_v2 = any(s in ("qa-chat-result-2", "timeliness-result-1", "timeliness-result-2") for s in
+            frozen_v2 = any(s in ("qa-chat-result-2", "timeliness-result-1", "timeliness-result-2", "timeliness-result-3") for s in
                             (recorded_protocol.result_schema_version, protocol.result_schema_version))
             if frozen_v2 and (recorded_protocol.id, recorded_protocol.bundle_revision) != (protocol.id, protocol.bundle_revision):
                 raise HumanError("模板或基准的冻结标准与所选标准不同；不能仅改版本复用评分，请生成新标准空白模板重新标注")
@@ -470,7 +470,7 @@ def build_human_template(snapshot: dict, standard: str) -> bytes:
     notes = StatisticsTable("填写说明", ("项目", "说明"), rows=[
         ["模板元信息", json.dumps(meta, ensure_ascii=False)], ["人工标准", protocol.display],
         ["分值范围", f"{protocol.score_min}—{protocol.score_max} 的整数"],
-        ["填写规则", f"题号须为文本；留空=未标注；review非空优先（包括N/A）；数字只接受{protocol.score_min}—{protocol.score_max}严格整数，N/A默认原因未知。" if protocol.result_schema_version in ("qa-chat-result-2", "timeliness-result-1", "timeliness-result-2") else "题号须为文本；留空=未标注；review 非空优先（包括 0 和 N/A）。N/A 默认原因未知。"],
+        ["填写规则", f"题号须为文本；留空=未标注；review非空优先（包括N/A）；数字只接受{protocol.score_min}—{protocol.score_max}严格整数，N/A默认原因未知。" if protocol.result_schema_version in ("qa-chat-result-2", "timeliness-result-1", "timeliness-result-2", "timeliness-result-3") else "题号须为文本；留空=未标注；review 非空优先（包括 0 和 N/A）。N/A 默认原因未知。"],
         ["状态可选值", "scored / not_applicable / insufficient_evidence / blocked_gate / blocked_understanding / input_failed / unlabeled / na_unspecified" if timeliness else "scored / not_applicable / unverifiable / gate_blocked / input_failed / unlabeled / na_unspecified"],
         ["身份核对", "请核对产品、题号和原始回答；缺失真实题号须先补充。填写说明中的产品 ID 可在导入映射中修正。"],
         ["Gate/适用性", "Gate：pass/fail/unclear；适用性：true/false；留空=未知。"],

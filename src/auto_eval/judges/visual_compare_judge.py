@@ -39,6 +39,13 @@ from .timeliness_schema_r100 import (
     expected_output_keys as timeliness_v1_output_keys,
     finalize_timeliness_observation as finalize_timeliness_v1_observation,
 )
+from .timeliness_schema_r101 import (
+    TIMELINESS_RESULT_SCHEMA_VERSION as TIMELINESS_V2_RESULT_SCHEMA_VERSION,
+    TimelinessObservation as TimelinessV2Observation,
+    expected_output_keys as timeliness_v2_output_keys,
+    allowed_output_keys as timeliness_v2_allowed_keys,
+    finalize_timeliness_observation as finalize_timeliness_v2_observation,
+)
 from .compare_protocols import (
     CompareProtocol,
     DIMENSIONS,
@@ -252,6 +259,11 @@ def visual_compare_result_fields(
             raise ValueError("时效性协议需要独立TimelinessObservation结果模型")
         return finalize_timeliness_observation(
             observation, selected_protocol, trusted_collection_metadata=trusted_collection_metadata)
+    if selected_protocol.result_schema_version == TIMELINESS_V2_RESULT_SCHEMA_VERSION:
+        if not isinstance(observation, TimelinessV2Observation):
+            raise ValueError("旧时效性协议需要冻结的TimelinessV2Observation结果模型")
+        return finalize_timeliness_v2_observation(
+            observation, selected_protocol, trusted_collection_metadata=trusted_collection_metadata)
     if selected_protocol.result_schema_version == TIMELINESS_V1_RESULT_SCHEMA_VERSION:
         if not isinstance(observation, TimelinessV1Observation):
             raise ValueError("旧时效性协议需要冻结的TimelinessV1Observation结果模型")
@@ -325,10 +337,14 @@ class VisualCompareJudge:
         )
         is_chat_v2 = self.protocol.result_schema_version == QA_CHAT_V2_RESULT_SCHEMA_VERSION
         is_timeliness = self.protocol.standard_id == "timeliness_compare"
-        is_timeliness_v2 = self.protocol.result_schema_version == TIMELINESS_RESULT_SCHEMA_VERSION
         is_strict_output = is_chat_v2 or is_timeliness
-        strict_output_keys = (timeliness_output_keys if is_timeliness_v2 else
-                              timeliness_v1_output_keys if is_timeliness else expected_output_keys)
+        timeliness_contracts = {
+            TIMELINESS_RESULT_SCHEMA_VERSION: (timeliness_output_keys, timeliness_allowed_keys),
+            TIMELINESS_V2_RESULT_SCHEMA_VERSION: (timeliness_v2_output_keys, timeliness_v2_allowed_keys),
+            TIMELINESS_V1_RESULT_SCHEMA_VERSION: (timeliness_v1_output_keys, timeliness_v1_output_keys),
+        }
+        strict_output_keys, allowed_output_keys = timeliness_contracts.get(
+            self.protocol.result_schema_version, (expected_output_keys, expected_output_keys))
         output_label = "时效性评估V1" if is_timeliness else "问答闲聊V2"
         trusted_collection = collection_metadata(trusted_collection_metadata, actual_product_count) if is_strict_output else None
         if evidence_mode not in ("video_frames", "long_screenshot"):
@@ -539,7 +555,7 @@ class VisualCompareJudge:
             diagnostic_pairs = parsed["raw_key_pairs"] or parsed["locally_repaired_key_pairs"]
             keys = {pair[0] for pair in diagnostic_pairs}
             expected = set(strict_output_keys(actual_product_count))
-            allowed = set(timeliness_allowed_keys(actual_product_count)) if is_timeliness_v2 else expected
+            allowed = set(allowed_output_keys(actual_product_count))
             diagnostics = list(parsed["structural_diagnostics"])
             if expected - keys:
                 diagnostics.append(f"缺少字段：{sorted(expected - keys)}")

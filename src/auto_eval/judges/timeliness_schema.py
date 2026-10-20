@@ -19,7 +19,7 @@ from .qa_chat_v2_schema import collection_metadata
 
 TIMELINESS_STANDARD_ID = "timeliness_compare"
 TIMELINESS_COMPARE_PROTOCOL_ID = "timeliness_compare@1.0"
-TIMELINESS_RESULT_SCHEMA_VERSION = "timeliness-result-2"
+TIMELINESS_RESULT_SCHEMA_VERSION = "timeliness-result-3"
 TIMELINESS_STANDARD_SHA256 = "9f3d663e213bfb7f6ba66cc2eacc316b6f7eeaba85726957e79e6bf6dad1a9a9"
 TIMELINESS_DIMENSIONS = ("understanding", "authority", "timeliness")
 TIMELINESS_DIMENSION_NAMES = {
@@ -30,10 +30,11 @@ TIMELINESS_DIMENSION_NAMES = {
 TimelinessScore = Annotated[int, Field(strict=True, ge=1, le=3)]
 NonemptyText = Annotated[str, Field(strict=True, min_length=1)]
 NaReason = Literal["not_applicable", "insufficient_evidence", "applicability_unknown"]
+ConflictStatus = Literal["yes", "no", "unclear"]
 
 
 def expected_output_keys(product_count: int) -> tuple[str, ...]:
-    """Return the required ordered base contract (20 or 27 keys).
+    """Return the required ordered base contract (22 or 29 keys).
 
     Unblocked authority/timeliness null scores additionally require a
     per-product ``na_reason``. Use output_key_errors for the full contract.
@@ -47,6 +48,7 @@ def expected_output_keys(product_count: int) -> tuple[str, ...]:
     for dimension in TIMELINESS_DIMENSIONS:
         keys.extend((dimension + "_evidence", dimension + "_reason"))
         keys.extend(f"answer{product}_{dimension}_score" for product in range(1, product_count + 1))
+    keys.extend(("conflict_reason", "has_conflict"))
     return tuple(keys)
 
 
@@ -125,6 +127,8 @@ class _TimelinessBase(BaseModel):
         for dimension in TIMELINESS_DIMENSIONS:
             if not getattr(self, dimension + "_reason").strip():
                 raise ValueError(f"{dimension}_reason不能为空白")
+        if not self.conflict_reason.strip():
+            raise ValueError("conflict_reason不能为空白")
         for product in range(1, self.product_count + 1):
             prefix = f"answer{product}"
             for gate in ("response", "safety"):
@@ -152,6 +156,8 @@ for _product in (1, 2, 3):
 for _dimension in TIMELINESS_DIMENSIONS:
     _fields[f"{_dimension}_evidence"] = (list[StrictStr], ...)
     _fields[f"{_dimension}_reason"] = (NonemptyText, ...)
+_fields["conflict_reason"] = (NonemptyText, ...)
+_fields["has_conflict"] = (ConflictStatus, ...)
 
 TimelinessObservation = create_model("TimelinessObservation", __base__=_TimelinessBase, **_fields)
 
@@ -172,6 +178,8 @@ def finalize_timeliness_observation(
         )
     result = observation.model_dump()
     diagnostics, reviews = [], []
+    if result["has_conflict"] == "unclear":
+        reviews.append("内容冲突证据不足，需人工核验")
     for product in range(1, count + 1):
         prefix = f"answer{product}"
         metadata = trusted.get(prefix, {})
@@ -216,7 +224,7 @@ def finalize_timeliness_observation(
                 final_score = score
             result[field + "_score_status"] = state
             result[field + "_applicable"] = applicable
-            # Result-2 never asks the judge for verification status. Leave the
+            # Compact results never ask the judge for verification status. Leave the
             # legacy storage field empty instead of claiming an unobserved check.
             result[field + "_verification_status"] = None
             result[field + "_verification_status_source"] = "not_collected"

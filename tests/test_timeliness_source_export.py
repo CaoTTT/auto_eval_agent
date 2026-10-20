@@ -1,4 +1,4 @@
-"""Source downloads preserve both generations of the timeliness contract."""
+"""Source downloads preserve all generations of the timeliness contract."""
 from copy import deepcopy
 import json
 
@@ -44,8 +44,8 @@ async def test_timeliness_source_download_restores_compact_scores_and_frozen_pro
         restored = response.json()
         assert restored["protocol_executable"]
         assert restored["evaluation_profile"] == "timeliness_compare@1.0"
-        assert restored["protocol_manifest"]["bundle_revision"] == "1.0.1"
-        assert restored["protocol_manifest"]["result_schema_version"] == "timeliness-result-2"
+        assert restored["protocol_manifest"]["bundle_revision"] == "1.0.2"
+        assert restored["protocol_manifest"]["result_schema_version"] == "timeliness-result-3"
         assert restored["source_files"] == [source]
         assert restored["results"] == expected_results
         row = history.export_rows(restored)["逐题结果"][0]
@@ -53,6 +53,8 @@ async def test_timeliness_source_download_restores_compact_scores_and_frozen_pro
         assert row["产品2时效性分"] == 2
         assert row["产品3时效性分"] is None
         assert row["时效性理由（维度共享）"] == expected_results[0]["timeliness_reason"]
+        assert row["内容冲突理由"] == expected_results[0]["conflict_reason"]
+        assert row["内容冲突"] == "无冲突"
         downloaded = await client.get(f"/api/history/{task_id}/source-files/{source['id']}")
         assert downloaded.status_code == 200, downloaded.text
         assert downloaded.content == content
@@ -62,6 +64,7 @@ async def test_timeliness_source_download_restores_compact_scores_and_frozen_pro
 @pytest.mark.parametrize("revision,schema", [
     ("1.0.0", "timeliness-result-1"),
     ("1.0.1", "timeliness-result-2"),
+    ("1.0.2", "timeliness-result-3"),
 ])
 async def test_unarchived_timeliness_history_remains_readable(source_api, revision, schema):
     snapshot, rows, _ = dataset(revision=revision)

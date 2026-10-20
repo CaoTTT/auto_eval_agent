@@ -29,8 +29,8 @@ def test_history_restores_recorded_revision_and_schema_without_upgrading():
 def test_new_history_restores_simplified_schema_without_legacy_columns():
     snapshot, _, _ = dataset()
     restored = _task_from_snapshot(snapshot, "time-test")
-    assert restored.protocol_manifest["bundle_revision"] == "1.0.1"
-    assert restored.protocol_manifest["result_schema_version"] == "timeliness-result-2"
+    assert restored.protocol_manifest["bundle_revision"] == "1.0.2"
+    assert restored.protocol_manifest["result_schema_version"] == "timeliness-result-3"
     row = export_rows(snapshot)["逐题结果"][0]
     assert "产品1权威性NA原因" in row
     assert not any("核验状态" in key or "是否适用" in key for key in row)

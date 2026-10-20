@@ -66,7 +66,7 @@ def _pair(a, b, keys):
 def build_human_statistics(rows: list[dict], task_ids: list[str], products: list[str], dimensions=None) -> dict:
     dimensions = list(dimensions or SCORE_DIMENSIONS)
     timeliness = any(row.get("human_standard_id") == "timeliness_compare" or row.get("model_standard_id") == "timeliness_compare" or
-                     row.get("model_result_schema_version") in ("timeliness-result-1", "timeliness-result-2") for row in rows)
+                     row.get("model_result_schema_version") in ("timeliness-result-1", "timeliness-result-2", "timeliness-result-3") for row in rows)
     grouped = defaultdict(list)
     for row in rows:
         grouped[row["task_id"], row["product_id"], row["dimension_id"]].append(row)
@@ -131,7 +131,7 @@ def build_human_statistics(rows: list[dict], task_ids: list[str], products: list
                          r["identity_accepted"] and r.get("compatible", True) and r.get("human_gates",{}).get(gate) in ("pass","fail","unclear") and
                          r.get("model_gates",{}).get(gate) in ("pass","fail","unclear") and
                          (r.get("model_input_status") in ("complete","partial") or
-                          r.get("model_result_schema_version") in ("qa-chat-result-2", "timeliness-result-1", "timeliness-result-2") and r.get("model_input_status") is None) and
+                          r.get("model_result_schema_version") in ("qa-chat-result-2", "timeliness-result-1", "timeliness-result-2", "timeliness-result-3") and r.get("model_input_status") is None) and
                          r.get("human_input_status") != "failed"}
                 values = list(group.values())
                 product_rows = [r for r in rows if r["task_id"] == task and r["product_id"] == product]

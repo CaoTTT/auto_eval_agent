@@ -997,7 +997,7 @@ async def run_retry(task: Task, cfg: AppConfig, retry_id: str) -> None:
     """执行人工失败补跑；候选成功才写回原任务，失败仅进入 attempt 审计。"""
     retry = task.retry_runs[retry_id]
     shared_chat_output = (task.evaluation_profile in {"qa_chat_compare@1.1", "timeliness_compare@1.0"} or
-                          task.protocol_manifest.get("result_schema_version") in {"qa-chat-result-2", "timeliness-result-1", "timeliness-result-2"})
+                          task.protocol_manifest.get("result_schema_version") in {"qa-chat-result-2", "timeliness-result-1", "timeliness-result-2", "timeliness-result-3"})
     retry["status"] = "running"
     retry["started_at"] = time.time()
     task.repair_status = "running"
@@ -1478,7 +1478,7 @@ async def _eval_one(
             # columns, copied answers, and successful decoding do not prove it.
             **({"trusted_collection_metadata": trusted_collection_metadata}
                if trusted_collection_metadata is not None and
-               getattr(getattr(compare_judges[0], "protocol", None), "result_schema_version", None) in {"qa-chat-result-2", "timeliness-result-1", "timeliness-result-2"} else {}),
+               getattr(getattr(compare_judges[0], "protocol", None), "result_schema_version", None) in {"qa-chat-result-2", "timeliness-result-1", "timeliness-result-2", "timeliness-result-3"} else {}),
             **({"conversation_input": conversation_input} if conversation_input else {}),
             **({"evaluation_time": evaluation_time} if evaluation_time is not None else {}),
             **({"query_image_meta": item_dict["query_image_meta"]} if item.query_images else {}),

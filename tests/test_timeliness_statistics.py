@@ -16,6 +16,9 @@ def dataset(scores=((3, 2),), revision=None):
     if legacy:
         from auto_eval.judges.timeliness_schema_r100 import finalize_timeliness_observation
         from auto_eval.judges.visual_compare_prompt_timeliness_r100 import output_example
+    elif protocol.result_schema_version == "timeliness-result-2":
+        from auto_eval.judges.timeliness_schema_r101 import finalize_timeliness_observation
+        from auto_eval.judges.visual_compare_prompt_timeliness_r101 import output_example
     else:
         from auto_eval.judges.timeliness_schema import finalize_timeliness_observation
         from auto_eval.judges.visual_compare_prompt_timeliness import output_example

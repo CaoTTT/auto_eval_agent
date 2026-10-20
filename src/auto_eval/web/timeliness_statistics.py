@@ -18,6 +18,40 @@ STATUS_LABELS = {
     "inactive_product": "非活动产品",
 }
 GATES = ("pass", "fail", "unclear")
+CONFLICT_LABELS = {
+    "yes": "有冲突", "no": "无冲突", "unclear": "不确定",
+    "not_collected": "未采集（旧协议）", "invalid_state": "结果缺失或异常",
+    "identity_error": "协议身份异常", "technical_failure": "技术失败",
+    "unfinished": "未完成", "input_failed": "采集失败，待核验",
+}
+
+
+def conflict_state(case, protocol=None) -> str:
+    """A conflict is one cross-product observation per case, never a score."""
+    if case.status != "done":
+        return "technical_failure" if case.status == "failed" else "unfinished"
+    if case.identity_diagnostic:
+        return "identity_error"
+    schema = protocol.result_schema_version if protocol else case.result.get("result_schema_version")
+    if schema in ("timeliness-result-1", "timeliness-result-2"):
+        return "not_collected"
+    if schema != "timeliness-result-3":
+        return "identity_error"
+    if any(case.result.get(f"answer{product}_input_status") == "failed"
+           for product in range(1, case.product_count + 1)):
+        # Keep the model's raw observation (including a possible conflict among
+        # two readable products), but do not infer reliable pairs from prose.
+        return "input_failed"
+    value, reason = case.result.get("has_conflict"), case.result.get("conflict_reason")
+    return value if value in ("yes", "no", "unclear") and isinstance(reason, str) and reason.strip() else "invalid_state"
+
+
+def conflict_metrics(cases, protocol=None) -> dict:
+    counts = Counter(conflict_state(case, protocol) for case in cases)
+    known = counts["yes"] + counts["no"]
+    return {**{f"conflict_{state}": counts[state] for state in CONFLICT_LABELS},
+            "conflict_known": known, "conflict_total": len(cases),
+            "conflict_rate": counts["yes"] / known if known else None}
 
 
 def _simplified_score_state(row: dict, product: int, dimension: str) -> tuple[str, int | None]:
@@ -77,7 +111,7 @@ def timeliness_score_state(case, product: int, dimension: str, protocol=None) ->
     if row.get(f"answer{product}_input_status") == "failed":
         return "input_failed", None
     schema = protocol.result_schema_version if protocol else row.get("result_schema_version")
-    if schema == "timeliness-result-2":
+    if schema in ("timeliness-result-2", "timeliness-result-3"):
         return _simplified_score_state(row, product, dimension)
     gates = [row.get(f"answer{product}_{gate}_gate") for gate in ("response", "safety")]
     applicable = row.get(prefix + "_applicable")
@@ -175,6 +209,15 @@ def timeliness_statistics(snapshot: dict, aligned_results: list[dict]):
         gate = StatisticsTable(title + "Gate三态（独立于评分样本）",
             ("产品", "Gate", "可观察数", "通过", "不通过", "不确定", "状态缺失", "理解1分"),
             ("text", "text", "count", "count", "count", "count", "count", "count"))
+        conflicts = StatisticsTable(title + "内容冲突（逐题跨产品）",
+            ("项目", "数量", "明确判断分母", "明确冲突率", "说明"),
+            ("text", "count", "count", "percent", "text"))
+        metrics = conflict_metrics(group, protocol)
+        for state, label in CONFLICT_LABELS.items():
+            conflicts.rows.append([label, metrics[f"conflict_{state}"],
+                metrics["conflict_known"] if state == "yes" else None,
+                metrics["conflict_rate"] if state == "yes" else None,
+                "yes/(yes+no)；每题计一次，不归责产品、不扣分；不确定、未采集及采集失败不计入分母" if state == "yes" else ""])
         for p in range(1, count + 1):
             observed = [c for c in group if gate_observable(c, p)]
             for g in ("response", "safety"):
@@ -205,7 +248,7 @@ def timeliness_statistics(snapshot: dict, aligned_results: list[dict]):
                 for p in range(1, n + 1):
                     common.rows.append([DIMENSION_NAMES[dim], n, name(p), len(valid),
                                         mean(row[p - 1] for row in valid) if valid else None])
-        return [overview, pair, common, gate]
+        return [overview, pair, common, gate, conflicts]
     result = [info, *tables(cases)]
     for label, group in _subgroups(cases):
         result.extend(tables(group, label + " / "))

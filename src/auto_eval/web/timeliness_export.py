@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from .protocol_identity import recover_protocol_identity, require_snapshot_protocol
-from .timeliness_statistics import DIMENSION_NAMES, STATUS_LABELS, timeliness_score_state
+from .timeliness_statistics import CONFLICT_LABELS, DIMENSION_NAMES, STATUS_LABELS, conflict_state, timeliness_score_state
 
 
 def timeliness_export_rows(snapshot: dict, results: list[dict]) -> list[dict]:
@@ -45,7 +45,7 @@ def timeliness_export_rows(snapshot: dict, results: list[dict]) -> list[dict]:
             row[label + "理由（维度共享）"] = result.get(dim + "_reason", "")
             for p in range(1, count + 1):
                 prefix, name = f"answer{p}_{dim}", f"产品{p}{label}"
-                if manifest.get("result_schema_version") == "timeliness-result-2":
+                if manifest.get("result_schema_version") in ("timeliness-result-2", "timeliness-result-3"):
                     if dim != "understanding":
                         row[name + "NA原因"] = result.get(prefix + "_na_reason")
                 else:
@@ -56,6 +56,14 @@ def timeliness_export_rows(snapshot: dict, results: list[dict]) -> list[dict]:
                 row[name + "分"] = score
                 if score is None and result.get(prefix + "_score") is not None:
                     row[name + "原始异常分"] = result[prefix + "_score"]
+        state = conflict_state(case, protocol) if recovered["executable"] else "identity_error"
+        if manifest.get("result_schema_version") == "timeliness-result-3":
+            row["内容冲突理由"] = result.get("conflict_reason", "")
+            verdict = result.get("has_conflict")
+            label = CONFLICT_LABELS.get(verdict, verdict) if isinstance(verdict, str) else verdict
+            row["内容冲突"] = f"采集失败，待核验（模型：{label}）" if state == "input_failed" else label
+            row["模型内容冲突原始值"] = verdict
+        row["内容冲突采集状态"] = CONFLICT_LABELS.get(state, state)
         for key, label in (("needs_human_review", "是否需要人工复核"), ("review_reasons", "人工复核原因"),
                            ("standard_source_sha256", "标准源文件SHA256"), ("prompt_sha256", "Prompt SHA256"),
                            ("input_manifest_sha256", "输入指纹"), ("trusted_collection_metadata", "可信采集元数据"),

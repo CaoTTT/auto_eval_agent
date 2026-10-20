@@ -62,7 +62,7 @@ def test_template_import_publish_export_roundtrip_new_statuses(tmp_path, count):
         "人工是否适用_产品2_时效性": True, "人工核验状态_产品2_时效性": "unverifiable",
     }, count)
     assert mapping.human_standard_id == "timeliness_compare"
-    assert mapping.human_result_schema_version == "timeliness-result-2"
+    assert mapping.human_result_schema_version == "timeliness-result-3"
     parsed = parse_human_labels(path, mapping)
     assert not parsed["issues"]
     store = HumanStore(tmp_path / "store")
@@ -128,10 +128,10 @@ def test_old_standard_template_cannot_be_relabelled_as_timeliness(tmp_path):
         parse_human_labels(path, ImportMapping(**mapping))
 
 
-@pytest.mark.parametrize("revision", (None, "1.0.0"))
+@pytest.mark.parametrize("revision", (None, "1.0.0", "1.0.1"))
 def test_human_alignment_statistics_report_share_reasons_without_winners(tmp_path, revision):
     _, snapshot, baseline, mapping = timeliness_example(3, revision=revision)
-    if revision is None:
+    if revision != "1.0.0":
         for result in snapshot["results"]:
             for product in (1, 2, 3):
                 for dimension in ("understanding", "authority", "timeliness"):
@@ -142,6 +142,12 @@ def test_human_alignment_statistics_report_share_reasons_without_winners(tmp_pat
     assert all(r["comparable"] for r in rows)
     assert rows[0]["model_reason"] == snapshot["results"][0]["authority_reason"]
     assert rows[0]["model_reason_scope"] == "dimension_shared"
+    if revision is None:
+        assert rows[0]["model_conflict_reason"] == snapshot["results"][0]["conflict_reason"]
+        assert rows[0]["model_has_conflict"] == snapshot["results"][0]["has_conflict"]
+        assert rows[0]["model_conflict_status"] in ("有冲突", "无冲突", "不确定")
+    else:
+        assert "model_has_conflict" not in rows[0]
     metrics = build_human_statistics(rows, ["test"], ["p1", "p2", "p3"], ["authority"])
     assert metrics["pairs"] == metrics["ranks"] == []
     assert all(s["n"] == 2 for s in metrics["scores"])
@@ -158,6 +164,13 @@ def test_human_alignment_statistics_report_share_reasons_without_winners(tmp_pat
         headers = next(wb["匹配与排除"].values)
         assert any("模型理由（维度共享完整原文）" in str(v) for v in headers)
         if revision is None:
+            conflict_reason = next(i for i, value in enumerate(headers) if str(value).endswith("模型内容冲突理由（同题跨产品）"))
+            conflict_verdict = next(i for i, value in enumerate(headers) if str(value).endswith("模型内容冲突（不计入数字一致性）"))
+            conflict_status = next(i for i, value in enumerate(headers) if str(value).endswith("模型内容冲突状态（程序判定）"))
+            assert conflict_reason < conflict_status < conflict_verdict
+        else:
+            assert not any("模型内容冲突" in str(v) for v in headers)
+        if revision != "1.0.0":
             assert not any("模型核验状态" in str(v) or "模型适用性" in str(v) for v in headers)
             assert any("模型NA原因" in str(v) for v in headers)
         else:
@@ -196,7 +209,7 @@ def test_new_downloaded_template_can_be_imported_without_excel_resave(tmp_path):
     path = tmp_path / "fresh-download.xlsx"
     path.write_bytes(build_human_template(snapshot, "timeliness_compare@1.0"))
     mapping = inspect_workbook(path)["suggested_mapping"]
-    assert mapping["human_result_schema_version"] == "timeliness-result-2"
+    assert mapping["human_result_schema_version"] == "timeliness-result-3"
     assert len(mapping["labels"]) == 6
     mapping["policy_note"] = "直接下载的空白模板"
     parsed = parse_human_labels(path, ImportMapping(**mapping))
@@ -213,3 +226,16 @@ def test_old_timeliness_human_baseline_still_aligns_old_frozen_model():
     assert all(r["model_verification_status"] == "verified" for r in rows)
     metrics = build_human_statistics(rows, ["test"], ["p1", "p2"], ["authority"])
     assert all(metric["n"] == 2 for metric in metrics["scores"])
+
+
+@pytest.mark.parametrize("count,verdict", ((2, "no"), (3, "yes")))
+def test_human_context_marks_failed_collection_without_rewriting_raw_conflict(count, verdict):
+    _, snapshot, baseline, mapping = timeliness_example(count)
+    snapshot["results"][0].update(has_conflict=verdict, conflict_reason="保留原始跨产品对比判断。",
+                                 **{f"answer{count}_input_status": "failed"})
+    rows = align_baseline_to_run(baseline, snapshot, mapping, ["case-0", "case-1"], ["authority"], "same_standard")
+    failed_case = [row for row in rows if row["case_id"] == "case-0"]
+    assert failed_case
+    assert all(row["model_conflict_status"] == "采集失败，待核验" for row in failed_case)
+    assert all(row["model_has_conflict"] == verdict for row in failed_case)
+    assert all(row["model_conflict_reason"] == "保留原始跨产品对比判断。" for row in failed_case)

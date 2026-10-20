@@ -1,4 +1,5 @@
 """Timeliness contract and state precedence; no real judge requests."""
+import hashlib
 import json
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from auto_eval.judges.timeliness_schema import (
     TimelinessObservation, allowed_output_keys, expected_output_keys, output_key_errors,
 )
 from auto_eval.judges.timeliness_schema_r100 import TimelinessObservation as FrozenObservation
+from auto_eval.judges.timeliness_schema_r101 import TimelinessObservation as FrozenCompactObservation
 from auto_eval.judges.visual_compare_judge import visual_compare_result_fields
 from auto_eval.judges.visual_compare_prompt_timeliness import (
     SOURCE_ANCHORS, output_example, render_system_prompt,
@@ -20,6 +22,10 @@ from auto_eval.judges.visual_compare_prompt_timeliness import (
 from auto_eval.judges.visual_compare_prompt_timeliness_r100 import (
     SOURCE_ANCHORS as FROZEN_SOURCE_ANCHORS, output_example as frozen_output_example,
     render_system_prompt as render_frozen_system_prompt,
+)
+from auto_eval.judges.visual_compare_prompt_timeliness_r101 import (
+    output_example as frozen_compact_output_example,
+    render_system_prompt as render_frozen_compact_system_prompt,
 )
 
 
@@ -37,11 +43,11 @@ def finalize(data, count=2, trusted=None):
 
 
 def test_registry_preserves_default_and_pins_new_protocol():
-    protocol = resolve_compare_protocol(PROFILE, "1.0.1")
+    protocol = resolve_compare_protocol(PROFILE, "1.0.2")
     assert protocol.display == "时效性评估V1·1-3分（候选）"
     assert protocol.observation_model is TimelinessObservation
     assert protocol.score_dimensions == DIMS
-    assert protocol.result_schema_version == "timeliness-result-2"
+    assert protocol.result_schema_version == "timeliness-result-3"
     assert resolve_compare_protocol(PROFILE) == protocol
     assert sum(p.id == PROFILE for p in list_compare_protocols()) == 1
     assert resolve_compare_protocol(None).id == DEFAULT_COMPARE_PROTOCOL_ID
@@ -70,12 +76,44 @@ def test_legacy_revision_retains_old_model_prompt_and_results(count):
 
 
 @pytest.mark.parametrize("count", [2, 3])
+def test_frozen_compact_revision_retains_its_own_contract(count):
+    protocol = resolve_compare_protocol(PROFILE, "1.0.1")
+    assert protocol.observation_model is FrozenCompactObservation
+    assert protocol.result_schema_version == "timeliness-result-2"
+    data = json.loads(frozen_compact_output_example(count))
+    assert len(data) == 7 * count + 6
+    observation = protocol.observation_model.model_validate(data, context={"product_count": count})
+    result = visual_compare_result_fields(observation, protocol)
+    assert result["bundle_revision"] == "1.0.1"
+    assert result["result_schema_version"] == "timeliness-result-2"
+    assert "has_conflict" not in result and "conflict_reason" not in result
+    assert protocol.system_template.render(product_count=count) == render_frozen_compact_system_prompt(
+        product_count=count)
+    with pytest.raises(ValidationError, match="缺少字段"):
+        TimelinessObservation.model_validate(data, context={"product_count": count})
+    with pytest.raises(ValidationError, match="多余字段"):
+        FrozenCompactObservation.model_validate(payload(count), context={"product_count": count})
+
+
+@pytest.mark.parametrize("name,original_sha256", [
+    ("timeliness_schema", "18d43bacf8d098f63b15d2e70143015c81ad5e5235d8d300638d7cabb4417682"),
+    ("visual_compare_prompt_timeliness", "08c3b1ed4f701a9338531e2b746cd8d89ecd43f5ec24f31ed3c40b1e1d92f941"),
+])
+def test_frozen_compact_sources_match_pre_conflict_revision(name, original_sha256):
+    # Pins the exact pre-upgrade sources without requiring Git in deployed tests.
+    source = Path(f"src/auto_eval/judges/{name}_r101.py").read_text(encoding="utf-8")
+    source = source.replace("from .timeliness_schema_r101 import (", "from .timeliness_schema import (")
+    assert hashlib.sha256(source.encode("utf-8")).hexdigest() == original_sha256
+
+
+@pytest.mark.parametrize("count", [2, 3])
 @pytest.mark.parametrize("mode", ["video_frames", "long_screenshot"])
 def test_exact_single_response_shape_and_reason_order(count, mode):
     data = payload(count)
     assert tuple(data) == expected_output_keys(count)
-    assert len(data) == 7 * count + 6
-    assert len(allowed_output_keys(count)) == 9 * count + 6
+    assert len(data) == 7 * count + 8
+    assert len(allowed_output_keys(count)) == 9 * count + 8
+    assert list(data)[-2:] == ["conflict_reason", "has_conflict"]
     system = render_system_prompt(product_count=count, evidence_mode=mode)
     assert json.loads(system[system.index('{\n  "answer1_response_gate_reason"'):]) == data
     assert "R20" in system and "C20" in system and "S3" in system
@@ -90,6 +128,56 @@ def test_exact_single_response_shape_and_reason_order(count, mode):
             assert f"answer{p}_{dim}_na_reason" not in result
     assert not any("winner" in k or "rank" in k or k == "total_score" for k in result)
     assert ("answer3_understanding_score" in result) == (count == 3)
+
+
+@pytest.mark.parametrize("state", ["yes", "no", "unclear"])
+@pytest.mark.parametrize("count", [2, 3])
+def test_conflict_status_retains_observation_without_changing_scores(state, count):
+    data = {**payload(count), "has_conflict": state}
+    data["conflict_reason"] = "产品1与产品2：同一政策日期的可见证据需按原话核对。"
+    result = finalize(data, count)
+    assert result["has_conflict"] == state
+    assert result["conflict_reason"] == data["conflict_reason"]
+    assert result["needs_human_review"] is (state == "unclear")
+    assert bool(result["review_reasons"]) is (state == "unclear")
+    for product in range(1, count + 1):
+        for dimension in DIMS:
+            key = f"answer{product}_{dimension}_score"
+            assert result[key] == data[key] == 3
+    assert not any("conflict_score" in key for key in result)
+
+
+@pytest.mark.parametrize("value", [None, True, False, "YES", "NA", "", 1, "unknown"])
+def test_conflict_status_is_strict_enum(value):
+    with pytest.raises(ValidationError):
+        finalize({**payload(), "has_conflict": value})
+
+
+@pytest.mark.parametrize("value", [None, "", " ", "\n\t", 1, True, []])
+def test_conflict_reason_requires_nonblank_strict_text(value):
+    with pytest.raises(ValidationError):
+        finalize({**payload(), "conflict_reason": value})
+
+
+@pytest.mark.parametrize("status", ["yes", "no", "unclear"])
+def test_trusted_capture_failure_requests_review_without_rewriting_group_conflict(status):
+    data = payload(3)
+    reasons = {
+        "yes": "产品2与产品3：同日、同一园区分别明确称09:00和08:00开园。",
+        "no": "产品2与产品3：同日、同一园区均明确称09:00开园；产品1没有可比陈述。",
+        "unclear": "产品2与产品3开园时间不同，但产品3没有明确测试日期，不能排除日期不同。",
+    }
+    data.update(conflict_reason=reasons[status],
+                has_conflict=status)
+    trusted = {"answer1": {"input_status": "failed", "source": "test collector"}}
+    result = finalize(data, count=3, trusted=trusted)
+    assert result["has_conflict"] == status
+    assert result["conflict_reason"] == data["conflict_reason"]
+    assert result["needs_human_review"]
+    assert "产品1可信采集状态为failed" in result["review_reasons"]
+    for dimension in DIMS:
+        assert result[f"answer1_{dimension}_score"] is None
+        assert result[f"answer2_{dimension}_score"] == result[f"answer3_{dimension}_score"] == 3
 
 
 @pytest.mark.parametrize("score", [0, 4, True, False, 2.0, "2", -1])
@@ -191,7 +279,8 @@ def test_all_unblocked_na_fields_are_required_and_ordered_after_own_scores(count
             data[f"answer{p}_{dim}_na_reason"] = "insufficient_evidence"
     observation = TimelinessObservation.model_validate(data, context={"product_count": count})
     serialized = observation.model_dump()
-    assert len(serialized) == 9 * count + 6
+    assert len(serialized) == 9 * count + 8
+    assert list(serialized)[-2:] == ["conflict_reason", "has_conflict"]
     for p in range(1, count + 1):
         for dim in ("authority", "timeliness"):
             score, reason = f"answer{p}_{dim}_score", f"answer{p}_{dim}_na_reason"
@@ -276,9 +365,18 @@ def test_late_trusted_capture_failure_can_override_a_valid_raw_na_without_mutati
 
 
 def test_documented_future_effective_date_example_is_valid_exact_contract():
-    data = json.loads(Path("docs/examples/timeliness-result-v2.json").read_text(encoding="utf-8"))
+    data = json.loads(Path("docs/examples/timeliness-result-v3.json").read_text(encoding="utf-8"))
     assert tuple(data) == expected_output_keys(2)
     result = finalize(data)
     assert result["answer1_timeliness_score"] == 3
     assert result["answer2_understanding_score"] == 3
     assert result["answer2_timeliness_score"] == 1
+
+
+def test_documented_v2_example_remains_valid_for_frozen_compact_contract():
+    data = json.loads(Path("docs/examples/timeliness-result-v2.json").read_text(encoding="utf-8"))
+    protocol = resolve_compare_protocol(PROFILE, "1.0.1")
+    observation = protocol.observation_model.model_validate(data, context={"product_count": 2})
+    result = visual_compare_result_fields(observation, protocol)
+    assert result["answer2_timeliness_score"] == 1
+    assert "has_conflict" not in result and "conflict_reason" not in result
