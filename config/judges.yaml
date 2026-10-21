@@ -5,17 +5,84 @@ judges:
   - name: judge_2
     display: 终端用户
     runner: openai_compat
-    base_url: https://api.siliconflow.cn/v1
-    api_key_env: SILICON_FLOW_API_KEY
-    model: Qwen/Qwen3.5-397B-A17B
+    base_url: http://10.97.134.88:5162/v1
+    api_key_env: Caigo
+    model: qwen3.8-flash
     # 尽力减少同输入的输出波动；服务端计算、路由或模型更新仍可能产生差异。
     temperature: 0
     top_p: 1
     top_k: 1
-    seed: 42                  # 固定请求种子；SiliconFlow 文档未保证支持或逐字复现
+    seed: 42
     frequency_penalty: 0
     n: 1
     max_tokens: 8192
     enable_thinking: false
     persona: end_user
     concurrency: 3
+    vl_high_resolution_images: true
+    total_timeout_s: 300
+    read_timeout_s: 90
+
+
+default_judge_model_profile: bailian_qwen38_flash
+judge_model_profiles:
+  - id: bailian_qwen35_397b
+    display: Qwen3.5-397B-A17B(采购)
+    judge_name: judge_2
+    model: qwen3.5-397b-a17b
+    supports_thinking: false
+    base_url: http://10.97.134.88:5162/v1
+    api_key_env: Caigo
+  - id: bailian_qwen38_flash
+    display: Qwen3.8-Flash(采购)
+    judge_name: judge_2
+    model: qwen3.8-flash
+    supports_thinking: false
+    base_url: http://10.97.134.88:5162/v1
+    api_key_env: Caigo
+  - id: qwen3.5-397b-a17b-xiaohang
+    display: Qwen3.5-397B-A17B (xiaohang)
+    judge_name: judge_2
+    model: qwen3.5-397b-a17b
+    supports_thinking: true
+    default_enable_thinking: true
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key_env: Lin
+  - id: qwen3.8-flash-xiaohang
+    display: Qwen3.8-Flash (xiaohang)
+    judge_name: judge_2
+    model: qwen3.8-flash
+    supports_thinking: true
+    default_enable_thinking: true
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key_env: Lin
+  - id: qwen3.5-397b-a17b-zimo
+    display: Qwen3.5-397B-A17B (zimo)
+    judge_name: judge_2
+    model: qwen3.5-397b-a17b
+    supports_thinking: true
+    default_enable_thinking: true
+    base_url: https://llm-62rq0bg4qrp2uy30.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+    api_key_env: ALI
+  - id: qwen3.8-flash-zimo
+    display: Qwen3.8-Flash (zimo)
+    judge_name: judge_2
+    model: qwen3.8-flash
+    supports_thinking: true
+    default_enable_thinking: true
+    base_url: https://llm-62rq0bg4qrp2uy30.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+    api_key_env: ALI
+
+
+
+# https://llm-62rq0bg4qrp2uy30.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+# ALI
+# qwen3.5-397b-a17b
+
+# https://api.siliconflow.cn/v1
+# SILICON_FLOW_API_KEY
+# Qwen/Qwen3.5-397B-A17B
+
+# https://dashscope.aliyuncs.com/compatible-mode/v1
+# Lin
+# qwen3.5-397b-a17b

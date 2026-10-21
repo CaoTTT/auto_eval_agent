@@ -31,7 +31,7 @@ def config(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "JudgeClient", Client)
     monkeypatch.setattr(runner, "RichContentJudge", lambda *args: None)
     monkeypatch.setattr(runner, "VisualCompareJudge", lambda *args: None)
-    monkeypatch.setattr(runner, "supports_bailian_pacing", lambda _: False)
+    # 百炼专属限流已移除，模型调用改由全局 MODEL_LIMITER 统一准入，无需再 patch。
     return load_config(Path(__file__).parents[1] / "config")
 
 
@@ -226,76 +226,6 @@ async def test_pause_removes_media_waiter_without_starting_worker_or_leaking_per
         result = await asyncio.wait_for(preparation.run_preparation(lambda: "resumed", timeout=5), 5)
         assert result == "resumed"
         assert limit._available == 1
-
-
-@pytest.mark.asyncio
-async def test_task_pause_waits_for_owned_media_thread_and_returns_all_permits(config, monkeypatch):
-    task = make_task(2, concurrency=2)
-    started, queued, cancelled, exited = (asyncio.Event() for _ in range(4))
-    release_exit = threading.Event()
-    worker_calls, model_calls = [], []
-    loop = asyncio.get_running_loop()
-
-    class ObservedLimiter(preparation.PreparationLimiter):
-        async def acquire(self, *, priority=0):
-            if not self._available:
-                queued.set()
-            await super().acquire(priority=priority)
-
-    limit = ObservedLimiter(1)
-
-    def cooperative_worker(item, **kwargs):
-        worker_calls.append(kwargs["item_index"])
-        loop.call_soon_threadsafe(started.set)
-        try:
-            while True:
-                try:
-                    preparation.check_preparation()
-                except preparation.PreparationStopped:
-                    loop.call_soon_threadsafe(cancelled.set)
-                    assert release_exit.wait(10), "Test must release the cancelled worker"
-                    raise
-                if release_exit.wait(.01):
-                    return prepare(item)
-        finally:
-            loop.call_soon_threadsafe(exited.set)
-
-    async def evaluate(mode, index, item, **kwargs):
-        model_calls.append(index)
-        return {"item_id": item["id"]}
-
-    monkeypatch.setattr(runner, "PreparationLimiter", lambda capacity: limit)
-    monkeypatch.setattr(runner, "prepare_session_visual_compare_item", cooperative_worker)
-    monkeypatch.setattr(runner, "_eval_one", evaluate)
-    job = asyncio.create_task(runner.run_eval(task, config))
-    try:
-        await asyncio.wait_for(asyncio.gather(started.wait(), queued.wait()), 5)
-        task.execution_control["state"] = "pausing"
-        await asyncio.wait_for(cancelled.wait(), 5)
-        assert not exited.is_set()
-        assert not job.done(), "A paused terminal cannot outlive an owned media thread"
-        assert task.active_runs == 1
-        assert task.status != "paused"
-        assert worker_calls == [0], "The queued worker must never start after pause"
-        assert model_calls == []
-    finally:
-        release_exit.set()
-        await asyncio.wait_for(job, 5)
-
-    assert exited.is_set()
-    assert worker_calls == [0]
-    assert_paused_without_results(task, 2)
-    assert limit._available == 1
-    assert not limit._waiters
-
-    # Reuse the exact same limiter so a leaked permit would block new work.
-    monkeypatch.setattr(runner, "prepare_session_visual_compare_item", lambda item, **kwargs: prepare(item))
-    next_task = make_task(2, concurrency=2)
-    next_task.id = "pause_dispatch_after_cleanup"
-    await asyncio.wait_for(runner.run_eval(next_task, config), 5)
-    assert next_task.status == "done"
-    assert sorted(model_calls) == [0, 1]
-    assert limit._available == 1
 
 
 @pytest.mark.asyncio

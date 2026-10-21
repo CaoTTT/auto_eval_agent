@@ -3,6 +3,7 @@ import hashlib
 import io
 import random
 import zipfile
+from datetime import datetime, timezone
 from urllib.parse import unquote
 
 import httpx
@@ -10,7 +11,7 @@ import pytest
 from openpyxl import load_workbook
 from PIL import Image
 
-from auto_eval.web import exports, history, server
+from auto_eval.web import compare_statistics, exports, history, server
 from auto_eval.web.tasks import Task
 
 
@@ -32,6 +33,13 @@ def image_snapshot(tmp_path, *, mode="compare"):
 
 @pytest.mark.parametrize("mode", ["compare", "rich_content"])
 def test_no_images_preserves_data_links_and_skips_embedding(tmp_path, monkeypatch, mode):
+    class ExportClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 10, 21, tzinfo=timezone.utc).astimezone(tz)
+
+    # Compare image options at the same export time, even across a clock tick.
+    monkeypatch.setattr(compare_statistics, "datetime", ExportClock)
     snapshot = image_snapshot(tmp_path, mode=mode)
     full = history.build_xlsx(snapshot)
     with zipfile.ZipFile(io.BytesIO(full)) as archive:

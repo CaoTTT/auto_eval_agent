@@ -2,10 +2,17 @@
 
 A pause is local to its async call chain. Response streams already dispatched
 must never be wrapped in ``pause_aware``: they finish and settle normally.
+
+Also hosts the deadline helpers ``wait_for_active`` / ``admission_wait`` that
+let an outer evaluation timeout exclude local admission/cooldown waits. These
+were originally part of the Bailian-specific request throttle and are kept
+here (independent of any limiter) because the web runner and stream layer use
+them for per-item / per-request timeouts.
 """
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -62,3 +69,67 @@ call ``check_pause`` inside their cleanup scope. For resource acquisitions,
         if on_cancel is not None and not operation.cancelled() and operation.exception() is None:
             on_cancel(operation.result())
         raise
+
+
+class _ActiveClock:
+    def __init__(self):
+        self.started = time.monotonic()
+        self.paused_at = None
+        self.paused = 0.0
+        self.depth = 0
+        self.changed = asyncio.Event()
+
+    def elapsed(self):
+        return (self.paused_at if self.depth else time.monotonic()) - self.started - self.paused
+
+
+_active_clocks: ContextVar[tuple[_ActiveClock, ...]] = ContextVar("llm_active_clocks", default=())
+
+
+@contextmanager
+def admission_wait():
+    """Exclude local admission/cooldown waits from the outer evaluation deadline."""
+    clocks = _active_clocks.get()
+    for clock in clocks:
+        if clock.depth == 0:
+            clock.paused_at = time.monotonic()
+        clock.depth += 1
+        clock.changed.set()
+    try:
+        yield
+    finally:
+        for clock in clocks:
+            clock.depth -= 1
+            if clock.depth == 0:
+                clock.paused += time.monotonic() - clock.paused_at
+                clock.paused_at = None
+            clock.changed.set()
+
+
+async def wait_for_active(awaitable: Awaitable[_T], timeout: float) -> _T:
+    """Like wait_for, with a deadline paused only by explicit admission waits."""
+    clock = _ActiveClock()
+    token = _active_clocks.set((*_active_clocks.get(), clock))
+    try:
+        task = asyncio.ensure_future(awaitable)
+    finally:
+        _active_clocks.reset(token)
+    signal = None
+    try:
+        while not task.done():
+            clock.changed.clear()
+            remaining = timeout - clock.elapsed()
+            if remaining <= 0:
+                raise asyncio.TimeoutError()
+            signal = asyncio.create_task(clock.changed.wait())
+            await asyncio.wait({task, signal}, timeout=None if clock.depth else remaining,
+                               return_when=asyncio.FIRST_COMPLETED)
+            signal.cancel()
+            await asyncio.gather(signal, return_exceptions=True)
+        return task.result()
+    finally:
+        if signal is not None:
+            signal.cancel()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, *([signal] if signal else []), return_exceptions=True)

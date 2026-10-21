@@ -1,4 +1,5 @@
 import asyncio
+import json
 from types import SimpleNamespace
 
 import httpx
@@ -7,12 +8,15 @@ import pytest
 from auto_eval.llm_stream import ProviderStreamError, stream_chat_completion
 
 
-def _chunk(content=None, *, finish=None, tool_calls=None, usage=None, error=None):
+def _chunk(content=None, *, finish=None, tool_calls=None, usage=None, error=None, reasoning=None):
     choices = []
-    if content is not None or finish is not None or tool_calls:
+    if content is not None or finish is not None or tool_calls or reasoning is not None:
+        delta = SimpleNamespace(content=content, tool_calls=tool_calls)
+        if reasoning is not None:
+            delta.reasoning_content = reasoning
         choices = [
             SimpleNamespace(
-                delta=SimpleNamespace(content=content, tool_calls=tool_calls),
+                delta=delta,
                 finish_reason=finish,
             )
         ]
@@ -242,4 +246,54 @@ async def test_stream_does_not_retry_blocked_error_chunk():
         )
 
     assert exc_info.value.retriable is False
+    assert len(completions.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_keeps_reasoning_out_of_answers_and_retry(monkeypatch):
+    events = []
+    monkeypatch.setattr(
+        "auto_eval.llm_stream.log_event",
+        lambda _module, event, **_kwargs: events.append(event),
+    )
+    client, completions = _client([
+        [_chunk(reasoning="private first thought"), _chunk("discard"),
+         httpx.RemoteProtocolError("closed")],
+        [_chunk(reasoning="private second thought"), _chunk('{"score":'), _chunk("4}", finish="stop")],
+    ])
+    output = []
+
+    response = await stream_chat_completion(
+        client,
+        {"model": "fake-model", "messages": [], "extra_body": {"enable_thinking": True}},
+        callback=output.append,
+        max_attempts=2,
+        retry_base_s=0,
+    )
+
+    assert len(completions.requests) == 2
+    assert response.choices[0].message.content == '{"score":4}'
+    assert output == ['{"score":', '4}']
+    assert response.stream_stats["思考chunk数"] == 1
+    assert response.stream_stats["首响应耗时"] <= response.stream_stats["首答案耗时"]
+    assert any(event == "模型思考中" for event in events)
+    assert "private" not in json.dumps(events, ensure_ascii=False, default=str)
+    assert "private" not in repr(response)
+
+
+@pytest.mark.asyncio
+async def test_truncated_reasoning_only_is_not_blindly_retried():
+    client, completions = _client([
+        [_chunk(reasoning="private", finish="length")],
+    ])
+
+    with pytest.raises(ProviderStreamError, match="仅返回思考内容") as caught:
+        await stream_chat_completion(
+            client,
+            {"model": "fake-model", "messages": []},
+            max_attempts=4,
+        )
+
+    assert not caught.value.retriable
+    assert "private" not in str(caught.value.body)
     assert len(completions.requests) == 1

@@ -131,10 +131,13 @@ class JudgeModelProfile(BaseModel):
     default_enable_thinking: StrictBool | None = None
     rate_limit: RateLimitConfig | None = None
     total_timeout_s: float | None = Field(default=None, gt=0)
+    base_url: str | None = None
+    api_key_env: str | None = None
 
 
 class AppConfig(BaseModel):
     judges: list[JudgeConfig]
+    models: list[str] = Field(default_factory=list)  # 可选模型名列表（全局设置只能从中选择）
     visual_modes: dict[str, VisualModeProfile] = Field(default_factory=dict)
     judge_model_profiles: list[JudgeModelProfile] = Field(default_factory=list)
     default_judge_model_profile: str | None = None
@@ -163,9 +166,10 @@ def load_config(config_dir: str | Path) -> AppConfig:
     judges_data = _read_yaml(config_dir / "judges.yaml") or {}
 
     judges = [JudgeConfig(**j) for j in (judges_data.get("judges") or [])]
+    models = [str(m) for m in (judges_data.get("models") or [])]
     visual_modes = _load_visual_modes(config_dir)
     config = AppConfig(
-        judges=judges, visual_modes=visual_modes,
+        judges=judges, models=models, visual_modes=visual_modes,
         judge_model_profiles=judges_data.get("judge_model_profiles") or [],
         default_judge_model_profile=judges_data.get("default_judge_model_profile"),
     )

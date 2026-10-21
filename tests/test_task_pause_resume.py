@@ -1,6 +1,7 @@
 """Cooperative stop, durable checkpoints and resume selection (no model calls)."""
 import asyncio
 import copy
+import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -11,6 +12,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from auto_eval.config import AppConfig, JudgeConfig, load_config
+from auto_eval.llm_stream import stream_chat_completion
 from auto_eval.web import history, persistence, runner, scheduler, server, tasks
 from auto_eval.web.execution_control import resume_indexes
 from auto_eval.web.tasks import Task, latest_results_by_index
@@ -42,8 +44,47 @@ def fake_clients(monkeypatch):
     monkeypatch.setattr(runner, "JudgeClient", Client)
     monkeypatch.setattr(runner, "RichContentJudge", lambda *a: None)
     monkeypatch.setattr(runner, "VisualCompareJudge", lambda *a: None)
-    monkeypatch.setattr(runner, "supports_bailian_pacing", lambda _: False)
     return load_config(Path(__file__).parents[1] / "config")
+
+
+@pytest.fixture
+async def model_limiter(monkeypatch):
+    """Isolate dispatch limits while keeping the real stream admission boundary."""
+    limiter = scheduler.TokenBucketRateLimiter(rate=64, max_in_flight=2)
+    pipeline = scheduler.ResizableLimiter(64)
+    for module in (scheduler, runner):
+        monkeypatch.setattr(module, "MODEL_LIMITER", limiter)
+        monkeypatch.setattr(module, "PIPELINE_LIMITER", pipeline)
+    try:
+        yield limiter
+    finally:
+        if limiter._minter is not None:
+            limiter._minter.cancel()
+            await asyncio.gather(limiter._minter, return_exceptions=True)
+
+
+async def fake_model_call(on_send):
+    """Fake only the SDK response, so pause/permit cleanup uses production code."""
+    class Stream:
+        def __init__(self, result):
+            self.result = result
+
+        async def __aiter__(self):
+            yield SimpleNamespace(choices=[SimpleNamespace(
+                delta=SimpleNamespace(content=json.dumps(self.result)), finish_reason="stop",
+            )])
+
+        async def close(self):
+            pass
+
+    async def create(**kwargs):
+        return Stream(await on_send())
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    response = await stream_chat_completion(
+        client, {"model": "fake-model", "messages": []}, max_attempts=1,
+    )
+    return json.loads(response.choices[0].message.content)
 
 
 def queue_resume(task, indexes, concurrency=3):
@@ -56,35 +97,42 @@ def queue_resume(task, indexes, concurrency=3):
 
 
 @pytest.mark.asyncio
-async def test_pause_drains_inflight_then_resume_uses_new_semaphore(storage, monkeypatch):
+async def test_pause_drains_inflight_then_resume_uses_updated_global_limit(storage, monkeypatch, model_limiter):
     task = make_task(7)
     cfg = fake_clients(monkeypatch)
     started, release = asyncio.Event(), asyncio.Event()
     calls, active, peak = [], 0, 0
 
     async def evaluate(mode, index, item, **kwargs):
-        nonlocal active, peak
-        calls.append(index)
-        active += 1
-        peak = max(peak, active)
-        if len(calls) == 2:
-            started.set()
-        await release.wait()
-        await asyncio.sleep(.01)
-        active -= 1
-        return {"item_id": item["id"], "query": item["query"]}
+        async def on_send():
+            nonlocal active, peak
+            calls.append(index)
+            active += 1
+            peak = max(peak, active)
+            try:
+                if active == model_limiter.stats()["max_in_flight"]:
+                    started.set()
+                await release.wait()
+                return {"item_id": item["id"], "query": item["query"]}
+            finally:
+                active -= 1
+
+        return await fake_model_call(on_send)
 
     monkeypatch.setattr(runner, "_eval_one", evaluate)
     events = task.subscribe()
     job = asyncio.create_task(runner.run_eval(task, cfg))
-    await asyncio.wait_for(started.wait(), 3)
-    task.execution_control.update(state="pausing")
-    await asyncio.sleep(.02)
-    assert not job.done() and len(calls) == 2
-    release.set()
-    await asyncio.wait_for(job, 3)
+    try:
+        await asyncio.wait_for(started.wait(), 3)
+        task.execution_control.update(state="pausing")
+        await asyncio.sleep(.02)
+        assert not job.done() and len(calls) == 2
+    finally:
+        release.set()
+        await asyncio.wait_for(job, 3)
     assert task.status == "paused"
     assert task.active_runs == 0
+    assert model_limiter.stats()["running"] == model_limiter.stats()["queued"] == 0
     assert sorted(calls) == [0, 1]
     stored = history.load_snapshot(task.id)
     assert len(stored["results"]) == 2
@@ -95,11 +143,21 @@ async def test_pause_drains_inflight_then_resume_uses_new_semaphore(storage, mon
 
     restored = tasks._task_from_snapshot(stored, task.id)
     preserved = copy.deepcopy(restored.results)
+    model_limiter.set_max_in_flight(3)
     queue_resume(restored, resume_indexes(restored), concurrency=3)
     peak = 0
-    await runner.run_resume(restored, cfg)
+    started.clear()
+    release.clear()
+    job = asyncio.create_task(runner.run_resume(restored, cfg))
+    try:
+        await asyncio.wait_for(started.wait(), 3)
+        assert not job.done() and len(calls) == 5
+    finally:
+        release.set()
+        await asyncio.wait_for(job, 3)
     assert restored.status == "done"
     assert peak == 3
+    assert model_limiter.stats()["running"] == model_limiter.stats()["queued"] == 0
     assert sorted(calls) == list(range(7))
     assert restored.results[:2] == preserved
     assert restored.options["concurrency"] == 2
@@ -135,18 +193,26 @@ async def test_resume_sessions_rebuild_context_without_repeating_prefix(storage,
 
 
 @pytest.mark.asyncio
-async def test_resume_preserves_new_failures_and_can_pause_again(storage, monkeypatch):
+async def test_resume_preserves_new_failures_and_can_pause_again(storage, monkeypatch, model_limiter):
     task = make_task(4)
     cfg = fake_clients(monkeypatch)
     task.options["concurrency"] = 1
     queue_resume(task, [0, 1, 2, 3], concurrency=1)
+    model_limiter.set_max_in_flight(1)
+    calls = []
 
     async def evaluate(mode, index, item, **kwargs):
-        task.execution_control["state"] = "pausing"
-        return {"error": "provider failure"}
+        async def on_send():
+            calls.append(index)
+            task.execution_control["state"] = "pausing"
+            return {"error": "provider failure"}
+
+        return await fake_model_call(on_send)
 
     monkeypatch.setattr(runner, "_eval_one", evaluate)
     await runner.run_resume(task, cfg)
+    assert calls == [0]
+    assert model_limiter.stats()["running"] == model_limiter.stats()["queued"] == 0
     assert task.status == "paused"
     assert latest_results_by_index(task)[0]["error"] == "provider failure"
     assert task.execution_control["pending_indexes"] == [1, 2, 3]
@@ -228,6 +294,38 @@ async def test_resume_endpoint_idempotency_and_no_input_mutation(storage, monkey
 def test_resume_concurrency_is_strict(concurrency):
     with pytest.raises(ValidationError):
         server.ResumeReq(concurrency=concurrency)
+
+
+@pytest.mark.asyncio
+async def test_resume_accepts_missing_concurrency_and_falls_back(storage, monkeypatch):
+    """前端 resume 不再上报 concurrency 后，缺省回落任务既有并发值（不再 422）。"""
+    task = make_task(3)
+    task.judge_runtime = {"version": 1, "profile_id": "test", "judges": [
+        {"name": "judge", "model": "fake", "enable_thinking": False},
+    ]}
+    task.status, task.active_runs = "paused", 0
+    task.execution_control.update(state="paused", concurrency=3)
+
+    async def get(_):
+        return task
+
+    monkeypatch.setattr(server, "get_task_async", get)
+    monkeypatch.setattr(server, "cfg", lambda: AppConfig(judges=[
+        JudgeConfig(name="judge", model="fake", enable_thinking=False),
+    ]))
+
+    class Queue:
+        def enqueue(self, parent, cfg, fn):
+            parent.active_runs += 1
+            parent.status = "queued"
+            return 1
+
+    monkeypatch.setattr(server, "EVAL_SCHEDULER", Queue())
+    response = await server.api_resume(task.id, server.ResumeReq())  # 无 concurrency
+    attempt = task.execution_control["resumes"][-1]
+    assert response["status"] == "queued"
+    assert attempt["concurrency"] == 3  # 回落到 execution_control 既有值
+    assert task.execution_control["concurrency"] == 3
 
 
 def test_crash_preserves_resume_selection_and_attempt_audit():

@@ -57,7 +57,7 @@ async def test_scheduler_runs_tasks_fifo_without_overlap(monkeypatch):
     assert not started["b"].is_set()
     snapshot = scheduler.snapshot()
     assert snapshot["running"]["task_id"] == "a"
-    assert snapshot["running"]["concurrency"] == 15
+    assert snapshot["running"]["concurrency"] == scheduler_module.get_settings().concurrency
     assert snapshot["running"]["task_timing"]["running"] is True
     queued_timing = snapshot["queued"][0].pop("task_timing")
     assert queued_timing["elapsed_s"] is None
@@ -70,7 +70,7 @@ async def test_scheduler_runs_tasks_fifo_without_overlap(monkeypatch):
             "dataset_name": "dataset-b",
             "mode": "rich_content",
             "status": "queued",
-            "concurrency": 10,
+            "concurrency": scheduler_module.get_settings().concurrency,
             "done": 0,
             "total": 1,
             "created_at": task_b.created_at,

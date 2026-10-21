@@ -452,9 +452,11 @@ class JudgeClient:
         callback: Callable[[str], None] | None = None,
         max_attempts: int | None = None,
     ):
-        """流式调用 LLM，逐 token 回调，同时累积完整响应。"""
-        from ..request_throttle import shared_throttle
+        """流式调用 LLM，逐 token 回调，同时累积完整响应。
 
+        模型调用的速率/在途限流由外层 web 调度器的 MODEL_LIMITER 统一准入，
+        本层不再做百炼专属的 RequestThrottle 限流（对任何模型都生效）。
+        """
         return await stream_chat_completion(
             self.client,
             kwargs,
@@ -464,5 +466,4 @@ class JudgeClient:
             max_attempts=max_attempts or self.cfg.max_attempts,
             retry_base_s=self.cfg.retry_base_s,
             retry_max_s=self.cfg.retry_max_s,
-            throttle=shared_throttle(self.cfg),
         )

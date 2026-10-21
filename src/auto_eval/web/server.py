@@ -57,7 +57,13 @@ from .video_prepare import (
 )
 from .runner import run_eval, run_retry, run_resume, finish_pause, run_update_batch, spawn_background, snapshot_item_progress
 from .execution_control import resume_indexes
-from .scheduler import EvalScheduler
+from .scheduler import (
+    EvalScheduler,
+    MAX_CONCURRENCY, MAX_EVAL_TIMEOUT_S, MAX_MAX_IN_FLIGHT, MAX_WAITING_CAPACITY,
+    MIN_CONCURRENCY, MIN_EVAL_TIMEOUT_S, MIN_MAX_IN_FLIGHT, MIN_WAITING_CAPACITY,
+    MODEL_LIMITER, PIPELINE_LIMITER, get_settings,
+    apply_settings, load_persisted_settings, persist_settings,
+)
 from .exports import XlsxExports
 from .dataset_media import DatasetMedia, file_hash
 from .source_files import prepare_task_sources, source_file_path, store_upload
@@ -96,6 +102,7 @@ install_human_routes(app, lambda: HUMAN_COMPARISONS, lambda task_id: peek_task_a
 @app.on_event("startup")
 async def _load():
     _state["cfg"] = load_config(CONFIG_DIR)
+    load_persisted_settings()  # 加载 runs/web_settings.json，绝不让坏文件阻断启动
     await asyncio.to_thread(HUMAN_COMPARISONS.recover)
     EVAL_SCHEDULER.start()
 
@@ -159,7 +166,7 @@ class QueuePositionReq(BaseModel):
 
 
 class ResumeReq(BaseModel):
-    concurrency: int = Field(ge=1, le=128, strict=True)
+    concurrency: int | None = Field(default=None, ge=1, le=128, strict=True)
     include_failed: bool = False
     idempotency_key: str = Field(default="", max_length=128)
 
@@ -339,9 +346,11 @@ def _validate_batch_item_ids(items: list[dict]) -> None:
 
 @app.get("/api/config")
 def api_config():
-    from ..request_throttle import recommended_concurrency, supports_bailian_pacing
     from ..preparation import preparation_concurrency
 
+    # 模型并发改由全局 MODEL_LIMITER 统一管理；所有模型调用都走同一调度器，
+    # 前端据此轮询 /api/request-pacing 展示全局限流状态。
+    global_concurrency = get_settings().concurrency
     c = cfg()
     profiles = model_profiles(c)
     public_profiles = []
@@ -351,17 +360,20 @@ def api_config():
             "id": profile.id, "display": profile.display, "model": profile.model,
             "judge_name": profile.judge_name, "supports_thinking": profile.supports_thinking,
             "default_enable_thinking": profile.default_enable_thinking,
-            "recommended_concurrency": recommended_concurrency([judge]),
-            "request_pacing": supports_bailian_pacing(judge),
+            "recommended_concurrency": global_concurrency,
+            "request_pacing": True,
         })
     return {
         "judge_model_profiles": public_profiles,
         "default_judge_model_profile": default_profile_id(c, profiles),
         "media_concurrency": preparation_concurrency(),
+        "concurrency": global_concurrency,
+        "max_in_flight": MODEL_LIMITER.stats()["max_in_flight"],
+        "waiting_capacity": get_settings().waiting_capacity,
         "judges": [
             {"name": j.name, "display": j.display or j.name,
-             "recommended_concurrency": recommended_concurrency([j]),
-             "request_pacing": supports_bailian_pacing(j)}
+             "recommended_concurrency": global_concurrency,
+             "request_pacing": True}
             for j in c.judges
         ],
         "evaluation_profiles": [
@@ -425,33 +437,75 @@ async def api_compare_preflight(req: EvalReq):
 
 
 @app.get("/api/request-pacing")
-async def api_request_pacing(model: str | None = None) -> dict:
-    """Read local request pacing without creating a controller or exposing keys."""
-    from ..request_throttle import MODEL, supports_bailian_pacing
+async def api_request_pacing() -> dict:
+    """Read global model-limiter diagnostics without exposing keys.
 
-    controllers = getattr(asyncio.get_running_loop(), "_auto_eval_request_throttles", {})
-    controller = controllers.get(model or MODEL)
-    result = {
-        "enabled": any(supports_bailian_pacing(judge) for judge in cfg().judges),
-        "active": controller is not None,
+    原百炼 RequestThrottle 已移除，这里返回共享令牌桶 MODEL_LIMITER /
+    PIPELINE_LIMITER 的实时统计，供前端“模型调度”展示。
+    """
+    return {
+        "enabled": True,
+        "active": True,
         "scope": "process_event_loop",
-        "controller": controller.snapshot() if controller is not None else None,
+        "model_limiter": MODEL_LIMITER.stats(),
+        "pipeline_limiter": PIPELINE_LIMITER.stats(),
+        "settings": {
+            "concurrency": get_settings().concurrency,
+            "max_in_flight": get_settings().max_in_flight,
+            "waiting_capacity": get_settings().waiting_capacity,
+            "eval_timeout_s": get_settings().eval_timeout_s,
+        },
     }
-    app_cfg = cfg()
-    if hasattr(app_cfg, "judge_model_profiles"):
-        from ..request_throttle import pacing_config
-        policies = []
-        for profile in model_profiles(app_cfg):
-            judge = configured_profile(app_cfg, profile, profile.default_enable_thinking)
-            policy = pacing_config(judge)
-            if policy:
-                policies.append({"profile_id": profile.id, **policy})
-        snapshots = [{"model": key, **value.snapshot()} for key, value in controllers.items()]
-        selected = next((row for row in snapshots if row.get("model") == model or model in row.get("models", [])), None) if model else (snapshots[0] if snapshots else None)
-        result.update(controllers=snapshots, policies=policies,
-                      enabled=any(p["model"] == model for p in policies) if model else bool(policies),
-                      active=selected is not None, controller=selected)
-    return result
+
+
+class SettingsReq(BaseModel):
+    concurrency: int | None = None
+    max_in_flight: int | None = None
+    waiting_capacity: int | None = None
+    eval_timeout_s: float | None = None
+    judges: list[str] | None = None
+
+
+def _settings_payload() -> dict:
+    s = get_settings()
+    configured = [j.name for j in cfg().judges]
+    # 配置变化后持久化的名字可能失效：按当前配置过滤，空则回落第一个
+    judges = [name for name in s.judges if name in configured] or configured[:1]
+    return {
+        "concurrency": s.concurrency,
+        "max_in_flight": s.max_in_flight,
+        "waiting_capacity": s.waiting_capacity,
+        "eval_timeout_s": s.eval_timeout_s,
+        "judges": judges,
+    }
+
+
+@app.get("/api/settings")
+async def api_get_settings() -> dict:
+    """读取全局运行设置（模型速率/在途/预处理并发/单题超时/裁判）。"""
+    return _settings_payload()
+
+
+@app.put("/api/settings")
+async def api_put_settings(req: SettingsReq) -> dict:
+    """热调全局运行设置并持久化到 runs/web_settings.json。越界值 422。"""
+    if req.concurrency is not None and (isinstance(req.concurrency, bool) or not MIN_CONCURRENCY <= req.concurrency <= MAX_CONCURRENCY):
+        raise HTTPException(422, f"concurrency 须为 {MIN_CONCURRENCY}–{MAX_CONCURRENCY}")
+    if req.max_in_flight is not None and (isinstance(req.max_in_flight, bool) or not MIN_MAX_IN_FLIGHT <= req.max_in_flight <= MAX_MAX_IN_FLIGHT):
+        raise HTTPException(422, f"max_in_flight 须为 {MIN_MAX_IN_FLIGHT}–{MAX_MAX_IN_FLIGHT}")
+    if req.waiting_capacity is not None and (isinstance(req.waiting_capacity, bool) or not MIN_WAITING_CAPACITY <= req.waiting_capacity <= MAX_WAITING_CAPACITY):
+        raise HTTPException(422, f"waiting_capacity 须为 {MIN_WAITING_CAPACITY}–{MAX_WAITING_CAPACITY}")
+    if req.eval_timeout_s is not None and (isinstance(req.eval_timeout_s, bool) or not MIN_EVAL_TIMEOUT_S <= req.eval_timeout_s <= MAX_EVAL_TIMEOUT_S):
+        raise HTTPException(422, f"eval_timeout_s 须为 {MIN_EVAL_TIMEOUT_S}–{MAX_EVAL_TIMEOUT_S}")
+    apply_settings(
+        concurrency=req.concurrency,
+        max_in_flight=req.max_in_flight,
+        waiting_capacity=req.waiting_capacity,
+        eval_timeout_s=req.eval_timeout_s,
+        judges=req.judges,
+    )
+    persist_settings()
+    return _settings_payload()
 
 
 async def _request_source_files(req: EvalReq | EvalItemsReq, task_id: str) -> list[dict]:
@@ -479,20 +533,14 @@ async def _request_source_files(req: EvalReq | EvalItemsReq, task_id: str) -> li
 
 @app.post("/api/eval")
 async def api_eval(req: EvalReq):
+    # Older clients may still send per-task capacity; global settings now own it.
+    req.options.pop("concurrency", None)
     if not req.items:
         raise HTTPException(400, "items 为空")
     app_cfg = cfg()
     judge_runtime, judges = _new_judge_runtime(app_cfg, req.options)
     _validate_eval_request(req, app_cfg)
-    from ..request_throttle import recommended_concurrency
-
-    req.options.setdefault("concurrency", recommended_concurrency(judges))
-    try:
-        capacity = int(req.options["concurrency"])
-    except (ValueError, TypeError):
-        raise HTTPException(422, "并发容量须为 1–128 的整数")
-    if isinstance(req.options["concurrency"], bool) or capacity != req.options["concurrency"] or not 1 <= capacity <= 128:
-        raise HTTPException(422, "并发容量须为 1–128 的整数")
+    # 模型调用并发统一由全局 MODEL_LIMITER 决定，不再从每个任务的 options 单独设置。
     protocol = (
         _compare_protocol_or_422(req.evaluation_profile)
         if req.mode == "compare"
@@ -599,12 +647,19 @@ async def api_resume(task_id: str, req: ResumeReq):
     if not indexes:
         raise HTTPException(409, "没有待执行的题目；如需重试失败项，请勾选同时重试失败项")
     app_cfg = cfg()
+    # 前端 resume 不再上报 concurrency（并发已由全局 MODEL_LIMITER 统一管控）；
+    # 缺省时回落到任务既有并发值，与新任务/调度统计口径一致。
+    effective_concurrency = req.concurrency if req.concurrency is not None else (
+        task.execution_control.get("concurrency")
+        or (task.options.get("concurrency") if isinstance(task.options.get("concurrency"), int) else None)
+        or 4
+    )
     attempt = {"id": f"resume_{uuid.uuid4().hex[:10]}", "idempotency_key": idem,
                "status": "queued", "created_at": time.time(), "indexes": indexes,
-               "concurrency": req.concurrency, "include_failed": req.include_failed,
+               "concurrency": effective_concurrency, "include_failed": req.include_failed,
                "completed": 0, "failed": 0}
     attempts.append(attempt)
-    task.execution_control.update(state="queued", concurrency=req.concurrency, pending_indexes=indexes.copy())
+    task.execution_control.update(state="queued", concurrency=effective_concurrency, pending_indexes=indexes.copy())
     _freeze_legacy_judge(task, app_cfg)
     position = EVAL_SCHEDULER.enqueue(task, app_cfg, run_resume)
     await wait_task_save(task, save=save_task)
@@ -614,6 +669,7 @@ async def api_resume(task_id: str, req: ResumeReq):
 @app.post("/api/eval/{task_id}/retries", status_code=202)
 async def api_retry_failed(task_id: str, req: RetryReq):
     """手动创建失败补跑，并作为独立 job 加入全局 FIFO 队列。"""
+    req.options.pop("concurrency", None)
     task_id = _validate_param_id(task_id, "task_id")
     task = await get_task_async(task_id)
     if not task:
@@ -750,6 +806,7 @@ async def api_eval_items(req: EvalItemsReq):
     串行会话在后台评测（批次间并行、后完成者按 index 覆盖）；接口不流式，
     立即返回合并摘要，结果经 GET /api/eval/item/result 轮询获取。
     """
+    req.options.pop("concurrency", None)
     task_id = _validate_param_id(req.task_id, "task_id")
     if not req.items:
         raise HTTPException(400, "items 为空")
@@ -851,6 +908,7 @@ async def api_eval_items(req: EvalItemsReq):
     _freeze_legacy_judge(task, app_cfg)
     batch, replaced_ids, added_ids = merge_items_by_id(task, req.items)
     effective_options = {**task.options, **req.options}
+    effective_options.pop("concurrency", None)
     batch_id = uuid.uuid4().hex[:12]
     task.execution_control.setdefault("update_batches", {})[batch_id] = {
         "remaining": [index for index, _ in batch], "options": effective_options,

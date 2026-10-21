@@ -14,14 +14,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ..paths import RUNS_DIR
-from ..preparation import PreparationLimiter, run_preparation, preparation_limit, preparation_concurrency
+from ..preparation import preparation_limit, run_preparation
 from ..timing import StageTimings, collect_timings, timing_span
-from ..task_control import PauseRequested, bind_pause_check, check_pause, pause_aware
-from ..request_throttle import (
-    recommended_concurrency, supports_bailian_pacing,
-    wait_for_active, SECOND_REQUEST_LIMIT,
-)
-from ..config import AppConfig, VisualModeProfile
+from ..task_control import PauseRequested, bind_pause_check, check_pause, pause_aware, wait_for_active
+from .scheduler import MAX_CONCURRENCY, MODEL_LIMITER, PIPELINE_LIMITER, PREP_LIMITER, get_settings
+from ..config import AppConfig, JudgeConfig, VisualModeProfile
 from ..query_images import prepare_query_images, QueryImageError, PREPARED_FIELDS
 from ..judges import (
     JudgeClient,
@@ -300,7 +297,6 @@ async def run_eval(task: Task, cfg: AppConfig) -> None:
             await _persist_task_and_wait(task)  # 退休前最后一次落盘，磁盘先于内存下线
             retire_task(task)
 
-
 def _runtime_conversation(item: dict) -> bool:
     # Historical CSV bookkeeping used a zero-based turn without session_id.
     # A business session_id alone also does not declare a conversation.
@@ -308,7 +304,6 @@ def _runtime_conversation(item: dict) -> bool:
               and item.get("turn_index") == 0 and not item.get("conversation_mode")
               and item.get("input_schema_version") != "2.0")
     return bool(not legacy and is_conversation(item))
-
 
 def _make_item_evaluator(
     task: Task,
@@ -367,6 +362,8 @@ def _make_item_evaluator(
     clients: list[JudgeClient] = []
     try:
         for j in judges_cfg:
+            # 裁判配置（含 API/端点的 base_url+api_key_env）已冻结在 task.judge_runtime，
+            # 由 restore_runtime 原样恢复；这里不再做任何全局覆盖。
             clients.append(JudgeClient(j))
     except BaseException:
         if clients:
@@ -388,17 +385,19 @@ def _make_item_evaluator(
     )
     # 垂域→中文显示名映射（rich_content.yaml 的 category_display）
     category_display = rich_profile.category_display if rich_profile else {}
-    capacity = max(1, min(128, int(runtime_options.get("concurrency", recommended_concurrency(judges_cfg)))))
-    sem = asyncio.Semaphore(capacity)
-    media_capacity = preparation_concurrency()
-    media_sem = PreparationLimiter(media_capacity)
-    if media_sem is not None:
-        from ..request_throttle import pacing_config
-        log_event("请求调度", "配置请求与媒体调度", details={
-            "Case容量": capacity, "媒体并发": media_capacity,
-            "模型调度": [pacing_config(j) for j in judges_cfg if supports_bailian_pacing(j)],
-        })
-    eval_timeout = float(runtime_options.get("eval_timeout_s") or runtime_options.get("eval_timeout") or 900.0)
+    # 模型并发交给全局统一管控：整题准入由 PIPELINE_LIMITER，模型调用由
+    # MODEL_LIMITER（速率令牌桶 + 在途上限）。这里的 per-task semaphore 只是
+    # 保留"取得槽位后启动计时"的结构，容量取全局上限使其绝不成为比全局更紧的
+    # 约束——rich 也没有每任务的并发上限，前端也不再提供每任务"评估并发数"。
+    sem = asyncio.Semaphore(MAX_CONCURRENCY)
+    settings_limit = get_settings().concurrency
+    log_event("请求调度", "配置请求与媒体调度", details={
+        "模型速率(每窗口)": MODEL_LIMITER.stats()["limit"],
+        "模型在途上限": MODEL_LIMITER.stats()["max_in_flight"],
+        "流水线准入": PIPELINE_LIMITER.limit,
+        "设置并发": settings_limit,
+    })
+    eval_timeout = float(runtime_options.get("eval_timeout_s") or runtime_options.get("eval_timeout") or get_settings().eval_timeout_s)
     loop = asyncio.get_running_loop()
 
     async def _default_on_result(idx: int, res: dict, started: float) -> None:
@@ -651,6 +650,9 @@ def _make_item_evaluator(
                                     progress=15,
                                     progress_message="正在重新执行单题评测",
                                 )
+                            # 令牌收在 llm_stream.send()：每次真实模型请求（含网络重试/
+                            # 降级/JSON 修复）各取一个全局令牌+在途名额，重试不绕过。
+                            # 这里不再整题持令牌；wait_for_active 仍负责单题超时。
                             res = await wait_for_active(
                                 _eval_one(
                                     task.mode, idx, item_dict,
@@ -771,25 +773,32 @@ def _make_item_evaluator(
 
     async def limited_one(idx: int, item_dict: dict) -> dict:
         pending_judge_traces: list[tuple[str, dict]] = []
-        with preparation_limit(media_sem, priority=idx), bind_pause_check(lambda: task.pause_requested):
-            try:
-                return await one(idx, item_dict, pending_judge_traces)
-            except PauseRequested:
-                # Pause is an unfinished item, not an evaluation failure. Keep
-                # any completed/billable call traces without publishing a score
-                # or consuming its pending index; resume will evaluate it again.
-                if pending_judge_traces:
-                    await asyncio.to_thread(flush_web_trace_records, pending_judge_traces, {
-                        "index": idx, "item_id": item_dict.get("id", f"q{idx}"),
-                        "evaluation_status": "paused", "evaluation_pending": True,
-                    })
-                previous = task.item_progress.get(str(idx)) or {}
-                _record_progress(task, idx, {
-                    **previous, "item_index": idx, "status": "paused",
-                    "message": "已暂停，尚未完成的评测将在恢复后继续",
-                    "finished_at": int(time.time() * 1000),
-                })
-                return {"_paused": True}
+        # 整题持有 PIPELINE_LIMITER（预处理 + 等模型槽 + 模型调用同一名额），封顶
+        # 「抽帧中 + 已抽帧等模型」总关键帧内存；模型调用再经 MODEL_LIMITER 速率+在途。
+        # bind_pause_check 是同步 contextmanager，须用 with；PIPELINE_LIMITER.slot 用 async with。
+        async with PIPELINE_LIMITER.slot():
+            with bind_pause_check(lambda: task.pause_requested):
+                # 等待容量约束预处理（抽帧）并发：preparation_limit 绑定一个容量 =
+                # waiting_capacity 的 PREP_LIMITER，run_preparation 抽帧时持有、模型前释放。
+                with preparation_limit(PREP_LIMITER):
+                    try:
+                        return await one(idx, item_dict, pending_judge_traces)
+                    except PauseRequested:
+                        # Pause is an unfinished item, not an evaluation failure. Keep
+                        # any completed/billable call traces without publishing a score
+                        # or consuming its pending index; resume will evaluate it again.
+                        if pending_judge_traces:
+                            await asyncio.to_thread(flush_web_trace_records, pending_judge_traces, {
+                                "index": idx, "item_id": item_dict.get("id", f"q{idx}"),
+                                "evaluation_status": "paused", "evaluation_pending": True,
+                            })
+                        previous = task.item_progress.get(str(idx)) or {}
+                        _record_progress(task, idx, {
+                            **previous, "item_index": idx, "status": "paused",
+                            "message": "已暂停，尚未完成的评测将在恢复后继续",
+                            "finished_at": int(time.time() * 1000),
+                        })
+                        return {"_paused": True}
 
     return limited_one, clients
 
@@ -887,7 +896,7 @@ async def run_resume(task: Task, cfg: AppConfig) -> None:
     clients: list[JudgeClient] = []
     targets = set(attempt["indexes"])
     pending = task.execution_control.setdefault("pending_indexes", sorted(targets))
-    options = {**task.options, "concurrency": attempt["concurrency"], "_retry_id": attempt["id"]}
+    options = {**task.options, "concurrency": attempt.get("concurrency", 4), "_retry_id": attempt["id"]}
     working_items: dict[int, dict] = {}
 
     async def on_result(index: int, result: dict, started: float) -> None:
@@ -960,7 +969,7 @@ async def run_resume(task: Task, cfg: AppConfig) -> None:
                 break
             await _run_update_batch_body(
                 task, cfg, [(i, task.items[i]) for i in list(batch["remaining"])],
-                options={**batch["options"], "concurrency": attempt["concurrency"], "_retry_id": attempt["id"]},
+                options={**batch["options"], "concurrency": attempt.get("concurrency", 4), "_retry_id": attempt["id"]},
                 batch_id=batch_id,
             )
             if batch.get("remaining") and not task.pause_requested:
