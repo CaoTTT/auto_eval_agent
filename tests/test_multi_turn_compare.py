@@ -228,6 +228,37 @@ async def test_preflight_checks_full_prefix_without_model_calls(data, monkeypatc
     assert [r["request_budget_report"]["actual_image_count"] for r in report["turns"]] == [3, 5, 9]
 
 
+@pytest.mark.parametrize("count", [2, 3])
+async def test_compact_1022_preflight_uses_same_count_template_as_evaluation(data, monkeypatch, count):
+    from auto_eval.judges import conversation_prompt
+    from auto_eval.judges.compare_protocols import V1022_COMPARE_PROTOCOL_ID
+    from auto_eval.judges.visual_compare_prompt_v02_1022 import templates_1022
+
+    items, profile, judge = data
+    for item in items:
+        item["product_count"] = count
+        if count == 3:
+            item["screenshot3"] = str(Path(item["screenshot1"]).with_name(f"p3-t{item['turn_index']}.png"))
+            item["answer3"] = "第三产品回答"
+    cfg = AppConfig(judges=[judge], visual_modes={"rich_content": profile})
+    monkeypatch.setattr(server, "cfg", lambda: cfg)
+    rendered = []
+    original = conversation_prompt.assemble_conversation
+
+    def capture(system, *args, **kwargs):
+        rendered.append(system)
+        return original(system, *args, **kwargs)
+
+    monkeypatch.setattr(conversation_prompt, "assemble_conversation", capture)
+    report = await server.api_compare_preflight(server.EvalReq(
+        mode="compare", items=items, evaluation_profile=V1022_COMPARE_PROTOCOL_ID))
+    assert report["blocked_turn_count"] == 0, report
+    expected = templates_1022(count)[0].render(
+        persona=judge.persona, product_count=count, evidence_mode="long_screenshot")
+    assert rendered == [expected] * len(items)
+    assert ("answer3_input_status" in rendered[0]) == (count == 3)
+
+
 def test_direct_api_rejects_video_before_field_cleanup(data):
     items, profile, judge = data
     items[1]["media"] = [{"type": "video", "path": "a"}]

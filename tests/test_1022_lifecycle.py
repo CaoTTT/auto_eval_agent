@@ -20,11 +20,8 @@ from auto_eval.web.tasks import Task, _task_from_snapshot
 
 def result_for_report(count=2, index=0):
     data = validate_1022_output(example_1022_output(count), count)
-    data["has_conflict"] = data.pop("content_conflict")
-    data["product_count"] = count
     protocol = resolve_compare_protocol(V1022_COMPARE_PROTOCOL_ID)
-    observation = protocol.observation_model.model_validate(data)
-    result = visual_compare_result_fields(observation, protocol)
+    result = visual_compare_result_fields(data, protocol)
     result.update(index=index, item_id=f"case{index}", query="你好")
     return result
 
@@ -35,13 +32,13 @@ def test_config_exposes_new_label_without_changing_default(monkeypatch):
     selected = next(item for item in profiles if item["id"] == V1022_COMPARE_PROTOCOL_ID)
     assert selected["display"] == "V0.2简化版（1022优化）"
     assert selected["standard_version"] == "0.2-simplified-1022"
-    assert selected["bundle_revision"] == "0.2.1"
-    assert selected["output_contract"] == "compare_1022_v1"
+    assert selected["bundle_revision"] == "0.2.2"
+    assert selected["output_contract"] == "compare_1022_v2"
     assert selected["score_range"] == [1, 5]
     assert selected["input_modalities"] == ["text", "text_image"]
     assert next(item["id"] for item in profiles if item["status"] == "stable") == DEFAULT_COMPARE_PROTOCOL_ID
     assert resolve_compare_protocol(None).id == DEFAULT_COMPARE_PROTOCOL_ID
-    assert resolve_compare_protocol(V1022_COMPARE_PROTOCOL_ID).request_metadata()["output_contract"] == "compare_1022_v1"
+    assert resolve_compare_protocol(V1022_COMPARE_PROTOCOL_ID).request_metadata()["output_contract"] == "compare_1022_v2"
 
 
 @pytest.mark.parametrize("revision", ["0.2.0", "0.3.0", "0.3.1", "9.9"])
@@ -92,7 +89,7 @@ async def test_eval_api_freezes_new_protocol_and_snapshot_restores_it(monkeypatc
     restored = _task_from_snapshot(snapshot, task.id)
     assert restored.evaluation_profile == V1022_COMPARE_PROTOCOL_ID
     assert restored.protocol_manifest == task.protocol_manifest
-    assert restored.protocol_manifest["output_contract"] == "compare_1022_v1"
+    assert restored.protocol_manifest["output_contract"] == "compare_1022_v2"
     assert restored.results == task.results
     assert restored.summary["standard_version"] == "0.2-simplified-1022"
     assert restored.protocol_manifest["judges"][0]["compare_structured_output"] == "json_object"

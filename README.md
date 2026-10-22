@@ -84,6 +84,8 @@ python -m uvicorn auto_eval.web.server:app --host 0.0.0.0 --port 8054
 
 问答闲聊新增 **V2·1-5分（候选）**，可在对比模式的评测标准中选择 `qa_chat_compare@1.1`。V1 和默认标准保留；V2 使用独立的 56/78 键输出合同，统计、导出与人工基准同步支持。[使用与版本说明](docs/qa-chat-compare-v2-implementation.md)。
 
+**V0.2简化版（1022优化）**使用 `qa_competitor_compare@0.2-simplified-1022`，当前修订 `0.2.2 / compare_1022_v2`。双产品和三产品使用独立 Prompt 与解析模型，完整输出分别为 36、47 个字段，全部理由先于判定与分数。任一 Gate 未通过或无法确认时，该产品六维均为 NA；准确性不再送模型评估，Excel 保留原列并填空。旧修订 `0.2.1` 仍按冻结规则恢复。[测评标准](docs/compare-standard-1022.md)及[输出与实现说明](docs/compare-1022-implementation.md)。
+
 **时效性评估V1·1-3分（候选）**使用 `timeliness_compare@1.0`，当前修订 `1.0.2 / timeliness-result-3`。在原有两个Gate和三个评分维度之外，同次调用输出整组“内容冲突理由”和“有冲突／无冲突／不确定”；检测规则沿用v0.2稳定plus，冲突不自动改变分数。页面、历史、CSV/XLSX及统计同步展示，旧修订仍按原合同读取和续跑；使用新规则重评旧数据需新建任务。见[时效性评估完整标准](docs/timeliness-standard-v1.0.md)和[完整Prompt](docs/timeliness-evaluation-prompt-final.md)。
 
 - **垂域视觉评测**：`query`（必填）、`video_path`（必填）、可选 `id` / `context`（可信背景条件，可写当前时间地点）/ `category`（垂域）/ `answer_text` / `task_start_time`+`task_end_time`（截取作答区间）。

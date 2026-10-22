@@ -419,7 +419,11 @@ async def api_compare_preflight(req: EvalReq):
             error = None
             try:
                 bundle = prepared.prepare(item)
-                system = protocol.system_template.render(persona=judges[0].persona,
+                system_template = protocol.system_template
+                if protocol.output_contract == "compare_1022_v2":
+                    from ..judges.visual_compare_prompt_v02_1022 import templates_1022
+                    system_template, _ = templates_1022(item.get("product_count", 2))
+                system = system_template.render(persona=judges[0].persona,
                     product_count=item.get("product_count", 2), evidence_mode="long_screenshot")
                 assemble_conversation(system, bundle, protocol)
             except Exception as exc:

@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from auto_eval.judges.compare_1022_contract import (
+from auto_eval.judges.compare_1022_contract_r021 import (
     DIMENSIONS_1022,
     OutputContractError,
     example_1022_output,

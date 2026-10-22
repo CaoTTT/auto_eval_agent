@@ -447,7 +447,7 @@
       <span v-if="summary.solved_nok!=null">NOK {{ summary.solved_nok }} 条</span>
       <span v-if="summary.solved_review!=null">需复查 {{ summary.solved_review }} 条</span>
       <span v-if="summary.solved_ok_rate!=null">OK率 {{ (summary.solved_ok_rate*100).toFixed(0) }}%</span>
-      <span v-if="summary.needs_review_count">需人工复核 {{ summary.needs_review_count }} 条</span>
+      <span v-if="!compact1022() && summary.needs_review_count">需人工复核 {{ summary.needs_review_count }} 条</span>
     </div>
     <section v-if="taskIsTimeliness && summary" class="timeliness-summary">
       <h3>时效性评估 · 1–3分</h3>
@@ -692,6 +692,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20261020_timeliness_conflict"></script>
+  <script type="module" src="/static/app.js?v=20261022_compact_1022"></script>
 </body>
 </html>

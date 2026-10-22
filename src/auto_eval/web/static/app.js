@@ -1,4 +1,4 @@
-import { createApp, ref, computed, onMounted, onUnmounted, nextTick, selectEvidenceMode } from "./compare-data.js?v=20261016_source_files";
+import { createApp, ref, computed, onMounted, onUnmounted, nextTick, selectEvidenceMode } from "./compare-data.js?v=20261022_compact_1022";
 
 createApp({
   setup() {
@@ -64,6 +64,15 @@ createApp({
     const taskProtocolDiagnostics = ref([]);
     const taskIsChat = computed(() => (taskEvaluationProfile.value || '').startsWith('qa_chat_compare@'));
     const taskIsTimeliness = computed(() => (taskEvaluationProfile.value || '').startsWith('timeliness_compare@'));
+    function compact1022(row = {}) {
+      if (row.output_contract) return row.output_contract === 'compare_1022_v2';
+      const profile = row.evaluation_profile || (row.standard_id && row.standard_version
+        ? `${row.standard_id}@${row.standard_version}` : taskEvaluationProfile.value);
+      if (profile !== 'qa_competitor_compare@0.2-simplified-1022') return false;
+      if (row.bundle_revision) return row.bundle_revision === '0.2.2';
+      const manifest = taskProtocolManifest.value;
+      return manifest.output_contract ? manifest.output_contract === 'compare_1022_v2' : manifest.bundle_revision === '0.2.2';
+    }
     function isTimelinessRow(row = {}) {
       if (row.standard_id) return row.standard_id === 'timeliness_compare';
       if (row.evaluation_profile) return row.evaluation_profile.startsWith('timeliness_compare@');
@@ -204,6 +213,9 @@ createApp({
     const taskDimensions = computed(() => {
       const frozen = taskProtocolManifest.value.dimensions;
       const registered = evaluationProfiles.value.find(p => p.id === taskEvaluationProfile.value)?.dimensions;
+      if (compact1022()) return (frozen?.length ? frozen : legacyScoreDimensions.filter(d => !d.gate)).filter(d => d.key !== 'accuracy');
+      if (taskEvaluationProfile.value === 'qa_competitor_compare@0.2-simplified-1022'
+          && taskProtocolManifest.value.bundle_revision === '0.2.1') return frozen?.length ? frozen : legacyScoreDimensions.filter(d => !d.gate);
       return frozen?.length ? frozen : registered?.length ? registered : taskIsTimeliness.value ? timelinessDimensions : taskIsChat.value ? chatDimensions : legacyScoreDimensions.filter(d => !d.gate);
     });
     const scoreDimensions = computed(() => [...legacyScoreDimensions.filter(d => d.gate), ...taskDimensions.value]);
@@ -262,6 +274,15 @@ createApp({
       ? scoreRules.value.map((rule, i) => scoreRuleError(rule) ? `条件 ${i + 1}：${scoreRuleError(rule)}` : '').filter(Boolean).join('；') : '');
     function scoreValue(row, dimension, product) {
       if (taskProtocolDiagnostics.value.length) return null;
+      if (compact1022(row)) {
+        const value = row[`answer${product}_${dimension}_score`];
+        const count = Number(row.product_count || items.value[row.index]?.product_count || 2);
+        return !row.error && product >= 1 && product <= count && dimension !== 'accuracy'
+          && row[`${dimension}_applicable`] === true
+          && ['complete','partial'].includes(row[`answer${product}_input_status`])
+          && row[`answer${product}_response_gate`] === 'pass' && row[`answer${product}_safety_gate`] === 'pass'
+          && Number.isInteger(value) && value >= 1 && value <= 5 ? value : null;
+      }
       if (isTimelinessRow(row)) {
         const prefix = `answer${product}_${dimension}`, value = row[`${prefix}_score`];
         const verification = row[`${prefix}_verification_status`];
@@ -863,8 +884,8 @@ createApp({
           ...taskDimensions.value.map(d => ({key:`${d.key}_summary`, label:d.key === 'accuracy' ? '内容准确（暂不汇总）' : d.label})),
           ...((taskIsTimeliness.value ? timelinessHasConflict() : !chatUsesSharedReasons())
             ? [{ key: "has_conflict", label: "内容冲突" }] : []),
-          { key: "needs_human_review", label: "需人工复核" },
-          ...(chatUsesSharedReasons() ? [] : [{ key: "rationale", label: "理由" }]),
+          ...(compact1022() ? [] : [{ key: "needs_human_review", label: "需人工复核" }]),
+          ...(compact1022() || chatUsesSharedReasons() ? [] : [{ key: "rationale", label: "理由" }]),
           { key: "latency_s", label: "总耗时" },
         ];
       // rich_content（默认）
@@ -1850,6 +1871,35 @@ createApp({
       }
       if (c.key.endsWith("_summary") && !["input_status_summary", "response_gate_summary", "safety_gate_summary"].includes(c.key)) {
         const dimension = c.key.slice(0, -"_summary".length);
+        if (compact1022(r)) {
+          return Array.from({length:Number(r.product_count || items.value[r.index]?.product_count || 2)}, (_, i) => {
+            const product = i + 1, score = scoreValue(r, dimension, product);
+            let status = 'N/A';
+            if (r.error) status = '评估失败';
+            else if (taskProtocolDiagnostics.value.length) status = '协议待恢复';
+            else if (r[`answer${product}_input_status`] === 'failed') status = '输入失败';
+            else if (r[`answer${product}_response_gate`] === 'fail') status = '响应Gate阻断';
+            else if (r[`answer${product}_safety_gate`] === 'fail') status = '安全Gate阻断';
+            else if (!['complete','partial'].includes(r[`answer${product}_input_status`])) status = '输入状态缺失';
+            else if (!['pass','fail','unclear'].includes(r[`answer${product}_response_gate`])
+                || !['pass','fail','unclear'].includes(r[`answer${product}_safety_gate`])) status = 'Gate状态缺失';
+            else if (r[`answer${product}_response_gate`] !== 'pass') status = '响应Gate阻断';
+            else if (r[`answer${product}_safety_gate`] !== 'pass') status = '安全Gate阻断';
+            else if (r[`${dimension}_applicable`] === false) status = '不适用';
+            else if (r[`${dimension}_applicable`] !== true) status = '适用性状态缺失';
+            else if (score !== null) status = `${score}分`;
+            else {
+              const segment = String(r[`${dimension}_reason`] || '').match(new RegExp(`(?:^|[；;]\\s*)产品${product}[:：](.*?)(?=[；;]\\s*产品[123][:：]|$)`, 's'));
+              const reason = segment?.[1].trim().replace(/[；;]+$/, '').trim() || '';
+              const justified = /^未评分（([^（）]+)）：(.+)$/s.exec(reason);
+              const validReason = justified && justified.slice(1).every(text => /[\p{L}\p{N}_]/u.test(text));
+              status = r[`answer${product}_${dimension}_score`] == null
+                ? validReason ? reason.startsWith('未评分（证据不足）：') ? '证据不足' : '有说明的未评分' : '应评分但缺失'
+                : '分数格式或范围异常';
+            }
+            return `P${product}:${status}`;
+          }).join('；');
+        }
         if (isTimelinessRow(r) || taskIsChat.value || r.standard_id === 'qa_chat_compare') {
           return Array.from({length:Number(r.product_count || items.value[r.index]?.product_count || 2)}, (_,i) => {
             const score = scoreValue(r,dimension,i+1);
@@ -2392,7 +2442,7 @@ createApp({
       reasonOnlyColumn, cellReasons, reasonsExpanded, toggleCellReasons, allReasonsExpanded, setAllReasonsExpanded,
       datasetSourceFileId, datasetSourceTaskId, datasetRevision, useComparisonDataset,
       evaluationProfiles, compareProfiles, selectedEvaluationProfile, evaluationProfileLabel,
-      taskEvaluationProfile, taskProtocolManifest, taskProtocolDiagnostics, taskIsChat, taskIsTimeliness, summaryDimensions, setTaskProtocol,
+      taskEvaluationProfile, taskProtocolManifest, taskProtocolDiagnostics, taskIsChat, taskIsTimeliness, compact1022, summaryDimensions, setTaskProtocol,
       isTimelinessRow, timelinessColumn, timelinessProductScores, timelinessSummaryRows, timelinessPairedRows, summaryPercent,
       timelinessHasConflict, timelinessConflictColumn, timelinessConflictSummary,
       judgeModelProfiles, selectedJudgeModelProfile, selectedModelProfile, enableThinking, changeJudgeModel,

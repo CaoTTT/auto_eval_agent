@@ -8,8 +8,8 @@ from PIL import Image
 from auto_eval import query_images
 from auto_eval.config import JudgeConfig, VisualExtractionConfig, VisualModeProfile
 from auto_eval.judges.base import JudgeOutputParseError
-from auto_eval.judges.compare_1022_contract import DIMENSIONS_1022, example_1022_output
-from auto_eval.judges.compare_protocols import V1022_COMPARE_PROTOCOL_ID
+from auto_eval.judges.compare_1022_contract_r021 import DIMENSIONS_1022, example_1022_output
+from auto_eval.judges.compare_protocols import V1022_COMPARE_PROTOCOL_ID, resolve_compare_protocol
 from auto_eval.judges.visual_compare_judge import VisualCompareJudge
 from auto_eval.long_screenshot import prepare_long_screenshot
 
@@ -39,7 +39,7 @@ def profile():
 
 async def evaluate(output, *, count=2, mode="off", **kwargs):
     client = OutputClient(output, mode)
-    result = await VisualCompareJudge(client, profile(), V1022_COMPARE_PROTOCOL_ID).evaluate(
+    result = await VisualCompareJudge(client, profile(), resolve_compare_protocol(V1022_COMPARE_PROTOCOL_ID, "0.2.1")).evaluate(
         question="你好", product_count=count,
         evaluation_time=datetime(2026, 10, 22, tzinfo=timezone.utc), **kwargs,
     )
@@ -173,7 +173,7 @@ async def test_bad_output_retains_raw_category_and_never_invokes_semantic_repair
     if category == "json_syntax":
         text = text[:-1]
     client = OutputClient(text)
-    judge = VisualCompareJudge(client, profile(), V1022_COMPARE_PROTOCOL_ID)
+    judge = VisualCompareJudge(client, profile(), resolve_compare_protocol(V1022_COMPARE_PROTOCOL_ID, "0.2.1"))
     with pytest.raises(JudgeOutputParseError) as caught:
         await judge.evaluate(question="你好", product_count=2)
     assert caught.value.error_category == category
@@ -228,7 +228,7 @@ async def test_visual_and_shared_query_inputs_reach_strict_evaluator(
         for n, meta in enumerate(metas, 1):
             arguments[f"frames{n}"] = [part["path"] for part in meta["slices"]]
     client = OutputClient(example_1022_output(count, evidence_mode=evidence_mode), "json_object")
-    result = await VisualCompareJudge(client, cfg, V1022_COMPARE_PROTOCOL_ID).evaluate(
+    result = await VisualCompareJudge(client, cfg, resolve_compare_protocol(V1022_COMPARE_PROTOCOL_ID, "0.2.1")).evaluate(
         question="你好", product_count=count, evidence_mode=evidence_mode,
         query_image_meta=prepared["query_image_meta"], **arguments,
     )

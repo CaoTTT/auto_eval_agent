@@ -48,8 +48,14 @@ from .timeliness_schema_r101 import (
 )
 from .compare_1022_contract import (
     OUTPUT_CONTRACT_1022, OutputContractError, parse_1022_output,
-    response_format_1022,
+    response_format_1022, validate_1022_output,
 )
+from .compare_1022_contract_r021 import (
+    OUTPUT_CONTRACT_1022 as OUTPUT_CONTRACT_1022_R021,
+    parse_1022_output as parse_1022_output_r021,
+    response_format_1022 as response_format_1022_r021,
+)
+from .visual_compare_prompt_v02_1022 import templates_1022
 from .compare_protocols import (
     CompareProtocol,
     DIMENSIONS,
@@ -167,7 +173,7 @@ def _finalize_observation(
     protocol: CompareProtocol,
 ) -> None:
     """只确定性计算派生字段，不让模型自行创造总分权重。"""
-    strict_1022 = protocol.output_contract == OUTPUT_CONTRACT_1022
+    strict_1022 = protocol.output_contract == OUTPUT_CONTRACT_1022_R021
     if not strict_1022:
         _normalize_observation_state(observation, protocol)
     observation.standard_id = protocol.standard_id
@@ -257,8 +263,33 @@ def _finalize_observation(
     observation.review_reason = "；".join(observation.review_reasons)
 
 
+def _compact_1022_result(observation: BaseModel | dict, protocol: CompareProtocol) -> dict:
+    """Project the compact contract without resurrecting legacy model fields."""
+    data = observation.model_dump() if isinstance(observation, BaseModel) else dict(observation)
+    count = 3 if "answer3_input_status" in data else 2
+    result = validate_1022_output(data, count)
+    result.update(
+        standard_id=protocol.standard_id, standard_version=protocol.standard_version,
+        product_count=count, evaluation_profile=protocol.id,
+        bundle_revision=protocol.bundle_revision, output_contract=protocol.output_contract,
+        has_conflict=result["content_conflict"],
+        overall_winner=None, overall_ranking=None,
+    )
+    for dimension in protocol.dimensions:
+        scores = {n: result[f"answer{n}_{dimension}_score"] for n in range(1, count + 1)}
+        groups: dict[int, list[str]] = {}
+        for n, score in scores.items():
+            if score is not None:
+                groups.setdefault(score, []).append(f"product{n}")
+        result[f"{dimension}_rank_groups"] = [groups[s] for s in sorted(groups, reverse=True)]
+        result[f"{dimension}_winner"] = _score_winner(scores[1], scores[2])
+    for n in range(1, count + 1):
+        result[f"answer{n}_total_score"] = None
+    return result
+
+
 def visual_compare_result_fields(
-    observation: BaseModel,
+    observation: BaseModel | dict,
     protocol: CompareProtocol | str | None = None,
     *,
     trusted_collection_metadata: dict | None = None,
@@ -268,6 +299,8 @@ def visual_compare_result_fields(
         resolve_compare_protocol(protocol) if isinstance(protocol, str)
         else protocol or resolve_compare_protocol(None)
     )
+    if selected_protocol.output_contract == OUTPUT_CONTRACT_1022:
+        return _compact_1022_result(observation, selected_protocol)
     if selected_protocol.result_schema_version == TIMELINESS_RESULT_SCHEMA_VERSION:
         if not isinstance(observation, TimelinessObservation):
             raise ValueError("时效性协议需要独立TimelinessObservation结果模型")
@@ -297,7 +330,7 @@ def visual_compare_result_fields(
     result = observation.model_dump()
     result["evaluation_profile"] = selected_protocol.id
     result["bundle_revision"] = selected_protocol.bundle_revision
-    if selected_protocol.output_contract == OUTPUT_CONTRACT_1022:
+    if selected_protocol.output_contract == OUTPUT_CONTRACT_1022_R021:
         result["output_contract"] = selected_protocol.output_contract
         result["content_conflict"] = observation.has_conflict
     result["needs_review_label"] = "T" if observation.needs_review else "F"
@@ -364,12 +397,13 @@ class VisualCompareJudge:
             self.protocol.result_schema_version, (expected_output_keys, expected_output_keys))
         output_label = "时效性评估V1" if is_timeliness else "问答闲聊V2"
         trusted_collection = collection_metadata(trusted_collection_metadata, actual_product_count) if is_strict_output else None
-        strict_1022 = self.protocol.output_contract == OUTPUT_CONTRACT_1022
+        compact_1022 = self.protocol.output_contract == OUTPUT_CONTRACT_1022
+        strict_1022 = self.protocol.output_contract in {OUTPUT_CONTRACT_1022, OUTPUT_CONTRACT_1022_R021}
         output_options = {}
         if strict_1022:
             output_options = {
                 "require_complete": True,
-                "response_format": response_format_1022(
+                "response_format": (response_format_1022 if compact_1022 else response_format_1022_r021)(
                     getattr(self.client.cfg, "compare_structured_output", "off"),
                     actual_product_count,
                 ),
@@ -381,7 +415,11 @@ class VisualCompareJudge:
         if is_screenshot and len(metas) != actual_product_count:
             raise ValueError("长截图缺少逐产品预处理元数据")
 
-        system = self.protocol.system_template.render(
+        system_template, user_template = (
+            templates_1022(actual_product_count) if compact_1022
+            else (self.protocol.system_template, self.protocol.user_template)
+        )
+        system = system_template.render(
             persona=self.client.persona,
             product_count=actual_product_count,
             evidence_mode=evidence_mode,
@@ -393,7 +431,7 @@ class VisualCompareJudge:
             if self.protocol.bundle_revision in {"0.2.0", "0.3.0"}:
                 raise ValueError("旧实现版本不支持提问图片，请新建任务")
             system += QUERY_IMAGE_INSTRUCTIONS
-        user = self.protocol.user_template.render(
+        user = user_template.render(
             evaluation_datetime=evaluation_datetime,
             question=question,
             context=context,
@@ -571,15 +609,16 @@ class VisualCompareJudge:
         repaired = ""
         if strict_1022:
             try:
-                data = parse_1022_output(raw_output, actual_product_count)
+                data = (parse_1022_output if compact_1022 else parse_1022_output_r021)(raw_output, actual_product_count)
             except OutputContractError as exc:
                 raise JudgeOutputParseError(
                     str(exc), raw_output=raw_output, repair_output="",
                     judge=self.client.cfg.name, model=self.client.model,
                     error_category=exc.category,
                 ) from exc
-            data["standard_id"] = self.protocol.standard_id
-            data["standard_version"] = self.protocol.standard_version
+            if not compact_1022:
+                data["standard_id"] = self.protocol.standard_id
+                data["standard_version"] = self.protocol.standard_version
         else:
             parsed_pairs = parse_json_preserving_pairs(raw_output) if is_strict_output else None
             original_parsed_pairs = parsed_pairs
@@ -684,13 +723,15 @@ class VisualCompareJudge:
                     model=self.client.model,
                 )
 
-        if not is_strict_output and "content_conflict" in data and "has_conflict" not in data:
+        if not compact_1022 and not is_strict_output and "content_conflict" in data and "has_conflict" not in data:
             data["has_conflict"] = data.pop("content_conflict")
-        if not is_strict_output:
+        if not compact_1022 and not is_strict_output:
             data["product_count"] = actual_product_count
 
         try:
-            if is_strict_output:
+            if compact_1022:
+                observation = data
+            elif is_strict_output:
                 observation = self.protocol.observation_model.model_validate(
                     data, context={"product_count": actual_product_count,
                                    "trusted_collection_metadata": trusted_collection})
@@ -713,11 +754,13 @@ class VisualCompareJudge:
             meta.get("split_status") == "risky" or any(b.get("status") == "risky" for b in meta.get("boundaries", []))
             for meta in metas
         )
-        if risky_screenshot and not is_strict_output:
+        if risky_screenshot and not is_strict_output and not compact_1022:
             observation.needs_human_review = True
             observation.review_reasons = list(dict.fromkeys([*observation.review_reasons, RISKY_REVIEW_REASON]))
         result = visual_compare_result_fields(
             observation, self.protocol, **({"trusted_collection_metadata": trusted_collection} if is_strict_output else {}))
+        if compact_1022:
+            result["evaluation_datetime"] = evaluation_datetime
         if is_strict_output:
             result.update(raw_model_output=raw_output,
                           repaired_model_output=repaired,

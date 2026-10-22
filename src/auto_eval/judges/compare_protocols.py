@@ -12,7 +12,9 @@ from jinja2 import Template
 from pydantic import BaseModel, create_model, model_validator
 
 from ..schema import VisualCompareObservation
-from .compare_1022_contract import OUTPUT_CONTRACT_1022, STANDARD_VERSION_1022
+from .compare_1022_contract import (
+    OUTPUT_CONTRACT_1022, STANDARD_VERSION_1022, DIMENSIONS_1022, Compare1022DualOutput,
+)
 from .visual_compare_prompt_v02_1022 import (
     VISUAL_COMPARE_SYSTEM as V1022_SYSTEM,
     VISUAL_COMPARE_USER as V1022_USER,
@@ -337,15 +339,18 @@ _PROTOCOLS = {
         id=V1022_COMPARE_PROTOCOL_ID,
         standard_id=STANDARD_ID,
         standard_version=STANDARD_VERSION_1022,
-        bundle_revision="0.2.1",
+        bundle_revision="0.2.2",
         display="V0.2简化版（1022优化）",
         status="experimental",
         system_template=V1022_SYSTEM,
         user_template=V1022_USER,
-        observation_model=VisualCompareObservation1022,
+        observation_model=Compare1022DualOutput,
         require_response_pass=True,
         score_min=1,
         score_max=5,
+        dimensions=DIMENSIONS_1022,
+        dimension_names={d: DIMENSION_NAMES[d] for d in DIMENSIONS_1022},
+        score_dimensions=DIMENSIONS_1022,
         output_contract=OUTPUT_CONTRACT_1022,
     ),
 }
@@ -360,6 +365,19 @@ def resolve_compare_protocol(protocol_id: str | None, bundle_revision: str | Non
     try:
         protocol = _PROTOCOLS[selected]
         if bundle_revision and bundle_revision != protocol.bundle_revision:
+            if selected == V1022_COMPARE_PROTOCOL_ID and bundle_revision == "0.2.1":
+                from .compare_1022_contract_r021 import OUTPUT_CONTRACT_1022 as legacy_contract
+                from .visual_compare_prompt_v02_1022_r021 import (
+                    VISUAL_COMPARE_SYSTEM as legacy_system,
+                    VISUAL_COMPARE_USER as legacy_user,
+                )
+                return replace(
+                    protocol, bundle_revision=bundle_revision,
+                    observation_model=VisualCompareObservation1022,
+                    system_template=legacy_system, user_template=legacy_user,
+                    dimensions=DIMENSIONS, dimension_names=dict(DIMENSION_NAMES),
+                    output_contract=legacy_contract,
+                )
             if selected == TIMELINESS_COMPARE_PROTOCOL_ID and bundle_revision == "1.0.1":
                 from .timeliness_schema_r101 import TimelinessObservation as legacy_observation
                 from .visual_compare_prompt_timeliness_r101 import (

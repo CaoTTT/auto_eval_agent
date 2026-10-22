@@ -540,7 +540,7 @@ def export_rows(snapshot: dict) -> dict[str, list[dict]]:
             from .qa_chat_export import chat_export_rows
             result_rows = chat_export_rows(snapshot, aligned_results)
         else:
-            result_rows = _visual_compare_export_rows(aligned_results)
+            result_rows = _visual_compare_export_rows(aligned_results, snapshot.get("protocol_manifest"))
     else:
         result_rows = _result_rows(aligned_results)
     dataset_rows = _dataset_rows(snapshot, include_extra=False)
@@ -1114,7 +1114,11 @@ def _format_ts(value) -> str:
         return datetime.fromtimestamp(value).strftime("%Y-%m-%d %H:%M:%S")
     return str(value or "")
 
-def _visual_compare_export_rows(results: list[dict]) -> list[dict]:
+class _BlankExportCell(str):
+    """An empty JSON/CSV string that serializes as a genuinely empty XLSX cell."""
+
+
+def _visual_compare_export_rows(results: list[dict], protocol_manifest: dict | None = None) -> list[dict]:
     """垂域视觉对比导出：维度对比结论 + 内容冲突。"""
     _COMPARE_COLUMNS: list[tuple[str, str]] = [
         ("item_id", "query_id"),
@@ -1249,10 +1253,28 @@ def _visual_compare_export_rows(results: list[dict]) -> list[dict]:
     }
     rows = []
     for r in results:
+        manifest = protocol_manifest or {}
+        profile = r.get("evaluation_profile") or manifest.get("id")
+        family = r.get("standard_id") or manifest.get("standard_id")
+        version = r.get("standard_version") or manifest.get("standard_version")
+        identity = profile == "qa_competitor_compare@0.2-simplified-1022" or (
+            family == "qa_competitor_compare" and version == "0.2-simplified-1022")
+        if r.get("output_contract"):
+            compact = r["output_contract"] == "compare_1022_v2"
+        elif r.get("bundle_revision"):
+            compact = identity and r["bundle_revision"] == "0.2.2"
+        else:
+            compact = manifest.get("output_contract") == "compare_1022_v2" or (identity and manifest.get("bundle_revision") == "0.2.2")
         row = {}
         for key, label in _COMPARE_COLUMNS:
             v = r.get(key)
-            if v is None:
+            removed = ("accuracy" in key or key.endswith(("_verification_status", "_evidence", "_primary_issue"))
+                       or key in {"evidence", "confidence", "needs_human_review", "review_reasons", "rationale"})
+            inactive = r.get("product_count") == 2 and key.startswith(("answer3", "context3"))
+            if compact and (removed or inactive):
+                # Keep the legacy column layout, but do not fabricate assessments.
+                row[label] = _BlankExportCell("")
+            elif v is None:
                 row[label] = "N/A"
             elif key in _DISPLAY_MAP and v in _DISPLAY_MAP[key]:
                 row[label] = _DISPLAY_MAP[key][v]
@@ -1290,7 +1312,7 @@ def result_export_row(mode: str, result: dict, index: int, items: list[dict],
         export = chat_export_rows(snapshot, [dict(row, index=index)])[0]
     else:
         export = (
-        _visual_compare_export_rows([row])
+        _visual_compare_export_rows([row], protocol_manifest)
         if mode == "compare"
         else _rich_content_export_rows([row])
         )[0]
@@ -1880,7 +1902,9 @@ def _sheet_xml(rows: list[dict], *, picture_sheet: bool = False) -> str:
         for c_idx, value in enumerate(row, start=1):
             ref = f"{_col(c_idx)}{r_idx}"
             style = ' s="1"' if r_idx == 1 else (' s="2"' if picture_sheet or isinstance(value, CellImage) else "")
-            if isinstance(value, CellImage):
+            if isinstance(value, _BlankExportCell):
+                cells.append(f'<c r="{ref}"{style}/>')
+            elif isinstance(value, CellImage):
                 # 仅可信 CellImage 生成公式；Query 等输入仍按原来的纯文本方式导出。
                 formula = escape(value.formula)
                 cells.append(f'<c r="{ref}" t="str"{style}><f>_xlfn.{formula}</f><v>={formula}</v></c>')

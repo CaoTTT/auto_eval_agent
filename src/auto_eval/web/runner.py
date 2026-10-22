@@ -1536,7 +1536,8 @@ async def _eval_one(
                    {f"产品{product_no}{result_protocol.dimension_names[dimension]}分": compare_result.get(f"answer{product_no}_{dimension}_score")
                     for product_no in range(1, product_count + 1)
                     for dimension in result_protocol.score_dimensions}),
-                "需要复核": compare_result.get("needs_human_review"),
+                **({"需要复核": compare_result.get("needs_human_review")}
+                   if result_protocol.output_contract != "compare_1022_v2" else {}),
                 **({"内容冲突": compare_result.get("has_conflict")}
                    if result_protocol.result_schema_version not in {"qa-chat-result-2", "timeliness-result-1", "timeliness-result-2"} else {}),
             },
@@ -1598,6 +1599,10 @@ def _summarize(task: Task, *, include_subsets: bool = True) -> dict:
             bool(row.get("needs_human_review")) for row in valid
         ) + sum(bool(row.get("needs_human_review")) for row in res if row.get("error")),
     }
+    if (task.protocol_manifest.get("output_contract") == "compare_1022_v2"
+            or any(row.get("output_contract") == "compare_1022_v2" for row in ok)):
+        # This contract does not collect a review verdict; zero would imply a judgment.
+        summary.pop("needs_human_review_count", None)
     max_product_count = max(
         (int(row.get("product_count") or 2) for row in valid),
         default=2,
