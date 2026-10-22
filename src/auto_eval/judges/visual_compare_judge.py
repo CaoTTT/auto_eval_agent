@@ -12,6 +12,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ValidationError
 
 from ..config import VisualModeProfile
+from ..compare_input import normalize_product_contexts
 from ..query_images import encode_query_image, check_request_budget, input_manifest
 from ..preparation import run_preparation, check_preparation
 from ..media import encode_frame
@@ -69,6 +70,7 @@ from .compare_protocols import (
 
 # 按当前实验约定：准确性保留模型结果，但暂不参与任何汇总或总排名。
 AGGREGATION_DIMENSIONS = tuple(d for d in DIMENSIONS if d != "accuracy")
+_CONTEXT_NOT_PROVIDED = object()
 
 
 def _product_nos(observation: VisualCompareObservation) -> tuple[int, ...]:
@@ -363,7 +365,7 @@ class VisualCompareJudge:
         *,
         question: str,
         context: str = "",
-        context1: str = "",
+        context1: str | object = _CONTEXT_NOT_PROVIDED,
         answer1: str = "",
         frames1: list[str] | None = None,
         context2: str = "",
@@ -403,6 +405,16 @@ class VisualCompareJudge:
         output_label = "时效性评估V1" if is_timeliness else "问答闲聊V2"
         trusted_collection = collection_metadata(trusted_collection_metadata, actual_product_count) if is_strict_output else None
         compact_1022 = self.protocol.output_contract == OUTPUT_CONTRACT_1022
+        product_contexts_only = compact_1022 and self.protocol.bundle_revision == "0.2.4"
+        if product_contexts_only:
+            supplied_contexts = {"context": context, "context2": context2, "context3": context3}
+            if context1 is not _CONTEXT_NOT_PROVIDED:
+                supplied_contexts["context1"] = context1
+            contexts = normalize_product_contexts(supplied_contexts, actual_product_count)
+            context1, context2 = contexts["context1"], contexts["context2"]
+            context3 = contexts.get("context3", "")
+        elif context1 is _CONTEXT_NOT_PROVIDED:
+            context1 = ""
         strict_1022 = self.protocol.output_contract in {OUTPUT_CONTRACT_1022, OUTPUT_CONTRACT_1022_R021}
         compact_r022 = compact_1022 and self.protocol.bundle_revision == "0.2.2"
         parse_compact = parse_1022_output_r022 if compact_r022 else parse_1022_output
@@ -437,9 +449,10 @@ class VisualCompareJudge:
                 raise ValueError("旧实现版本不支持提问图片，请新建任务")
             system += QUERY_IMAGE_INSTRUCTIONS
         user = user_template.render(
-            evaluation_datetime=evaluation_datetime,
+            **({} if product_contexts_only else {
+                "evaluation_datetime": evaluation_datetime, "context": context,
+            }),
             question=question,
-            context=context,
             product_count=actual_product_count,
             context1=context1,
             answer1=answer1,

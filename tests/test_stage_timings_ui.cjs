@@ -22,14 +22,16 @@ async function main() {
     close() {}
     emit(name, data) { return this.handlers[name]?.({ data: JSON.stringify(data) }); }
   }
-  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../src/auto_eval/web/static/app.js'), 'utf8').replace(/^import[^\n]+\n/, ''), {
+  const sandbox = {
     ref: value => ({ value }), computed: fn => ({ get value() { return fn(); } }),
     onMounted(fn) { mounted = fn; }, onUnmounted() {}, nextTick() {}, console, Date: LocalDate,
     window: { setInterval(fn) { timers.push(fn); return timers.length; }, clearInterval() {} },
     document: { hidden: false },
     createApp(options) { app = options.setup(); return { mount() {} }; }, EventSource: FakeStream,
     async fetch(url) { return { ok: true, json: async () => url === '/api/history/timing' ? snapshot : {} }; },
-  });
+  };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../src/auto_eval/web/static/compare-cases.js'), 'utf8').replace(/^import[^\n]*\n/gm, '').replace(/^export /gm, ''), sandbox);
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../src/auto_eval/web/static/app.js'), 'utf8').replace(/^import[^\n]+\n/, ''), sandbox);
   await mounted();
   await app.loadHistoryTask('timing');
   assert.equal(app.pagedProgressRows.value[0].elapsedSeconds, 1200, 'server clock skew cannot inflate total duration');

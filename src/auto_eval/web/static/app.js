@@ -1,4 +1,4 @@
-import { createApp, ref, computed, onMounted, onUnmounted, nextTick, selectEvidenceMode } from "./compare-data.js?v=20261022_compact_1022";
+import { createApp, ref, computed, onMounted, onUnmounted, nextTick, selectEvidenceMode, productContextValue, missingProductContexts } from "./compare-data.js?v=20261022_product_contexts";
 
 createApp({
   setup() {
@@ -69,9 +69,9 @@ createApp({
       const profile = row.evaluation_profile || (row.standard_id && row.standard_version
         ? `${row.standard_id}@${row.standard_version}` : taskEvaluationProfile.value);
       if (profile !== 'qa_competitor_compare@0.2-simplified-1022') return false;
-      if (row.bundle_revision) return ['0.2.2','0.2.3'].includes(row.bundle_revision);
+      if (row.bundle_revision) return ['0.2.2','0.2.3','0.2.4'].includes(row.bundle_revision);
       const manifest = taskProtocolManifest.value;
-      return manifest.output_contract ? manifest.output_contract === 'compare_1022_v2' : ['0.2.2','0.2.3'].includes(manifest.bundle_revision);
+      return manifest.output_contract ? manifest.output_contract === 'compare_1022_v2' : ['0.2.2','0.2.3','0.2.4'].includes(manifest.bundle_revision);
     }
     function isTimelinessRow(row = {}) {
       if (row.standard_id) return row.standard_id === 'timeliness_compare';
@@ -588,7 +588,7 @@ createApp({
     const formatHint = computed(
       () =>
         ({
-          compare: "支持文字题与图文题混合导入：query_images 可选填一张提问图片路径；product_count 为2或3。每题优先使用全产品长截图，否则回退全产品录屏；无法统一证据的题目在导入时拒绝。",
+          compare: "每个产品的 contextN 背景必填；缺少 context1 字段时兼容读取 context 作为产品1背景。支持文字题与图文题混合导入：query_images 可选填一张提问图片路径；product_count 为2或3。每题优先使用全产品长截图，否则回退全产品录屏；无法统一证据的题目在导入时拒绝。",
           rich_content: "可逐题上传，也可导入 JSON / JSONL / CSV：query、context(可选)、video_path、category/answer_text/task_start_time/task_end_time(均可选)；sessionid 等额外字段会保留到 Excel 导出。普通图片不算挂卡，回答区域蓝色文字按 Superlink 统计。",
         }[mode.value])
     );
@@ -1104,7 +1104,7 @@ createApp({
           evidenceMode:item.evidence_mode || (item.screenshot1 ? 'long_screenshot' : 'video_frames'),
           ...Object.fromEntries([1,2,3].flatMap(n => [
             [`video${n}Path`,item[`video${n}`] || ''], [`screenshot${n}Path`,item[`screenshot${n}`] || ''],
-            [`answer${n}`,item[`answer${n}`] || ''], [`context${n}`,item[`context${n}`] || ''],
+            [`answer${n}`,item[`answer${n}`] || ''], [`context${n}`,productContextValue(item, n)],
             [`screenshotMeta${n}`,item[`screenshot_meta${n}`] || {}],
             [`videoSource${n}`,item[`video_source${n}`] || {}],
           ])), taskStartTime:item.task_start_time ?? null, taskEndTime:item.task_end_time ?? null,
@@ -1223,10 +1223,11 @@ createApp({
         if (!parseResponse.ok) throw new Error(parsed.detail || (isCsv ? "CSV 解析请求失败" : "JSON / JSONL 解析请求失败"));
         const importErrors = [...(parsed.errors || [])];
         const report = {filename: file.name || '', accepted: (parsed.items || []).length,
+          blocked: importMode === 'compare' && (parsed.blocked === true || importErrors.some(error => String(error).includes('compare_context_missing'))),
           rejected: parsed.rejected_count ?? importErrors.length,
           screenshots: parsed.evidence_counts?.long_screenshot ?? (parsed.items || []).filter(it => it.evidence_mode === 'long_screenshot').length,
           videos: parsed.evidence_counts?.video_frames ?? (parsed.items || []).filter(it => it.evidence_mode === 'video_frames').length};
-        if (!(parsed.items || []).length) {
+        if (report.blocked || !(parsed.items || []).length) {
           importReport.value = report;
           errors.value = importErrors.length ? importErrors : ["文件中没有可导入的数据"];
           console.warn("[onOpManifestFile] no items parsed");
@@ -1306,11 +1307,12 @@ createApp({
     function opItemReady(it) {
       if (!it.query.trim()) return false;
       if (mode.value !== "compare") return Boolean((it.frames || []).length || it.videoPath);
-      return Boolean(selectEvidenceMode(it));
+      return Boolean(selectEvidenceMode(it)) && missingProductContexts(it).length === 0;
     }
 
     const canSubmit = computed(() =>
       !opPreparing.value && !opItems.value.some(it => it.queryUploading)
+      && !(mode.value === 'compare' && importReport.value?.blocked)
       && (mode.value === 'compare' ? opItems.value.length > 0 && opItems.value.every(opItemReady) : opItems.value.some(opItemReady))
     );
 
@@ -1319,13 +1321,21 @@ createApp({
       cancelHistoryLoad();
       const submitViewVersion = historyLoadVersion;
       runError.value = "";
+      if (mode.value === 'compare' && importReport.value?.blocked) {
+        runError.value = '导入文件存在缺失或无效的产品背景，请补齐后重新导入，或重新选择历史数据；当前不能开始评估。';
+        return;
+      }
       if (judgeModelProfiles.value.length && !selectedModelProfile.value) {
         runError.value = "请选择可用的裁判模型。";
         return;
       }
       const valid = mode.value === 'compare' ? opItems.value : opItems.value.filter(opItemReady);
       if (mode.value === 'compare' && valid.some(item => !opItemReady(item))) {
-        runError.value = '存在未填写问题或缺少产品证据的 Case，请展开检查；不会跳过这些条目提交。';
+        const missing = valid.flatMap((item, index) => {
+          const fields = missingProductContexts(item);
+          return fields.length ? [`第${index+1}条（Case ${item.id || index+1}）：${fields.join('、')} 必须填写非空背景`] : [];
+        });
+        runError.value = (missing.length ? missing.slice(0,8).join('；') : '存在未填写问题或缺少产品证据的 Case') + '，请展开检查；不会跳过这些条目提交。';
         return;
       }
       if (!valid.length) {
@@ -1337,7 +1347,6 @@ createApp({
         const item = {
           id: it.id || `${prefix}${idx + 1}`,
           query: it.query.trim(),
-          context: (it.context || "").trim(),
         };
         if (mode.value === "compare") {
           item.query_images = [...(it.queryImages || [])];
@@ -1358,6 +1367,7 @@ createApp({
           }
           item.category = (it.category || "").trim() || "default";
         } else {
+          item.context = (it.context || "").trim();
           item.video_path = it.videoPath;
           item.category = (it.category || "").trim() || "default";
           item.answer_text = (it.answer || "").trim();
@@ -2242,6 +2252,8 @@ createApp({
           return;
         }
         loaded = true;
+        importReport.value = null;
+        errors.value = [];
         closeActiveStream();
         taskId.value = d.task_id || id;
         setTaskProtocol(d);

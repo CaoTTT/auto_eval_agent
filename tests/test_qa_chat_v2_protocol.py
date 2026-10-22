@@ -516,7 +516,7 @@ async def test_v2_original_multiturn_inputs_and_trusted_binding(conversation_dat
     items, profile, _ = conversation_data
     if count == 3:
         for item in items:
-            item.update(product_count=3, screenshot3=item["screenshot1"].replace("p1-", "p3-"), answer3="产品3原始回答")
+            item.update(product_count=3, screenshot3=item["screenshot1"].replace("p1-", "p3-"), answer3="产品3原始回答", context3="产品3背景")
     prepared, service = prepare_conversation(conversation_data)
     target = prepared[1]
     bundle = service.prepare(target)

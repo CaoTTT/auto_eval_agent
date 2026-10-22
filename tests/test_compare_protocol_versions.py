@@ -136,7 +136,8 @@ async def test_eval_api_freezes_selected_protocol_on_new_task(monkeypatch):
 
     monkeypatch.setattr(server_module, "new_task", fake_new_task)
     monkeypatch.setattr(server_module.EVAL_SCHEDULER, "enqueue", lambda *_: 1)
-    item = {"query": "q", "video1": "a.mp4", "video2": "b.mp4"}
+    item = {"query": "q", "video1": "a.mp4", "video2": "b.mp4",
+            "context1": "产品1测试背景", "context2": "产品2测试背景"}
 
     default_response = await server_module.api_eval(
         server_module.EvalReq(mode="compare", items=[item])
@@ -463,3 +464,40 @@ def test_merge_keeps_plus_and_chat_revisions_separate_through_snapshot(profile_i
     for other in other_revisions:
         with pytest.raises(ValueError, match="无法恢复任务冻结的实现版本"):
             resolve_compare_protocol(profile_id, other)
+
+
+@pytest.mark.parametrize("product_count,evidence_mode,expected_sha256", [
+    (2, "video_frames", "3830efbd894849cf6eb570fdd7c03d43a96cf026be221aeb415d41d89aad0c64"),
+    (2, "long_screenshot", "6b45295c375708671d7a762a37eb268e2eff2536bb6480d8ce67c1874ecbdf27"),
+    (3, "video_frames", "935371dbf3c1c354b6fc034100789bdff1c50749ffbbc0156118c3622a6741e1"),
+    (3, "long_screenshot", "c94ee5de809737824a8e0976b664bf3af593da1a3eaa7d8ad52d80fbeb21512b"),
+])
+def test_1022_r023_preserves_prompt_bytes_when_new_revision_removes_shared_context(
+    product_count, evidence_mode, expected_sha256
+):
+    import hashlib
+    from auto_eval.judges.compare_protocols import V1022_COMPARE_PROTOCOL_ID
+    from auto_eval.judges import visual_compare_prompt_v02_1022_r023 as frozen_prompt
+
+    active = resolve_compare_protocol(V1022_COMPARE_PROTOCOL_ID)
+    frozen = resolve_compare_protocol(V1022_COMPARE_PROTOCOL_ID, "0.2.3")
+    assert active.bundle_revision == "0.2.4"
+    assert frozen.system_template is frozen_prompt.VISUAL_COMPARE_SYSTEM
+    assert frozen.user_template is frozen_prompt.VISUAL_COMPARE_USER
+    assert frozen not in list_compare_protocols()
+    assert frozen.observation_model is active.observation_model
+    assert frozen.public_metadata() == {**active.public_metadata(), "bundle_revision": "0.2.3"}
+    values = dict(persona="frozen-1022-r023", evaluation_datetime="2026-10-22T10:30:00+08:00",
+                  question="frozen query", context="frozen shared context", product_count=product_count,
+                  evidence_mode=evidence_mode, context1="c1", context2="c2", context3="c3",
+                  answer1="a1", answer2="a2", answer3="a3", frame_count1=1, frame_count2=2, frame_count3=3,
+                  image_count1=1, image_count2=2, image_count3=3,
+                  split_manifest1="{}", split_manifest2="{}", split_manifest3="{}")
+    system, user = frozen.prompt_templates(product_count)
+    rendered = system.render(**values) + "\0" + user.render(**values)
+    assert hashlib.sha256(rendered.encode("utf-8")).hexdigest() == expected_sha256
+    current_system, current_user = active.prompt_templates(product_count)
+    current = current_system.render(**values) + "\0" + current_user.render(**values)
+    assert "frozen shared context" in rendered and "evaluation_datetime" in rendered
+    assert "frozen shared context" not in current and "evaluation_datetime" not in current
+    assert frozen.prompt_templates(product_count) == frozen_prompt.templates_1022(product_count)

@@ -11,7 +11,7 @@ from auto_eval.web.runner import _to_evalitem
 def case(mode, item_id="case-1", **extra):
     row = {"id": item_id, "query": "  测试问题  "}
     row.update(
-        {"video1": "a.mp4", "video2": "b.mp4"}
+        {"video1": "a.mp4", "video2": "b.mp4", "context1": "产品1背景", "context2": "产品2背景"}
         if mode == "compare"
         else {"video_path": "a.mp4"}
     )
@@ -58,7 +58,7 @@ def test_pretty_single_object_keeps_actual_start_line_and_bom(mode):
 def test_array_reports_invalid_records_by_position_and_keeps_valid_records(mode):
     missing_media = case(mode, "missing-media")
     missing_media.pop("video2" if mode == "compare" else "video_path")
-    rows = [case(mode), None, {"query": 123}, missing_media,
+    rows = [case(mode), None, {"query": 123, "context1": "产品1背景", "context2": "产品2背景"}, missing_media,
             case(mode, "case-2"), case(mode)]
     items, errors = parse_jsonl(json.dumps(rows, indent=2), mode)
     assert [item["id"] for item in items] == ["case-1", "case-2"]
@@ -79,6 +79,8 @@ def test_json_array_preserves_compare_screenshot_and_query_image_validation():
         {"query": "图片类型错误", "video1": "one.mp4", "video2": "two.mp4",
          "query_images": "question.png"},
     ]
+    for row in rows:
+        row.update(context1="产品1背景", context2="产品2背景")
     items, errors = parse_jsonl(json.dumps(rows), "compare")
     assert len(items) == 1
     assert items[0]["evidence_mode"] == "long_screenshot"

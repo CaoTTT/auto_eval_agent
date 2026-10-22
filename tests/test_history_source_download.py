@@ -42,7 +42,8 @@ def source_api(tmp_path, monkeypatch):
 def evaluation(mode="rich_content", **extra):
     item = {"id": "one", "query": "修改后的评测输入"}
     if mode == "compare":
-        item.update(answer1="A", answer2="B", video1="a.mp4", video2="b.mp4")
+        item.update(answer1="A", answer2="B", video1="a.mp4", video2="b.mp4",
+                    context1="产品1背景", context2="产品2背景")
     return {"mode": mode, "items": [item], **extra}
 
 

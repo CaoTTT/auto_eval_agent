@@ -62,7 +62,7 @@ async function main() {
   for (const mode of ['rich_content', 'compare']) {
     app.mode.value = mode;
     app.opItems.value = [{query: 'Evaluate this', videoPath: 'sample.mp4', productCount: 2,
-      screenshot1Path: 'a.png', screenshot2Path: 'b.png'}];
+      screenshot1Path: 'a.png', screenshot2Path: 'b.png', context1: '产品1背景', context2: '产品2背景'}];
     for (const profile of profiles.slice(0, 2)) {
       app.selectedJudgeModelProfile.value = profile.id;
       app.changeJudgeModel();

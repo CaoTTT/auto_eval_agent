@@ -250,7 +250,8 @@ async def test_new_protocol_classifies_empty_length_without_retry_or_json_repair
     profile = VisualModeProfile(extraction=VisualExtractionConfig(algorithm_version="test"))
     judge = VisualCompareJudge(client, profile, protocol=V1022_COMPARE_PROTOCOL_ID)
     with pytest.raises(JudgeOutputTruncatedError) as raised:
-        await judge.evaluate(question="你好", answer1="你好", answer2="你好", product_count=2)
+        await judge.evaluate(question="你好", answer1="你好", answer2="你好", product_count=2,
+                             context1="产品1测试背景", context2="产品2测试背景")
 
     assert len(requests) == 1
     assert raised.value.raw_output == ""

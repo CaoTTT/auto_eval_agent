@@ -33,7 +33,7 @@ assert.equal(app.filteredResults.value.length,0,'numeric strings are invalid');
 row.answer1_understanding_score=4;
 app.selectedEvaluationProfile.value='qa_competitor_compare@0.3';
 assert.equal(app.filteredResults.value.length,1,'task contract remains frozen when changing the new-task selector');
-for (const revision of ['0.2.2','0.2.3']) {
+for (const revision of ['0.2.2','0.2.3','0.2.4']) {
   app.setTaskProtocol({evaluation_profile:profile,protocol_manifest:{bundle_revision:revision}});
   assert.ok(!app.resultCols.value.some(c=>['accuracy_summary','needs_human_review','rationale'].includes(c.key)));
   const fallback={...row,bundle_revision:revision};delete fallback.output_contract;
@@ -51,5 +51,5 @@ const context={};vm.runInNewContext(panelSource+'\nthis.Panel=HumanComparePanel;
 assert.match(context.Panel.template,/<template v-if="r.model_output_contract!=='compare_1022_v2'">；核验：/);
 const index=fs.readFileSync(path.join(__dirname,'../src/auto_eval/web/static/index.html'),'utf8');
 assert.match(index,/!compact1022\(\) && summary.needs_review_count/);
-assert.match(index,/app\.js\?v=20261022_interleaved_1022/);
+assert.match(index,/app\.js\?v=20261022_product_contexts/);
 console.log('1022 compact UI: six dimensions, Gate blocking, shared reasons, no third product, hidden retired fields and frozen legacy display passed');

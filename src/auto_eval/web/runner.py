@@ -19,6 +19,7 @@ from ..timing import StageTimings, collect_timings, timing_span
 from ..task_control import PauseRequested, bind_pause_check, check_pause, pause_aware, wait_for_active
 from .scheduler import MAX_CONCURRENCY, MODEL_LIMITER, PIPELINE_LIMITER, PREP_LIMITER, get_settings
 from ..config import AppConfig, JudgeConfig, VisualModeProfile
+from ..compare_input import normalize_product_contexts
 from ..query_images import prepare_query_images, QueryImageError, PREPARED_FIELDS
 from ..judges import (
     JudgeClient,
@@ -516,6 +517,13 @@ def _make_item_evaluator(
                 res = None
                 request_evidence = None
                 conversation_input = None
+                if (compare_protocol is not None
+                        and compare_protocol.output_contract == "compare_1022_v2"
+                        and compare_protocol.bundle_revision == "0.2.4"):
+                    try:
+                        item_dict.update(normalize_product_contexts(item_dict, _compare_product_count(item_dict)))
+                    except ValueError as exc:
+                        last_error = exc
                 item_dict.pop("screenshot_evidence", None)
                 task.items[idx].pop("screenshot_evidence", None)
                 def save_evidence(record):
@@ -526,7 +534,7 @@ def _make_item_evaluator(
                         item_dict["screenshot_evidence"] = request_evidence
                         task.items[idx]["screenshot_evidence"] = request_evidence
                         _persist_task(task)
-                if conversation_preparer is not None and _runtime_conversation(item_dict):
+                if last_error is None and conversation_preparer is not None and _runtime_conversation(item_dict):
                     try:
                         conversation_input = await run_preparation(conversation_preparer.prepare, item_dict,
                             timeout=float(runtime_options.get("video_prepare_timeout_s") or 300))
@@ -551,7 +559,7 @@ def _make_item_evaluator(
                     if task.mode == "compare"
                     else not item_dict.get("frames")
                 )
-                if needs_visual_prepare and not (_runtime_conversation(item_dict) if task.mode == "compare" else item_dict.get("session_id")):
+                if last_error is None and needs_visual_prepare and not (_runtime_conversation(item_dict) if task.mode == "compare" else item_dict.get("session_id")):
                     try:
                         log_event(
                             "视觉证据准备" if is_screenshot else "视频准备",
@@ -1424,6 +1432,12 @@ async def _eval_one(
     evaluation_time: datetime | None = None,
 ) -> dict:
     t0 = time.perf_counter()
+    if mode == "compare" and compare_judges:
+        protocol = getattr(compare_judges[0], "protocol", None)
+        if (getattr(protocol, "output_contract", None) == "compare_1022_v2"
+                and getattr(protocol, "bundle_revision", None) == "0.2.4"):
+            item_dict = {**item_dict, **normalize_product_contexts(item_dict, _compare_product_count(item_dict))}
+            item_dict.pop("context", None)
     item = _to_evalitem(item_dict, idx)
     out: dict = {"query": item.question}
     if item.context:

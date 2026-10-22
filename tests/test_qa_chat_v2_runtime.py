@@ -214,7 +214,8 @@ async def test_create_v2_task_api_freezes_new_manifest_and_preserves_v1_default(
     monkeypatch.setattr(server, "new_task", create)
     monkeypatch.setattr(server.EVAL_SCHEDULER, "enqueue", lambda *_: 1)
     response = await server.api_eval(server.EvalReq(mode="compare", evaluation_profile="qa_chat_compare@1.1",
-        items=[{"id": "one", "query": "聊聊天", "screenshot1": "a.png", "screenshot2": "b.png"}]))
+        items=[{"id": "one", "query": "聊聊天", "screenshot1": "a.png", "screenshot2": "b.png",
+                "context1": "产品1背景", "context2": "产品2背景"}]))
     manifest = response["protocol_manifest"]
     assert manifest["id"] == "qa_chat_compare@1.1"
     assert manifest["bundle_revision"] == "1.1.0" and manifest["result_schema_version"] == "qa-chat-result-2"

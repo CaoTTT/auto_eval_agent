@@ -219,7 +219,8 @@ async def test_create_chat_task_api_freezes_complete_candidate_manifest(monkeypa
     monkeypatch.setattr(server, "new_task", create)
     monkeypatch.setattr(server.EVAL_SCHEDULER, "enqueue", lambda *_: 1)
     response = await server.api_eval(server.EvalReq(mode="compare", evaluation_profile="qa_chat_compare@1.0",
-        items=[{"id": "new", "query": "聊聊天", "screenshot1": "a.png", "screenshot2": "b.png"}]))
+        items=[{"id": "new", "query": "聊聊天", "screenshot1": "a.png", "screenshot2": "b.png",
+                "context1": "产品1背景", "context2": "产品2背景"}]))
     manifest = response["protocol_manifest"]
     assert manifest["standard_id"] == "qa_chat_compare" and manifest["bundle_revision"] == "1.0.0"
     assert manifest["score_range"] == [1, 5]

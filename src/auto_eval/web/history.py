@@ -1262,9 +1262,9 @@ def _visual_compare_export_rows(results: list[dict], protocol_manifest: dict | N
         if r.get("output_contract"):
             compact = r["output_contract"] == "compare_1022_v2"
         elif r.get("bundle_revision"):
-            compact = identity and r["bundle_revision"] in {"0.2.2", "0.2.3"}
+            compact = identity and r["bundle_revision"] in {"0.2.2", "0.2.3", "0.2.4"}
         else:
-            compact = manifest.get("output_contract") == "compare_1022_v2" or (identity and manifest.get("bundle_revision") in {"0.2.2", "0.2.3"})
+            compact = manifest.get("output_contract") == "compare_1022_v2" or (identity and manifest.get("bundle_revision") in {"0.2.2", "0.2.3", "0.2.4"})
         row = {}
         for key, label in _COMPARE_COLUMNS:
             v = r.get(key)

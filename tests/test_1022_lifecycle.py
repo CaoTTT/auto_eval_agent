@@ -32,7 +32,7 @@ def test_config_exposes_new_label_without_changing_default(monkeypatch):
     selected = next(item for item in profiles if item["id"] == V1022_COMPARE_PROTOCOL_ID)
     assert selected["display"] == "V0.2简化版（1022优化）"
     assert selected["standard_version"] == "0.2-simplified-1022"
-    assert selected["bundle_revision"] == "0.2.3"
+    assert selected["bundle_revision"] == "0.2.4"
     assert selected["output_contract"] == "compare_1022_v2"
     assert selected["score_range"] == [1, 5]
     assert selected["input_modalities"] == ["text", "text_image"]
@@ -76,7 +76,8 @@ async def test_eval_api_freezes_new_protocol_and_snapshot_restores_it(monkeypatc
     monkeypatch.setattr(server.EVAL_SCHEDULER, "enqueue", lambda *_: 1)
     response = await server.api_eval(server.EvalReq(
         mode="compare", evaluation_profile=V1022_COMPARE_PROTOCOL_ID,
-        items=[{"id": "greeting", "query": "你好", "video1": "a.mp4", "video2": "b.mp4"}],
+        items=[{"id": "greeting", "query": "你好", "video1": "a.mp4", "video2": "b.mp4",
+                "context1": "产品1测试背景", "context2": "产品2测试背景"}],
     ))
     assert response["evaluation_profile"] == V1022_COMPARE_PROTOCOL_ID
     task = created[0]
@@ -197,6 +198,7 @@ async def test_runner_returns_diagnosable_failure_without_retries(tmp_path, monk
         )},
     )
     item = {"id": "bad-json", "query": "你好", "product_count": 2,
+            "context1": "产品1测试背景", "context2": "产品2测试背景",
             "frames1": [str(frame)], "frames2": [str(frame)]}
     protocol = resolve_compare_protocol(V1022_COMPARE_PROTOCOL_ID)
     task = Task(id="bad-output", mode="compare", items=[item], options={},

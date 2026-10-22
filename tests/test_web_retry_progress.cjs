@@ -22,7 +22,7 @@ async function check(evidenceMode, productCount, legacy = false) {
     close() { this.closed = true; }
     emit(name, data) { return this.handlers[name]?.({data: JSON.stringify(data)}); }
   }
-  vm.runInNewContext(source, {
+  const sandbox = {
     ref: value => ({value}), computed: fn => ({get value() {return fn();}}),
     onMounted() {}, onUnmounted() {}, nextTick(fn) {if (fn) ticks.push(fn);},
     createApp(options) {app = options.setup(); return {mount() {}};}, EventSource: FakeStream,
@@ -32,7 +32,9 @@ async function check(evidenceMode, productCount, legacy = false) {
         : url.endsWith('/retries') ? {selected: 1, accepted_indexes: [0], status: 'queued', retry_id: 'retry'} : {};
       return {ok: true, json: async () => data};
     },
-  });
+  };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../src/auto_eval/web/static/compare-cases.js'), 'utf8').replace(/^import[^\n]*\n/gm, '').replace(/^export /gm, ''), sandbox);
+  vm.runInNewContext(source, sandbox);
   await app.loadHistoryTask('task');
   assert.equal(app.progressEvents.value[0].length, 1, 'loaded history is keyed and deduplicated');
   assert.equal(app.progressEvents.value[0][0]._key, 'seq:100');

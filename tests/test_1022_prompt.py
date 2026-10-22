@@ -147,8 +147,10 @@ def test_user_template_preserves_only_actual_product_and_evidence_attribution(pr
         })
     _, user = templates_1022(product_count)
     rendered = user.render(**variables)
-    assert "2026-10-22T10:30:00+08:00" in rendered
-    assert "case发生于2026-08-01" in rendered
+    assert "2026-10-22T10:30:00+08:00" not in rendered
+    assert "evaluation_datetime" not in rendered
+    assert "case发生于2026-08-01" not in rendered
+    assert "可信公共背景" not in rendered
     assert "所有产品共享的用户题目，不是任何产品的回答" in rendered
     assert "{{" not in rendered and "{%" not in rendered
     for number in range(1, product_count + 1):
@@ -197,6 +199,8 @@ def test_policy_boundaries_remain_and_old_state_rules_are_gone():
         "顶部/侧栏“找到N篇资料、参考资料、搜索结果、检索结果列表”等聚合资料提示区不参加任何评分",
         "不据此扣分、判response fail或改input为partial/failed",
         "禁止用本次评测运行时间或模型自身时间代替历史case时间",
+        "对应产品的可信contextN中明确的交互、采集或观测时间",
+        "不得将某产品背景当作公共背景或用于其他产品",
         "普通“多少钱一瓶”若停留在价格信息获取，不自动要求购买入口",
         "不能从竞品出卡推定",
         "未出无关服务的产品给5",
@@ -228,10 +232,88 @@ def test_document_provenance_and_current_contract_match():
     assert SOURCE_SHA256 in standard
     for text in (standard, implementation):
         assert "0.2-simplified-1022" in text
-        assert all(revision in text for revision in ("0.2.3", "0.2.2", "0.2.1"))
+        assert all(revision in text for revision in ("0.2.4", "0.2.3", "0.2.2", "0.2.1"))
         assert "compare_1022_v2" in text
         assert "2400" in text
     assert "合成校准案例" in standard
     assert "双产品 36 个；三产品 47 个" in standard
     assert "不适用：" in standard and "未评分（证据不足）：" in standard
     assert "准确性相关列由程序填空" in standard
+
+
+@pytest.mark.parametrize("count", [2, 3])
+def test_current_template_does_not_depend_on_shared_context_or_run_time(count):
+    system, user = templates_1022(count)
+    values = dict(persona="评测员", question="今天营业吗", evidence_mode="long_screenshot",
+                  **{f"context{n}": f"产品{n}采集时间为2026-08-01" for n in range(1, count + 1)})
+    first = system.render(**values) + user.render(**values, context="共享条件A", evaluation_datetime="2026-01-01")
+    second = system.render(**values) + user.render(**values, context="共享条件B", evaluation_datetime="2026-12-31")
+    assert first == second
+    assert "evaluation_datetime" not in first
+    assert "共享条件" not in first
+    for number in range(1, count + 1):
+        assert f"产品{number}采集时间为2026-08-01" in first
+
+
+@pytest.mark.parametrize("revision", ["0.2.3", "0.2.4"])
+@pytest.mark.parametrize("count", [2, 3])
+def test_conversation_context_isolation_and_historical_time_preservation(monkeypatch, revision, count):
+    from types import SimpleNamespace
+    from auto_eval.judges import conversation_prompt
+    from auto_eval.judges.compare_protocols import V1022_COMPARE_PROTOCOL_ID, resolve_compare_protocol
+
+    monkeypatch.setattr(conversation_prompt, "encode_original_image", lambda *args: "data:image/png;base64,AA==")
+    monkeypatch.setattr(conversation_prompt, "request_budget", lambda *args: {"blocked": False})
+    turns = []
+    for index in (1, 2):
+        turn = {"turn_index": index, "query": f"问题{index}", "context": f"遗留共享背景{index}",
+                "product_count": count}
+        for n in range(1, count + 1):
+            turn[f"context{n}"] = f"背景P{n}T{index}"
+            turn[f"answer{n}"] = f"回答P{n}T{index}"
+            turn[f"screenshot_meta{n}"] = {"asset_id": f"P{n}T{index}", "split_status": "safe", "slices": [
+                {"path": "test.png", "start_y": 0, "end_y": 10, "sha256": "offline"}
+            ]}
+        turns.append(turn)
+    bundle = {"target_turn": 2, "turns": turns, "profile": SimpleNamespace(long_screenshot=None),
+              "limits": {}, "diagnostics": {"history_prefix_sha256": "history"}}
+    protocol = resolve_compare_protocol(V1022_COMPARE_PROTOCOL_ID, revision)
+    result = conversation_prompt.assemble_conversation("评分规则", bundle, protocol, evaluation_datetime="run-time-A")
+    text = "\n".join(part["text"] for part in result[1] if part["type"] == "text")
+    assert ("run-time-A" in text) == (revision == "0.2.3")
+    assert ("遗留共享背景" in text) == (revision == "0.2.3")
+    for n in range(1, count + 1):
+        segment = text.split(f"产品{n}自身轨迹开始", 1)[1].split(f"产品{n}轨迹结束", 1)[0]
+        for index in (1, 2):
+            assert f"背景P{n}T{index}" in segment
+        for other in set(range(1, count + 1)) - {n}:
+            assert f"背景P{other}" not in segment
+    repeated = conversation_prompt.assemble_conversation("评分规则", bundle, protocol, evaluation_datetime="run-time-B")
+    if revision == "0.2.4":
+        assert repeated[1] == result[1]
+        assert repeated[4] == result[4]
+        turns[0]["query"] = "修改历史问题"
+        changed = conversation_prompt.assemble_conversation("评分规则", bundle, protocol, evaluation_datetime="run-time-B")
+        assert changed[4] != repeated[4]
+
+
+def test_conversation_legacy_context_alias_stays_with_product_one(monkeypatch):
+    from types import SimpleNamespace
+    from auto_eval.judges import conversation_prompt
+    from auto_eval.judges.compare_protocols import V1022_COMPARE_PROTOCOL_ID, resolve_compare_protocol
+
+    monkeypatch.setattr(conversation_prompt, "request_budget", lambda *args: {"blocked": False})
+    turn = {"turn_index": 1, "query": "问题", "context": "仅属于产品1", "context2": "仅属于产品2",
+            "product_count": 2, "screenshot_meta1": {"slices": []}, "screenshot_meta2": {"slices": []}}
+    bundle = {"target_turn": 1, "turns": [turn], "profile": SimpleNamespace(), "limits": {},
+              "diagnostics": {"history_prefix_sha256": "history"}}
+    result = conversation_prompt.assemble_conversation(
+        "评分规则", bundle, resolve_compare_protocol(V1022_COMPARE_PROTOCOL_ID))
+    text = "\n".join(part["text"] for part in result[1] if part["type"] == "text")
+    assert "仅属于产品1" not in text.split("产品1自身轨迹开始", 1)[0]
+    assert text.count("仅属于产品1") == 1
+    assert "仅属于产品1" not in text.split("产品2自身轨迹开始", 1)[1]
+    turn["context1"] = ""
+    with pytest.raises(ValueError, match="context1"):
+        conversation_prompt.assemble_conversation(
+            "评分规则", bundle, resolve_compare_protocol(V1022_COMPARE_PROTOCOL_ID))

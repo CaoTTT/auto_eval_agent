@@ -84,12 +84,12 @@ python -m uvicorn auto_eval.web.server:app --host 0.0.0.0 --port 8054
 
 问答闲聊新增 **V2·1-5分（候选）**，可在对比模式的评测标准中选择 `qa_chat_compare@1.1`。V1 和默认标准保留；V2 使用独立的 56/78 键输出合同，统计、导出与人工基准同步支持。[使用与版本说明](docs/qa-chat-compare-v2-implementation.md)。
 
-**V0.2简化版（1022优化）**使用 `qa_competitor_compare@0.2-simplified-1022`，当前修订 `0.2.3 / compare_1022_v2`。双产品和三产品使用独立 Prompt 与解析模型，完整输出分别为 36、47 个字段：全部输入状态最先，Gate 理由与对应判定相邻，每个维度按适用性→原因→评分排列，冲突理由与结论最后。任一 Gate 未通过或无法确认时，该产品六维均为 NA；准确性不再送模型评估，Excel 保留原列并填空。旧修订 `0.2.1`、`0.2.2` 仍按各自冻结规则恢复。[测评标准](docs/compare-standard-1022.md)及[输出与实现说明](docs/compare-1022-implementation.md)。
+**V0.2简化版（1022优化）**使用 `qa_competitor_compare@0.2-simplified-1022`，当前修订 `0.2.4 / compare_1022_v2`。双产品和三产品使用独立 Prompt 与解析模型，完整输出分别为 36、47 个字段：全部输入状态最先，Gate 理由与对应判定相邻，每个维度按适用性→原因→评分排列，冲突理由与结论最后。任一 Gate 未通过或无法确认时，该产品六维均为 NA；准确性不再送模型评估，Excel 保留原列并填空。当前 Prompt 仅使用各产品的 `contextN`，不注入评测运行时间或共享 `context`。导入 compare 数据时，每个参评产品的背景都须为非空字符串；仅当 `context1` 字段不存在时兼容读取 `context` 为产品1背景，显式空值不回退。旧修订 `0.2.1`、`0.2.2`、`0.2.3` 仍按各自冻结规则恢复。[测评标准](docs/compare-standard-1022.md)及[输出与实现说明](docs/compare-1022-implementation.md)。
 
 **时效性评估V1·1-3分（候选）**使用 `timeliness_compare@1.0`，当前修订 `1.0.2 / timeliness-result-3`。在原有两个Gate和三个评分维度之外，同次调用输出整组“内容冲突理由”和“有冲突／无冲突／不确定”；检测规则沿用v0.2稳定plus，冲突不自动改变分数。页面、历史、CSV/XLSX及统计同步展示，旧修订仍按原合同读取和续跑；使用新规则重评旧数据需新建任务。见[时效性评估完整标准](docs/timeliness-standard-v1.0.md)和[完整Prompt](docs/timeliness-evaluation-prompt-final.md)。
 
 - **垂域视觉评测**：`query`（必填）、`video_path`（必填）、可选 `id` / `context`（可信背景条件，可写当前时间地点）/ `category`（垂域）/ `answer_text` / `task_start_time`+`task_end_time`（截取作答区间）。
-- **垂域视觉对比评测**：`query`、`video1`+`video2`（必填）、`answer1`+`answer2`、可选 `context` / `context1` / `context2`。
+- **垂域视觉对比评测**：`query`、各产品非空 `contextN`，以及完整的 `screenshot1/2` 或 `video1/2`（必填）；`answer1/2` 可选。三产品另需 `context3` 和同类型的第三产品视觉材料。只有 `context1` 字段不存在时，兼容读取 `context` 为产品1背景。
 
 ### 裁判明细日志（可选）
 

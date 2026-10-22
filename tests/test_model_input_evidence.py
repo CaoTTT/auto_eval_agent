@@ -81,6 +81,8 @@ async def mixed_task(environment, monkeypatch, count=2):
          "query_images": [shots[0]], "screenshot1": shots[0], **videos},
         {"id": "failed", "query": "provider-fails", "product_count": count, **videos},
     ]
+    for item in objects:
+        item.update({f"context{n}": f"产品{n}测试背景" for n in range(1, count + 1)})
     items, errors = parse_jsonl(json.dumps(objects), "compare")
     assert not errors
     client = Client(count=count)
@@ -168,7 +170,8 @@ async def test_failed_or_blocked_calls_never_export_images(environment, monkeypa
     else:
         profile.long_screenshot.max_input_tokens = 1
     monkeypatch.setattr(runner, "JudgeClient", lambda *a: client)
-    items, errors = parse_jsonl(json.dumps({"query": "q", "screenshot1": shots[0], "screenshot2": shots[1]}), "compare")
+    items, errors = parse_jsonl(json.dumps({"query": "q", "screenshot1": shots[0], "screenshot2": shots[1],
+                                          "context1": "产品1测试背景", "context2": "产品2测试背景"}), "compare")
     assert not errors
     task = Task(id="failure", mode="compare", items=items, options={})
     one, _ = runner._make_item_evaluator(task, AppConfig(
@@ -200,6 +203,7 @@ async def test_export_uses_latest_results_and_never_mutable_item_audit(environme
 async def test_concurrent_case_capture_does_not_mix_requests(environment, monkeypatch):
     root, profile, shots = environment
     objects = [{"id": f"case-{n}", "query": f"question-{n}",
+                "context1": "产品1测试背景", "context2": "产品2测试背景",
                 "screenshot1": shots[n], "screenshot2": shots[n + 1]} for n in (0, 1)]
     items, errors = parse_jsonl(json.dumps(objects), "compare")
     assert not errors

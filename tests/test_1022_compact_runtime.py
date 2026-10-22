@@ -40,6 +40,8 @@ def profile():
 async def evaluate(output, *, count=2, mode="off", revision=None, **kwargs):
     client = OfflineClient(output, mode)
     protocol = resolve_compare_protocol(V1022_COMPARE_PROTOCOL_ID, revision)
+    for n in range(1, count + 1):
+        kwargs.setdefault(f"context{n}", f"产品{n}测试背景")
     result = await VisualCompareJudge(client, profile(), protocol).evaluate(
         question="你好", product_count=count,
         evaluation_time=datetime(2026, 10, 22, tzinfo=timezone.utc), **kwargs,
@@ -67,7 +69,7 @@ async def test_new_revision_uses_actual_product_fields_and_derived_only_metadata
     assert result["standard_version"] == "0.2-simplified-1022"
     assert result["product_count"] == count
     assert result["evaluation_profile"] == V1022_COMPARE_PROTOCOL_ID
-    assert result["bundle_revision"] == "0.2.3"
+    assert result["bundle_revision"] == "0.2.4"
     assert result["output_contract"] == "compare_1022_v2"
     assert result["evaluation_datetime"] == "2026-10-22T00:00:00+00:00"
     assert result["understanding_rank_groups"] == [[f"product{n}" for n in range(1, count + 1)]]
@@ -103,7 +105,7 @@ async def test_frozen_r022_keeps_reasons_first_prompt_schema_parser_and_projecti
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("revision", ["0.2.2", "0.2.3"])
+@pytest.mark.parametrize("revision", ["0.2.2", "0.2.3", "0.2.4"])
 async def test_runtime_does_not_mix_frozen_output_order(revision):
     from auto_eval.judges.compare_1022_contract_r022 import example_1022_output as old_example
 
@@ -202,6 +204,7 @@ async def test_invalid_output_reports_raw_error_without_semantic_repair(category
     with pytest.raises(JudgeOutputParseError) as caught:
         await VisualCompareJudge(client, profile(), V1022_COMPARE_PROTOCOL_ID).evaluate(
             question="你好", product_count=2,
+            context1="产品1测试背景", context2="产品2测试背景",
         )
     assert caught.value.error_category == category
     assert caught.value.raw_output == text
@@ -230,6 +233,7 @@ async def test_risky_screenshot_does_not_resurrect_removed_review_fields(tmp_pat
     client = OfflineClient(example_1022_output(2, evidence_mode="long_screenshot"))
     result = await VisualCompareJudge(client, cfg, V1022_COMPARE_PROTOCOL_ID).evaluate(
         question="你好", product_count=2, evidence_mode="long_screenshot",
+        context1="产品1测试背景", context2="产品2测试背景",
         screenshot_metas=metas,
         frames1=[part["path"] for part in metas[0]["slices"]],
         frames2=[part["path"] for part in metas[1]["slices"]],

@@ -70,7 +70,8 @@ class Client:
 
 @pytest.mark.parametrize("images", [None, "a.png", [""], ["a", "b"], [4]])
 def test_invalid_input_not_silently_text(images):
-    item = {"query": "q", "query_images": images, "video1": "a", "video2": "b"}
+    item = {"query": "q", "query_images": images, "video1": "a", "video2": "b",
+            "context1": "产品1背景", "context2": "产品2背景"}
     parsed, errors = parse_jsonl(json.dumps(item), "compare")
     assert not parsed and errors
     with pytest.raises(HTTPException):
@@ -80,6 +81,8 @@ def test_invalid_input_not_silently_text(images):
 def test_mixed_normalization_and_untrusted_metadata():
     items = [{"query": "q", "video1": "a", "video2": "b"},
              {"query": "q", "query_images": ["a.png"], "screenshot1": "a", "screenshot2": "b"}]
+    for item in items:
+        item.update(context1="产品1背景", context2="产品2背景")
     parsed, errors = parse_jsonl("\n".join(map(json.dumps, items)), "compare")
     assert not errors
     assert [it["input_modality"] for it in parsed] == ["text", "text_image"]
@@ -368,6 +371,7 @@ async def test_api_replacement_uses_sanitized_normalized_item(setup_images, monk
     monkeypatch.setattr(server, "spawn_background", lambda coro: coro.close())
     await server.api_eval_items(server.EvalItemsReq(task_id="existing", items=[{
         "id": "a", "question": "new", "query_images": [], "video1": "a", "video2": "b",
+        "context1": "产品1背景", "context2": "产品2背景",
         "query_image_meta": [{"sha256": "fake"}], "input_manifest_sha256": "fake",
     }]))
     assert task.items[0]["query"] == "new"

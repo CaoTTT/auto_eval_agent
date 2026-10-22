@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
 from ..config import load_config
+from ..compare_input import CONTEXT_ERROR_CODE
 from ..judge_profiles import (
     model_profiles, default_profile_id, configured_profile,
     resolve_new_runtime, restore_runtime, check_frozen_options, legacy_runtime,
@@ -298,7 +299,9 @@ def _validate_eval_request(req: EvalReq, app_cfg, *, previous_items=None) -> Non
             item.clear()
             item.update(normalized)
         except ValueError as exc:
-            invalid.append(f"第{index}条 {exc}")
+            case_id = item.get("id")
+            case_label = f"（Case {case_id.strip()}）" if isinstance(case_id, str) and case_id.strip() else ""
+            invalid.append(f"第{index}条{case_label} {exc}")
     try:
         validate_conversations([*(previous_items or []), *req.items])
     except ValueError as exc:
@@ -394,6 +397,7 @@ def api_parse(req: ParseReq):
     else:
         raise HTTPException(400, "需提供 text、jsonl 或 csv")
     return {"items": items, "errors": errs, "count": len(items),
+            "blocked": req.mode == "compare" and any(CONTEXT_ERROR_CODE in error for error in errs),
             "rejected_count": len(errs),
             "evidence_counts": {mode: sum(item.get("evidence_mode") == mode for item in items)
                                 for mode in ("long_screenshot", "video_frames")}}
@@ -540,8 +544,8 @@ async def api_eval(req: EvalReq):
     if not req.items:
         raise HTTPException(400, "items 为空")
     app_cfg = cfg()
-    judge_runtime, judges = _new_judge_runtime(app_cfg, req.options)
     _validate_eval_request(req, app_cfg)
+    judge_runtime, judges = _new_judge_runtime(app_cfg, req.options)
     # 模型调用并发统一由全局 MODEL_LIMITER 决定，不再从每个任务的 options 单独设置。
     protocol = (
         _compare_protocol_or_422(req.evaluation_profile)
