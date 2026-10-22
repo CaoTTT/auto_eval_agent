@@ -68,15 +68,26 @@ def test_sampling_boundaries_and_zero_seed_are_valid(temperature, top_p, penalty
 
 def test_deployment_defaults_use_stable_sampling_and_explicit_thinking_mode():
     config_dir = Path(__file__).resolve().parents[1] / "config"
-    judge = load_config(config_dir).judges[0]
-    expected = {**SAMPLING, "seed": 42, "presence_penalty": None}
+    config = load_config(config_dir)
+    judge = config.judges[0]
+    expected = {**SAMPLING, "seed": 42, "presence_penalty": None, "max_tokens": 65536}
     assert {field: getattr(judge, field) for field in expected} == expected
     assert judge.enable_thinking is False
+    for profile in config.judge_model_profiles:
+        _, resolved = resolve_new_runtime(config, {"judge_model_profile": profile.id})
+        effective = resolved[0]
+        assert {field: getattr(effective, field) for field in expected} == expected
+        assert effective.total_timeout_s == 1800
+        assert effective.read_timeout_s == 300
+    visual = config.visual_modes["rich_content"]
+    assert visual.long_screenshot.output_reserve_tokens == judge.max_tokens
+    assert visual.query_images.output_reserve_tokens == judge.max_tokens
 
     example = yaml.safe_load((config_dir / "judges.bailian.example.yaml").read_text(encoding="utf-8"))
     bailian = JudgeConfig.model_validate(example["judges"][0])
     assert bailian.top_k == 1 and bailian.seed == 42
-    assert bailian.presence_penalty == 0 and bailian.max_tokens == 8192
+    assert bailian.presence_penalty == 0 and bailian.max_tokens == 65536
+    assert bailian.total_timeout_s == 1800 and bailian.read_timeout_s == 300
     assert bailian.frequency_penalty is None
     assert bailian.enable_thinking is True
 

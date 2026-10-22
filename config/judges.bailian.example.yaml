@@ -14,13 +14,14 @@ judges:
     top_k: 1
     seed: 42
     presence_penalty: 0
-    max_tokens: 8192
+    # 同步 config/visual_modes/rich_content.yaml 的两处 output_reserve_tokens。
+    max_tokens: 65536
     enable_thinking: true
     vl_high_resolution_images: true
     concurrency: 128
-    # 单次模型请求总超时；题目级超时在页面单独设置。
-    total_timeout_s: 300
-    read_timeout_s: 90
+    # 单次请求 30 分钟，连续无数据 5 分钟；单题默认 60 分钟。
+    total_timeout_s: 1800
+    read_timeout_s: 300
 
 default_judge_model_profile: bailian_qwen35_397b
 judge_model_profiles:

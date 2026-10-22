@@ -158,7 +158,7 @@ createApp({
         ? value.toLocaleString("zh-CN", { maximumFractionDigits: digits }) : "—";
     }
 
-    const evalTimeout = ref(900);
+    const evalTimeout = ref(3600);
     const submitting = ref(false);
     const running = ref(false);
     const progress = ref(0);

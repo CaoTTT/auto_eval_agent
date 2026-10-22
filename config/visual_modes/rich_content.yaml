@@ -9,7 +9,8 @@ long_screenshot:
   max_aspect_ratio: 200
   max_input_tokens: 260096
   context_window: 262144
-  output_reserve_tokens: 8192
+  # 与 judges.yaml 的 max_tokens 保持一致，避免图片输入占满输出空间。
+  output_reserve_tokens: 65536
 
 card_types:
   music: 音乐
@@ -52,7 +53,7 @@ query_images:
   request_overhead_bytes: 65536
   max_input_tokens: 260096
   context_window: 262144
-  output_reserve_tokens: 8192
+  output_reserve_tokens: 65536
 
 extraction:
   algorithm_version: rich-content-v1.1.0

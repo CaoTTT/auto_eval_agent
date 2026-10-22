@@ -17,14 +17,14 @@ async function main() {
   });
   app.mode.value = 'rich_content';
   app.opItems.value = [{id: 'case-one', query: 'test', videoPath: 'recording.mp4'}];
-  assert.equal(app.evalTimeout.value, 900);
+  assert.equal(app.evalTimeout.value, 3600);
   await app.submit();
   assert.equal(requests[0].url, '/api/eval');
-  assert.equal(requests[0].body.options.eval_timeout_s, 900, 'new task sends the 900-second default');
+  assert.equal(requests[0].body.options.eval_timeout_s, 3600, 'new task sends the 3600-second default');
   app.evalTimeout.value = 420;
   await app.submit();
   assert.equal(requests[1].body.options.eval_timeout_s, 420, 'explicit user timeout remains configurable');
-  console.log('Evaluation timeout UI: 900-second default and explicit override submissions passed');
+  console.log('Evaluation timeout UI: 3600-second default and explicit override submissions passed');
 }
 
 main().catch(error => {console.error(error); process.exitCode = 1;});
