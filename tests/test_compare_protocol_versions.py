@@ -337,6 +337,40 @@ def test_stable_plus_preserves_existing_schema_and_gate_policy(response_gate, re
     assert result["overall_winner"] is None
 
 
+@pytest.mark.parametrize("protocol_id,revision", [
+    (DEFAULT_COMPARE_PROTOCOL_ID, "0.2.0"),
+    (DEFAULT_COMPARE_PROTOCOL_ID, "0.2.1"),
+    (V02_PLUS_COMPARE_PROTOCOL_ID, "0.2.1"),
+    (V02_PLUS_COMPARE_PROTOCOL_ID, "0.2.2"),
+    (V03_COMPARE_PROTOCOL_ID, "0.3.0"),
+    (V03_COMPARE_PROTOCOL_ID, "0.3.1"),
+    (V02_CALIBRATED_COMPARE_PROTOCOL_ID, "0.2.2"),
+    (V02_CALIBRATED_COMPARE_PROTOCOL_ID, "0.2.3"),
+    (V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID, "0.2.3"),
+    (V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID, "0.2.4"),
+])
+@pytest.mark.parametrize("product_count", [2, 3])
+@pytest.mark.parametrize("evidence_mode", ["video_frames", "long_screenshot"])
+def test_visual_compare_revisions_use_only_product_contexts(
+    protocol_id, revision, product_count, evidence_mode
+):
+    protocol = resolve_compare_protocol(protocol_id, revision)
+    values = dict(persona="test", product_count=product_count, evidence_mode=evidence_mode,
+                  evaluation_datetime="2026-10-22T12:00:00+08:00", question="shared query")
+    for number in (1, 2, 3):
+        values.update({f"context{number}": f"product-context-sentinel-{number}",
+                       f"answer{number}": f"answer-{number}", f"frame_count{number}": 1,
+                       f"image_count{number}": 1, f"split_manifest{number}": "{}"})
+    user = protocol.user_template.render(**values)
+    assert user == protocol.user_template.render(**values, context="shared-context-must-not-be-sent")
+    system = protocol.system_template.render(**values)
+    assert "shared-context-must-not-be-sent" not in system + user
+    assert "可信公共" not in system + user
+    for number in range(1, product_count + 1):
+        assert f"产品{number}背景：product-context-sentinel-{number}" in user
+    assert ("product-context-sentinel-3" in user) is (product_count == 3)
+
+
 @pytest.mark.parametrize("revision", ["0.2.0", "0.2.3", "0.2.4", "0.3.0", "1.0.0", "1.1.0", "unknown"])
 def test_stable_plus_does_not_restore_another_protocol_revision(revision):
     with pytest.raises(ValueError, match="无法恢复任务冻结的实现版本"):
@@ -344,29 +378,25 @@ def test_stable_plus_does_not_restore_another_protocol_revision(revision):
 
 
 @pytest.mark.parametrize("product_count,evidence_mode,expected_sha256", [
-    (2, "video_frames", "cad4deb0a5db837ac161cd50af994ad58d058cc474aa31eeed7f8e8da176eb1a"),
-    (2, "long_screenshot", "c6c7a1e7b6b26d95e7ab3274aab6b7d0f9e66e322f0744cc18b3ead42d2a1b94"),
-    (3, "video_frames", "9c9f7c9389b67413302cdcce01afd76eb3c0b3a83e4cf5b0ea26bf0720858603"),
-    (3, "long_screenshot", "fb367a01fd72bcae3266946cbc05da714a4b21faf3ba32f09934ad2e40693cbb"),
+    (2, "video_frames", "53100a9c03b5749d2f1a8d417686a9b53d49b4d00a8c59298103b1ff6667af0b"),
+    (2, "long_screenshot", "c51ec7c7eb6bf6c40ea3e17e8587312fbc27f014cd373700f8792fe20fc14d5f"),
+    (3, "video_frames", "a3061b98d8263605925a113cf463b0dde567622020d1d38cdaa9df8f60b85aab"),
+    (3, "long_screenshot", "93211f3261ade148d31907a24aaf739cd2640ed3785775a2f3a0973120465ddc"),
 ])
-def test_stable_plus_prompt_bytes_remain_frozen(product_count, evidence_mode, expected_sha256):
-    """Freeze the original stable-plus source and rendered 0.2.1 request.
-
-    Anchors were captured from competitive_assessment 7dbe69c, before the
-    qa_chat implementation merge. A scoring change requires a new revision.
-    """
+def test_legacy_stable_plus_preserves_contract_without_shared_context(product_count, evidence_mode, expected_sha256):
+    """Retain 0.2.1 contracts after explicitly removing shared context from legacy prompts."""
     import hashlib
     from pathlib import Path
     from auto_eval.judges import visual_compare_prompt_v02_simplified_plus_r021 as prompt
 
     source = Path(prompt.__file__).read_text(encoding="utf-8").encode("utf-8")
-    assert hashlib.sha256(source).hexdigest() == "f436ea425624ec57a47c81401a9812a37eb401d60f3749a24ef365fbb24b3e9b"
+    assert hashlib.sha256(source).hexdigest() == "35afb710f23e3d3d190b890dc03cc7f4dea2d1dc77bd9218a61d3b84cf66a5f8"
     protocol = resolve_compare_protocol(V02_PLUS_COMPARE_PROTOCOL_ID, "0.2.1")
     assert protocol.system_template is prompt.VISUAL_COMPARE_SYSTEM
     assert protocol.user_template is prompt.VISUAL_COMPARE_USER
     values = dict(persona="frozen-plus-regression", product_count=product_count,
                   evidence_mode=evidence_mode, evaluation_datetime="2026-10-15T12:00:00+08:00",
-                  question="frozen query", context="frozen context", context1="c1", context2="c2", context3="c3",
+                  question="frozen query", context1="c1", context2="c2", context3="c3",
                   answer1="a1", answer2="a2", answer3="a3", frame_count1=2, frame_count2=2, frame_count3=2,
                   image_count1=2, image_count2=2, image_count3=2,
                   split_manifest1="{}", split_manifest2="{}", split_manifest3="{}")
@@ -383,10 +413,10 @@ def test_stable_plus_prompt_bytes_remain_frozen(product_count, evidence_mode, ex
 
 
 @pytest.mark.parametrize("product_count,evidence_mode,expected_sha256", [
-    (2, "video_frames", "6eda7cb297d89045a115e3d34fb41a58b4cc1115e2a5f1ec5be4f84f8ac16950"),
-    (2, "long_screenshot", "f11aa6874e78850f41a059a3f7015c3c1be8c7e96678e0f32bc4c4b153790644"),
-    (3, "video_frames", "be4a83308d7ace04e10d35ea67123292e7c2b4b215d166d1b7b6444952a40f49"),
-    (3, "long_screenshot", "a4f02fbf1e34bd2476cb3d27edda31829bca3360eb3ff892c10d129aeae239a8"),
+    (2, "video_frames", "77f21b013e3eee4d4400a1d09e1d1ed8d589a6f2bbdd7918025b27921ebbd6a7"),
+    (2, "long_screenshot", "616ffb66c23dbaf1a4ac93a37bd902eb73e13875f554d64ce368d42475367af9"),
+    (3, "video_frames", "f265565df3f62edccf6a9a91d430076b32efbc2043519077b7d18f825fe9eb88"),
+    (3, "long_screenshot", "947618eb5fda05eb2499df3f188f3e59f95299b06c5514041e9fd161dfb010bf"),
 ])
 def test_stable_plus_uploaded_prompt_is_frozen_and_preserves_output_contract(
     product_count, evidence_mode, expected_sha256
@@ -397,8 +427,9 @@ def test_stable_plus_uploaded_prompt_is_frozen_and_preserves_output_contract(
     from pathlib import Path
     from auto_eval.judges import visual_compare_prompt_v02_simplified_plus as prompt
 
-    assert hashlib.sha256(Path(prompt.__file__).read_bytes()).hexdigest() == (
-        "5c774f5bf795f8b9a1047a535186a5c30044c767d2adcc3123a9f1aa7b92a7ad"
+    source = Path(prompt.__file__).read_text(encoding="utf-8").encode("utf-8")
+    assert hashlib.sha256(source).hexdigest() == (
+        "4c73319f7de911e6c42ca2ba1eb7874bae70502483445d172c0057835426d24e"
     )
     active = resolve_compare_protocol(V02_PLUS_COMPARE_PROTOCOL_ID)
     frozen = resolve_compare_protocol(V02_PLUS_COMPARE_PROTOCOL_ID, "0.2.1")
@@ -415,7 +446,7 @@ def test_stable_plus_uploaded_prompt_is_frozen_and_preserves_output_contract(
     assert active.request_metadata() == {**frozen.request_metadata(), "bundle_revision": "0.2.2"}
     values = dict(persona="frozen-plus-regression", product_count=product_count,
                   evidence_mode=evidence_mode, evaluation_datetime="2026-10-15T12:00:00+08:00",
-                  question="frozen query", context="frozen context", context1="c1", context2="c2", context3="c3",
+                  question="frozen query", context1="c1", context2="c2", context3="c3",
                   answer1="a1", answer2="a2", answer3="a3", frame_count1=2, frame_count2=2, frame_count3=2,
                   image_count1=2, image_count2=2, image_count3=2,
                   split_manifest1="{}", split_manifest2="{}", split_manifest3="{}")
@@ -423,7 +454,7 @@ def test_stable_plus_uploaded_prompt_is_frozen_and_preserves_output_contract(
     user = active.user_template.render(**values)
     request = system + "\0" + user
     assert hashlib.sha256(request.encode("utf-8")).hexdigest() == expected_sha256
-    assert user == frozen.user_template.render(**values)
+    assert "可信公共背景" not in user
 
     def output_example(rendered_system):
         output = rendered_system.split("【二十二、输出JSON结构】", 1)[1]

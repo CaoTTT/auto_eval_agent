@@ -44,11 +44,14 @@ async def test_original_media_is_sent_once_with_explicit_product_roles(tmp_path,
     if metadata:
         kwargs["screenshot_metas"] = metadata
     result = await VisualCompareJudge(client, cfg, PROFILE).evaluate(
-        question="今天几点开放？", context="测试日期2026-10-20", product_count=count, evidence_mode=mode, **kwargs)
+        question="今天几点开放？", context="应被忽略的公共背景", context1="产品1测试日期2026-10-20",
+        product_count=count, evidence_mode=mode, **kwargs)
     assert len(client.calls) == 1 and not client.repairs
     parts = client.calls[0][2]["content_parts"]
     assert sum(p["type"] == "image_url" for p in parts) == count
     text = "\n".join(p["text"] for p in parts if p["type"] == "text")
+    assert "应被忽略的公共背景" not in text
+    assert "产品1测试日期2026-10-20" in text
     for p in range(1, count + 1):
         assert f"产品{p}" in text
     assert len(result["raw_key_pairs"]) == 7 * count + 8
@@ -58,17 +61,23 @@ async def test_original_media_is_sent_once_with_explicit_product_roles(tmp_path,
 
 
 @pytest.mark.asyncio
-async def test_audit_clock_never_changes_prompt_but_supplied_test_context_does():
+async def test_only_product_test_context_changes_prompt_and_request_identity():
     client = FakeClient(payload())
     judge = VisualCompareJudge(client, profile(), PROFILE)
-    kwargs = dict(question="今天几点开放？", context="测试日期2026-10-20")
+    kwargs = dict(question="今天几点开放？", context="旧公共背景", context1="测试日期2026-10-20")
     first = await judge.evaluate(**kwargs, evaluation_time=datetime(2026, 10, 20, tzinfo=timezone.utc))
     later = await judge.evaluate(**kwargs, evaluation_time=datetime(2030, 1, 1, tzinfo=timezone.utc))
     assert client.calls[0] == client.calls[1]
     assert first["input_manifest_sha256"] == later["input_manifest_sha256"]
     assert first["prompt_sha256"] == later["prompt_sha256"]
-    changed = await judge.evaluate(question=kwargs["question"], context="测试日期2026-11-20")
+    shared_changed = await judge.evaluate(**{**kwargs, "context": "新公共背景"})
+    assert client.calls[0] == client.calls[2]
+    assert first["input_manifest_sha256"] == shared_changed["input_manifest_sha256"]
+    assert first["prompt_sha256"] == shared_changed["prompt_sha256"]
+    changed = await judge.evaluate(**{**kwargs, "context1": "测试日期2026-11-20"})
+    assert client.calls[0] != client.calls[3]
     assert first["input_manifest_sha256"] != changed["input_manifest_sha256"]
+    assert first["prompt_sha256"] != changed["prompt_sha256"]
 
 
 @pytest.mark.asyncio

@@ -1432,7 +1432,6 @@ async def _eval_one(
         # 保证 presence/count/items 始终来自同一份自洽观察。
         visual = await rich_judges[0].evaluate(
             question=item.question,
-            context=(item.context or "").strip(),
             answer_text=answer_text,
             frames=frames,
             **({"evidence_callback": evidence_callback} if evidence_callback else {}),
@@ -1492,7 +1491,6 @@ async def _eval_one(
             **({"evaluation_time": evaluation_time} if evaluation_time is not None else {}),
             **({"query_image_meta": item_dict["query_image_meta"]} if item.query_images else {}),
             question=item.question,
-            context=(item.context or "").strip(),
             context1=contexts[1],
             answer1=answers[1],
             frames1=[str(path) for path in frames_by_product[1]],

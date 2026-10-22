@@ -120,7 +120,7 @@ class ConversationIndex:
         turns = tuple(deepcopy(it) for it in self.groups[session_id] if it["turn_index"] <= target_turn)
         if len(turns) != target_turn:
             raise ValueError("conversation_history_missing: 无法重建完整原始前缀")
-        keys = {"id", "query", "context", "query_images", "product_count", *FIELDS,
+        keys = {"id", "query", "query_images", "product_count", *FIELDS,
                 *(f"{p}{n}" for p in ("answer", "context", "screenshot") for n in (1, 2, 3))}
         identity = [{k: it[k] for k in sorted(keys) if k in it} for it in turns]
         return TurnEvaluationInput(session_id, target_turn, turns, digest(identity))

@@ -27,7 +27,6 @@ from .prompts import (
     RUBRIC_USER,
     parse_analysis,
     parse_json_loose,
-    resolve_prompt_context,
 )
 
 _VALID = {"right", "wrong", "partial", "unclear"}
@@ -129,13 +128,6 @@ class RubricJudge:
     async def score(self, item: EvalItem, model_name: str, answer: str, run_idx: int = 0,
                     eval_mode: str = "result", process_dims=None, competitor: str | None = None,
                     stream_callback=None) -> SingleScore:
-        # 操控类只使用样本显式提供的背景，避免把评测时间误当成录屏执行时间。
-        # 其他模式仍保留当前时间兜底，用于时效性事实判断。
-        prompt_context = (
-            (item.context or "").strip()
-            if eval_mode == "operation"
-            else resolve_prompt_context(item.context, self.evaluation_time)
-        )
         # 自动垂域分类：若未预标 → 兜底用当前裁判 model 分类（正常流程已在 ensure_classified 完成）
         if (
             (not item.category or item.category == "default")
@@ -164,7 +156,7 @@ class RubricJudge:
                 scale=dims[0].scale if dims else 5,
             )
             user = OPERATION_USER.render(
-                question=item.question, context=prompt_context
+                question=item.question
             )
             frames = item.metadata.get("frames") or []
             user_images = [encode_frame(Path(p)) for p in frames] if frames else None
@@ -175,7 +167,7 @@ class RubricJudge:
                 persona=self.client.persona, scale=dims[0].scale if dims else 5, dims=dims, skill_rules=skill_rules
             )
             user = RUBRIC_PROCESS_USER.render(
-                question=item.question, context=prompt_context, answer=answer, trace=item.trace
+                question=item.question, answer=answer, trace=item.trace
             )
         elif is_product_compare:
             dims = skill_dims or self.dims  # 产品专家：待评 vs 竞品 对比盲评
@@ -183,7 +175,7 @@ class RubricJudge:
                 persona=self.client.persona, scale=self.scale, dims=dims, skill_rules=skill_rules
             )
             user = RUBRIC_COMPARE_USER.render(
-                question=item.question, context=prompt_context, model_name=model_name, answer=answer,
+                question=item.question, model_name=model_name, answer=answer,
                 competitor=competitor
             )
         else:
@@ -192,7 +184,7 @@ class RubricJudge:
                 persona=self.client.persona, scale=self.scale, dims=dims, skill_rules=skill_rules
             )
             user = RUBRIC_USER.render(
-                question=item.question, context=prompt_context, model_name=model_name, answer=answer
+                question=item.question, model_name=model_name, answer=answer
             )
         t0 = time.perf_counter()
         if stream_callback is None and user_images is None and user_image_refs is None:
@@ -387,11 +379,6 @@ async def _classify(item: EvalItem, client, model: str, skill_router=None) -> st
     try:
         logger.info("classify start: id=%s query=%.120s", item.id, item.question)
         query_text = f"查询：{item.question}"
-        if item.context:
-            query_text += (
-                "\n可信背景条件（由评测样本提供，请作为意图判断前提）："
-                f"\n{item.context}"
-            )
         with bind_chain_context(module="垂域分类", round=0):
             log_event(
                 "垂域分类",

@@ -27,7 +27,8 @@ RULES = r"""{{ persona }}
    复制文本缺少某内容，不证明产品未输出。题图是用户输入，不能当作产品配图。
 2. 每个有分的理由段须说明可定位的依据，如产品号、轮次、截图位置/切片号或短原话，
    并解释该维度实际表现及其对应的分档。只报告观察和结论，不展开内部推理过程。
-3. 公共 context 中[产品已知信息]适用于各产品；contextN 中[产品N已知信息]仅约束对应产品。
+3. 用户条件由Query、对应产品contextN及有效用户历史确定；contextN只约束对应产品。
+   contextN中的[产品已知信息]或[产品N已知信息]仅要求该产品适配，不得串用给其他产品。
    [仅供裁判核对]可核对事实，不能反推产品知道该信息或处罚未使用。
    未标记背景按现有测试条件理解，但不能把来源不明画像自动当作产品长期记忆。
    没有向裁判提供某项信息，不单独证明产品编造该信息；决定性来源不清时只限制受影响维度。
@@ -471,8 +472,6 @@ VISUAL_COMPARE_USER = Template(r"""评测时间：{{ evaluation_datetime | defau
 当前目标轮用户问题Query：
 {{ question }}
 
-公共背景context：
-{{ context | default('') }}
 {% for n in range(1, product_count + 1) %}
 产品{{ n }}背景context{{ n }}：
 {{ [context1, context2, context3][n-1] | default('') }}

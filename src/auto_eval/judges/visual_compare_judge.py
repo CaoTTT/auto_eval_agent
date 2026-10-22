@@ -307,7 +307,7 @@ class VisualCompareJudge:
         self,
         *,
         question: str,
-        context: str = "",
+        context: str = "",  # Legacy input only; shared context is not sent to the judge.
         context1: str = "",
         answer1: str = "",
         frames1: list[str] | None = None,
@@ -369,7 +369,6 @@ class VisualCompareJudge:
         user = self.protocol.user_template.render(
             evaluation_datetime=evaluation_datetime,
             question=question,
-            context=context,
             product_count=actual_product_count,
             context1=context1,
             answer1=answer1,
@@ -711,7 +710,7 @@ class VisualCompareJudge:
             identity = {**self.protocol.public_metadata(), "original_hashes": [m["original_sha256"] for m in query_metas], "answers": [answer1, answer2, answer3],
                         "contexts": [context1, context2, context3]}
             result["input_manifest_sha256"] = input_manifest(
-                question, context, content_parts, request_views, identity,
+                question, "", content_parts, request_views, identity,
                 self.profile.query_images.model_dump(),
             )
         return result

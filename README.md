@@ -84,8 +84,8 @@ python -m uvicorn auto_eval.web.server:app --host 0.0.0.0 --port 8054
 
 **时效性评估V1·1-3分（候选）**使用 `timeliness_compare@1.0`，当前修订 `1.0.2 / timeliness-result-3`。在原有两个Gate和三个评分维度之外，同次调用输出整组“内容冲突理由”和“有冲突／无冲突／不确定”；检测规则沿用v0.2稳定plus，冲突不自动改变分数。页面、历史、CSV/XLSX及统计同步展示，旧修订仍按原合同读取和续跑；使用新规则重评旧数据需新建任务。见[时效性评估完整标准](docs/timeliness-standard-v1.0.md)和[完整Prompt](docs/timeliness-evaluation-prompt-final.md)。
 
-- **垂域视觉评测**：`query`（必填）、`video_path`（必填）、可选 `id` / `context`（可信背景条件，可写当前时间地点）/ `category`（垂域）/ `answer_text` / `task_start_time`+`task_end_time`（截取作答区间）。
-- **垂域视觉对比评测**：`query`、`video1`+`video2`（必填）、`answer1`+`answer2`、可选 `context` / `context1` / `context2`。
+- **垂域视觉评测**：`query`（必填）、`video_path`（必填）、可选 `id` / `category`（垂域）/ `answer_text` / `task_start_time`+`task_end_time`（截取作答区间）。共享约束直接写入 `query`。
+- **垂域视觉对比评测**：`query`、`video1`+`video2`（必填）、`answer1`+`answer2`，各产品背景分别使用 `context1` / `context2`，三产品时使用对应的 `context3`。所有测评版本及多轮请求均不传公共 `context`；旧数据中的该字段兼容接收，但不参与模型请求或输入指纹。真实用户历史及产品专属背景仍保留。
 
 ### 裁判明细日志（可选）
 

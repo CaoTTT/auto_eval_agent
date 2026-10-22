@@ -52,7 +52,7 @@ def assemble_conversation(system: str, bundle: dict, protocol, evaluation_dateti
     for turn in turns:
         t = turn["turn_index"]
         role = "current" if t == target else "history"
-        text(f"T{t:02d} / {role} / 共享用户问题：{turn['query']}\n可信背景：{turn.get('context', '')}")
+        text(f"T{t:02d} / {role} / 共享用户问题：{turn['query']}")
         for meta in turn.get("query_image_meta", []):
             text(f"{meta['asset_id']} / {role} / 共享用户题图开始")
             image(encode_query_image(meta, profile.query_images), {**meta, "request_role": role, "ref_path": meta["path"]})

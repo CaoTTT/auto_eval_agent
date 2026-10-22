@@ -97,10 +97,10 @@ def test_frozen_compact_revision_retains_its_own_contract(count):
 
 @pytest.mark.parametrize("name,original_sha256", [
     ("timeliness_schema", "18d43bacf8d098f63b15d2e70143015c81ad5e5235d8d300638d7cabb4417682"),
-    ("visual_compare_prompt_timeliness", "08c3b1ed4f701a9338531e2b746cd8d89ecd43f5ec24f31ed3c40b1e1d92f941"),
+    ("visual_compare_prompt_timeliness", "925ccec410de903474ad6fad06abd1a1f10dea0e8c7a9a4adf8783c4ef827be7"),
 ])
-def test_frozen_compact_sources_match_pre_conflict_revision(name, original_sha256):
-    # Pins the exact pre-upgrade sources without requiring Git in deployed tests.
+def test_frozen_compact_sources_preserve_contract_after_context_removal(name, original_sha256):
+    # Pins the legacy sources after removing shared context; scoring/output contracts stay frozen.
     source = Path(f"src/auto_eval/judges/{name}_r101.py").read_text(encoding="utf-8")
     source = source.replace("from .timeliness_schema_r101 import (", "from .timeliness_schema import (")
     assert hashlib.sha256(source.encode("utf-8")).hexdigest() == original_sha256
