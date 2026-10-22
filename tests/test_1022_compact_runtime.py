@@ -67,7 +67,7 @@ async def test_new_revision_uses_actual_product_fields_and_derived_only_metadata
     assert result["standard_version"] == "0.2-simplified-1022"
     assert result["product_count"] == count
     assert result["evaluation_profile"] == V1022_COMPARE_PROTOCOL_ID
-    assert result["bundle_revision"] == "0.2.2"
+    assert result["bundle_revision"] == "0.2.3"
     assert result["output_contract"] == "compare_1022_v2"
     assert result["evaluation_datetime"] == "2026-10-22T00:00:00+00:00"
     assert result["understanding_rank_groups"] == [[f"product{n}" for n in range(1, count + 1)]]
@@ -79,8 +79,38 @@ async def test_new_revision_uses_actual_product_fields_and_derived_only_metadata
     assert options["require_complete"] is True
     schema = options["response_format"]["json_schema"]["schema"]
     assert len(schema["properties"]) == fields
+    assert list(schema["properties"]) == list(raw)
+    assert list(result)[:fields] == list(raw)
     assert ("answer3_response_gate" in schema["properties"]) == (count == 3)
     assert ("answer3_response_gate" in system + user) == (count == 3)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("count", [2, 3])
+async def test_frozen_r022_keeps_reasons_first_prompt_schema_parser_and_projection(count):
+    from auto_eval.judges.compare_1022_contract_r022 import example_1022_output as old_example
+    from auto_eval.judges.visual_compare_prompt_v02_1022_r022 import templates_1022 as old_templates
+
+    raw = old_example(count)
+    result, client = await evaluate(raw, count=count, revision="0.2.2", mode="json_schema")
+    assert result["bundle_revision"] == "0.2.2"
+    assert result["output_contract"] == "compare_1022_v2"
+    assert_compact_fields(result, count)
+    assert list(result)[:len(raw)] == list(raw)
+    assert list(client.calls[0][2]["response_format"]["json_schema"]["schema"]["properties"]) == list(raw)
+    assert client.calls[0][0] == old_templates(count)[0].render(
+        persona=client.persona, product_count=count, evidence_mode="video_frames")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("revision", ["0.2.2", "0.2.3"])
+async def test_runtime_does_not_mix_frozen_output_order(revision):
+    from auto_eval.judges.compare_1022_contract_r022 import example_1022_output as old_example
+
+    wrong = example_1022_output(2) if revision == "0.2.2" else old_example(2)
+    with pytest.raises(JudgeOutputParseError) as caught:
+        await evaluate(wrong, revision=revision)
+    assert caught.value.error_category == "state"
 
 
 @pytest.mark.asyncio

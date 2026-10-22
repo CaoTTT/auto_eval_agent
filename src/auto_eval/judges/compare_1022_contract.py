@@ -1,4 +1,4 @@
-"""Compact 1022 contracts: distinct two/three-product inputs, reasons first."""
+"""Compact 1022 contracts: input status, adjacent Gate pairs, dimension groups."""
 from __future__ import annotations
 
 import copy
@@ -31,21 +31,19 @@ class _CompactOutput(BaseModel):
 
 def _fields(product_count: int) -> dict:
     fields = {}
-    # Every explanation precedes every decision, including gate decisions.
+    # Capture status first, then keep each explanation beside its own verdict.
+    for n in range(1, product_count + 1):
+        fields[f"answer{n}_input_status"] = (InputStatus, ...)
     for n in range(1, product_count + 1):
         for gate in ("response", "safety"):
             fields[f"answer{n}_{gate}_gate_reason"] = (GateReason, ...)
-    for dimension in DIMENSIONS_1022:
-        fields[f"{dimension}_reason"] = (DimensionReason | None, None)
-    fields["conflict_reason"] = (GateReason | None, None)
-    for n in range(1, product_count + 1):
-        fields[f"answer{n}_input_status"] = (InputStatus, ...)
-        for gate in ("response", "safety"):
             fields[f"answer{n}_{gate}_gate"] = (Gate, ...)
     for dimension in DIMENSIONS_1022:
         fields[f"{dimension}_applicable"] = (bool | None, None)
+        fields[f"{dimension}_reason"] = (DimensionReason | None, None)
         for n in range(1, product_count + 1):
             fields[f"answer{n}_{dimension}_score"] = (Score | None, None)
+    fields["conflict_reason"] = (GateReason | None, None)
     fields["content_conflict"] = (Literal["yes", "no", "unclear"] | None, None)
     return fields
 
@@ -120,13 +118,9 @@ def _validate(data: dict, product_count: int) -> dict:
     unknown = supplied - model.model_fields.keys()
     if unknown:
         _error(f"1022输出含多余字段：{sorted(unknown)}", "schema")
-    seen_decision = False
-    for key in data:
-        if key.endswith("_reason"):
-            if seen_decision:
-                _error("所有理由字段必须位于全部判定与评分字段之前")
-        else:
-            seen_decision = True
+    expected_order = [key for key in model.model_fields if key in supplied]
+    if list(data) != expected_order:
+        _error("输出字段顺序须为：全部输入状态；逐产品Gate理由→判定；逐维适用性→理由→各产品评分；冲突理由→结论")
     # Gate rejection explicitly authorizes ignoring downstream scores.
     normalized = copy.deepcopy(data)
     blocked_nos = set()
@@ -314,4 +308,4 @@ def example_1022_output(product_count: int = 2, *, evidence_mode: str = "video_f
             data[f"answer{n}_{dimension}_score"] = 5 if applicable else None
     data["content_conflict"] = "no"
     assert set(data) == set(model.model_fields)
-    return _validate(data, product_count)
+    return _validate({key: data[key] for key in model.model_fields}, product_count)

@@ -6,12 +6,12 @@ vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../src/auto_eval/web/sta
 });
 app.mode.value='compare';
 const profile='qa_competitor_compare@0.2-simplified-1022';
-app.setTaskProtocol({evaluation_profile:profile,protocol_manifest:{bundle_revision:'0.2.2',output_contract:'compare_1022_v2'}});
+app.setTaskProtocol({evaluation_profile:profile,protocol_manifest:{bundle_revision:'0.2.3',output_contract:'compare_1022_v2'}});
 assert.ok(!app.resultCols.value.some(c=>['accuracy_summary','needs_human_review','rationale'].includes(c.key)));
 assert.equal(app.resultCols.value.filter(c=>c.key.endsWith('_summary')).length,9);
 const reason='产品1：首屏包含目标信息，用户可完成操作。；产品2：未评分（证据不足）：关键位置被遮挡。';
 const row={index:0,product_count:2,standard_id:'qa_competitor_compare',standard_version:'0.2-simplified-1022',
-  evaluation_profile:profile,bundle_revision:'0.2.2',output_contract:'compare_1022_v2',
+  evaluation_profile:profile,bundle_revision:'0.2.3',output_contract:'compare_1022_v2',
   answer1_input_status:'complete',answer1_response_gate:'pass',answer1_safety_gate:'pass',answer1_understanding_score:4,
   answer2_input_status:'partial',answer2_response_gate:'pass',answer2_safety_gate:'pass',answer2_understanding_score:null,
   understanding_applicable:true,understanding_reason:reason};
@@ -33,6 +33,14 @@ assert.equal(app.filteredResults.value.length,0,'numeric strings are invalid');
 row.answer1_understanding_score=4;
 app.selectedEvaluationProfile.value='qa_competitor_compare@0.3';
 assert.equal(app.filteredResults.value.length,1,'task contract remains frozen when changing the new-task selector');
+for (const revision of ['0.2.2','0.2.3']) {
+  app.setTaskProtocol({evaluation_profile:profile,protocol_manifest:{bundle_revision:revision}});
+  assert.ok(!app.resultCols.value.some(c=>['accuracy_summary','needs_human_review','rationale'].includes(c.key)));
+  const fallback={...row,bundle_revision:revision};delete fallback.output_contract;
+  assert.equal(app.cell(fallback,{key:'understanding_summary'}),'P1:4分；P2:证据不足');
+  delete fallback.bundle_revision;
+  assert.equal(app.cell(fallback,{key:'understanding_summary'}),'P1:4分；P2:证据不足');
+}
 const old={...row,bundle_revision:'0.2.1',output_contract:'compare_1022_v1',understanding_verification_status:'unverifiable'};
 app.setTaskProtocol({evaluation_profile:profile,protocol_manifest:{bundle_revision:'0.2.1',output_contract:'compare_1022_v1'}});
 assert.ok(app.resultCols.value.some(c=>c.key==='accuracy_summary'));
@@ -43,5 +51,5 @@ const context={};vm.runInNewContext(panelSource+'\nthis.Panel=HumanComparePanel;
 assert.match(context.Panel.template,/<template v-if="r.model_output_contract!=='compare_1022_v2'">；核验：/);
 const index=fs.readFileSync(path.join(__dirname,'../src/auto_eval/web/static/index.html'),'utf8');
 assert.match(index,/!compact1022\(\) && summary.needs_review_count/);
-assert.match(index,/app\.js\?v=20261022_compact_1022/);
+assert.match(index,/app\.js\?v=20261022_interleaved_1022/);
 console.log('1022 compact UI: six dimensions, Gate blocking, shared reasons, no third product, hidden retired fields and frozen legacy display passed');

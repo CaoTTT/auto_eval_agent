@@ -12,8 +12,8 @@ from auto_eval.web.human_compare import align_baseline_to_run
 from test_human_compare import example
 
 
-def compact_protocol():
-    return resolve_compare_protocol(V1022_COMPARE_PROTOCOL_ID, "0.2.2")
+def compact_protocol(revision="0.2.3"):
+    return resolve_compare_protocol(V1022_COMPARE_PROTOCOL_ID, revision)
 
 
 def compact_result(count=2):
@@ -36,7 +36,7 @@ def compact_result(count=2):
 
 def compact_case(row=None):
     row = compact_result() if row is None else row
-    return stats.Case(0, {}, row, "done", row["product_count"], "0.2-simplified-1022", "0.2.2")
+    return stats.Case(0, {}, row, "done", row["product_count"], "0.2-simplified-1022", row["bundle_revision"])
 
 
 def compact_snapshot(count=2):
@@ -132,6 +132,23 @@ def test_unfinished_export_uses_frozen_contract_and_old_columns_keep_old_values(
     assert exported["理解需求核验状态"] == "N/A"
     legacy = resolve_compare_protocol(V1022_COMPARE_PROTOCOL_ID, "0.2.1")
     assert stats.score_state(compact_case(old), 1, "understanding", legacy) == ("核验状态缺失", None)
+
+
+@pytest.mark.parametrize("revision", ["0.2.2", "0.2.3"])
+def test_revision_fallback_preserves_compact_export_and_statistics(revision):
+    policy = compact_protocol(revision)
+    row = compact_result()
+    row.update(bundle_revision=revision, answer1_accuracy_score=5, confidence="high")
+    row.pop("output_contract")
+    exported = history._visual_compare_export_rows([row])[0]
+    assert exported["产品1内容准确性分"] == exported["置信度"] == ""
+    assert exported["产品1理解需求分"] == 4
+    assert stats.score_state(compact_case(row), 1, "understanding", policy) == ("有效评分", 4)
+    manifest = policy.public_metadata()
+    manifest.pop("output_contract")
+    row.pop("bundle_revision")
+    exported = history._visual_compare_export_rows([row], manifest)[0]
+    assert exported["产品1内容准确性分"] == exported["置信度"] == ""
 
 
 def human_fixture():

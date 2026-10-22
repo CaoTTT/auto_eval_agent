@@ -55,7 +55,11 @@ from .compare_1022_contract_r021 import (
     parse_1022_output as parse_1022_output_r021,
     response_format_1022 as response_format_1022_r021,
 )
-from .visual_compare_prompt_v02_1022 import templates_1022
+from .compare_1022_contract_r022 import (
+    parse_1022_output as parse_1022_output_r022,
+    response_format_1022 as response_format_1022_r022,
+    validate_1022_output as validate_1022_output_r022,
+)
 from .compare_protocols import (
     CompareProtocol,
     DIMENSIONS,
@@ -267,7 +271,8 @@ def _compact_1022_result(observation: BaseModel | dict, protocol: CompareProtoco
     """Project the compact contract without resurrecting legacy model fields."""
     data = observation.model_dump() if isinstance(observation, BaseModel) else dict(observation)
     count = 3 if "answer3_input_status" in data else 2
-    result = validate_1022_output(data, count)
+    validate = validate_1022_output_r022 if protocol.bundle_revision == "0.2.2" else validate_1022_output
+    result = validate(data, count)
     result.update(
         standard_id=protocol.standard_id, standard_version=protocol.standard_version,
         product_count=count, evaluation_profile=protocol.id,
@@ -399,11 +404,14 @@ class VisualCompareJudge:
         trusted_collection = collection_metadata(trusted_collection_metadata, actual_product_count) if is_strict_output else None
         compact_1022 = self.protocol.output_contract == OUTPUT_CONTRACT_1022
         strict_1022 = self.protocol.output_contract in {OUTPUT_CONTRACT_1022, OUTPUT_CONTRACT_1022_R021}
+        compact_r022 = compact_1022 and self.protocol.bundle_revision == "0.2.2"
+        parse_compact = parse_1022_output_r022 if compact_r022 else parse_1022_output
+        format_compact = response_format_1022_r022 if compact_r022 else response_format_1022
         output_options = {}
         if strict_1022:
             output_options = {
                 "require_complete": True,
-                "response_format": (response_format_1022 if compact_1022 else response_format_1022_r021)(
+                "response_format": (format_compact if compact_1022 else response_format_1022_r021)(
                     getattr(self.client.cfg, "compare_structured_output", "off"),
                     actual_product_count,
                 ),
@@ -415,10 +423,7 @@ class VisualCompareJudge:
         if is_screenshot and len(metas) != actual_product_count:
             raise ValueError("长截图缺少逐产品预处理元数据")
 
-        system_template, user_template = (
-            templates_1022(actual_product_count) if compact_1022
-            else (self.protocol.system_template, self.protocol.user_template)
-        )
+        system_template, user_template = self.protocol.prompt_templates(actual_product_count)
         system = system_template.render(
             persona=self.client.persona,
             product_count=actual_product_count,
@@ -609,7 +614,7 @@ class VisualCompareJudge:
         repaired = ""
         if strict_1022:
             try:
-                data = (parse_1022_output if compact_1022 else parse_1022_output_r021)(raw_output, actual_product_count)
+                data = (parse_compact if compact_1022 else parse_1022_output_r021)(raw_output, actual_product_count)
             except OutputContractError as exc:
                 raise JudgeOutputParseError(
                     str(exc), raw_output=raw_output, repair_output="",

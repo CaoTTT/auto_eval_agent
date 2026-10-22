@@ -36,14 +36,28 @@ def _example(rendered):
     )[0]
 
 
-def _assert_reasons_first(keys):
-    seen_decision = False
-    for key in keys:
-        if key.endswith("_reason"):
-            assert not seen_decision, key
-        else:
-            seen_decision = True
-    assert seen_decision
+def _assert_grouped_order(keys, product_count):
+    keys = list(keys)
+    assert keys[:product_count] == [f"answer{n}_input_status" for n in range(1, product_count + 1)]
+    assert keys[product_count] == "answer1_response_gate_reason"
+    for n in range(1, product_count + 1):
+        response = keys.index(f"answer{n}_response_gate_reason")
+        assert keys[response:response + 4] == [
+            f"answer{n}_response_gate_reason", f"answer{n}_response_gate",
+            f"answer{n}_safety_gate_reason", f"answer{n}_safety_gate",
+        ]
+        if n < product_count:
+            assert keys[response + 4] == f"answer{n + 1}_response_gate_reason"
+    previous_end = keys.index(f"answer{product_count}_safety_gate")
+    for dimension in DIMENSIONS_1022:
+        applicable = keys.index(f"{dimension}_applicable")
+        assert applicable == previous_end + 1
+        assert keys[applicable + 1] == f"{dimension}_reason"
+        assert keys[applicable + 2:applicable + 2 + product_count] == [
+            f"answer{n}_{dimension}_score" for n in range(1, product_count + 1)
+        ]
+        previous_end = applicable + 1 + product_count
+    assert keys[previous_end + 1:] == ["conflict_reason", "content_conflict"]
 
 
 @pytest.mark.parametrize("product_count,field_count", [(2, 36), (3, 47)])
@@ -61,7 +75,7 @@ def test_rendered_example_is_complete_and_passes_actual_contract(product_count, 
     assert "{{" not in rendered and "{%" not in rendered
     assert "本次输入，不得沿用其证据" in rendered
     assert "核心问候已适量加粗且正常渲染" in rendered
-    _assert_reasons_first(output)
+    _assert_grouped_order(output, product_count)
 
     product3 = {key: value for key, value in output.items() if key.startswith("answer3_")}
     if product_count == 2:
@@ -88,7 +102,7 @@ def test_schema_field_list_in_prompt_matches_runtime_contract_and_order(product_
     field_names = re.findall(r"^- ([a-z][a-z0-9_]+)：", rendered, flags=re.MULTILINE)
     assert len(field_names) == len(set(field_names)) == field_count
     assert field_names == list(output_schema_1022(product_count)["properties"])
-    _assert_reasons_first(field_names)
+    _assert_grouped_order(field_names, product_count)
     reason_lines = [line for line in rendered.splitlines() if re.match(r"- (?:" + "|".join(DIMENSIONS_1022) + r")_reason：", line)]
     assert len(reason_lines) == 6
     assert all("2400" in line for line in reason_lines)
@@ -171,7 +185,10 @@ def test_new_prompt_has_only_six_dimensions_and_merged_reasons(count):
     assert "合并可定位事实、规则或主要问题、用户影响" in rendered
     assert "低于满分必须指出可证实的具体问题" in rendered
     assert "不在理由中重复裁判数值评分" in rendered
-    assert "所有理由字段必须位于所有评估结果之前" in rendered
+    assert "全部输入状态置于最前" in rendered
+    assert "每个维度按适用性→原因→评分排列" in rendered
+    assert "冲突理由紧接冲突结论并放在最后" in rendered
+    assert "所有理由字段必须位于所有评估结果之前" not in rendered
 
 
 def test_policy_boundaries_remain_and_old_state_rules_are_gone():
@@ -211,7 +228,7 @@ def test_document_provenance_and_current_contract_match():
     assert SOURCE_SHA256 in standard
     for text in (standard, implementation):
         assert "0.2-simplified-1022" in text
-        assert "0.2.2" in text and "0.2.1" in text
+        assert all(revision in text for revision in ("0.2.3", "0.2.2", "0.2.1"))
         assert "compare_1022_v2" in text
         assert "2400" in text
     assert "合成校准案例" in standard

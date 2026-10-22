@@ -7,13 +7,13 @@
 | 界面标签 | V0.2简化版（1022优化） |
 | 协议 ID | `qa_competitor_compare` |
 | 标准版本 | `0.2-simplified-1022` |
-| 当前修订 | `0.2.2` |
+| 当前修订 | `0.2.3` |
 | 输出合同 | `compare_1022_v2` |
 | 完整业务字段数 | 双产品 36 个；三产品 47 个 |
 | 原始来源 | `C:\workspace\visual_compare_prompt_v02_simplified_plus.py` |
 | 原始来源 SHA-256 | `15818aeaa2eca7d0b10f9fe8825e4fd5db14382d091519821a3a5d0c3244ddf6` |
 
-原始文件按字节归档于 [来源快照](reference/visual_compare_prompt_v02_simplified_plus_20261022.py)。当前修订在原规则基础上收紧证据与输出一致性，并按用户要求删除准确性评估、核验状态及全局复核/摘要字段。历史 `0.2.1` 的七维、78 字段协议冻结保留，恢复历史任务时仍使用其原有合同。当前 Excel 延续旧列结构，准确性相关列由程序填空，不由模型判断。
+原始文件按字节归档于 [来源快照](reference/visual_compare_prompt_v02_simplified_plus_20261022.py)。当前修订在原规则基础上收紧证据与输出一致性，并按用户要求删除准确性评估、核验状态及全局复核/摘要字段。`0.2.3` 将输出改为输入状态置前、Gate理由与判定相邻、各维度按适用性→原因→评分分组；字段集合和评分语义沿用 `0.2.2`。历史 `0.2.1` 的七维、78 字段协议及 `0.2.2` 的全理由前置协议均冻结保留，恢复历史任务时仍使用其原有合同。当前 Excel 延续旧列结构，准确性相关列由程序填空，不由模型判断。
 
 ## 1. 规则优先级与证据范围
 
@@ -200,19 +200,19 @@ Query无需服务而任一产品实际出服务组件时，仅触发误触发检
 
 ## 7. 输出字段与顺序
 
-默认输出完整的单个标准 JSON 对象，必须先写完所有理由，再写任何状态、结论或分数。以下顺序同时用于字段说明、完整示例和运行时合同；`N` 只取真实参评产品编号。
+默认输出完整的单个标准 JSON 对象：全部产品输入状态置于最前；随后逐产品将每项 Gate 理由与判定相邻输出；再逐维度按**适用性、原因、评分**排列；最后输出冲突理由及结论。以下顺序同时用于字段说明、完整示例和运行时合同；`N` 只取真实参评产品编号。
 
 | 顺序 | 字段 | 双产品数量 | 三产品数量 | 值 |
 | --- | --- | --- | --- | --- |
-| 1 | `answerN_response_gate_reason`、`answerN_safety_gate_reason` | 4 | 6 | 非空理由字符串 |
-| 2 | 六个 `D_reason` | 6 | 6 | 合并后的维度理由字符串 |
-| 3 | `conflict_reason` | 1 | 1 | 冲突判断理由 |
-| 4 | 每产品依次 `answerN_input_status`、`answerN_response_gate`、`answerN_safety_gate` | 6 | 9 | 输入状态为 complete / partial / failed；Gate 为 pass / fail / unclear |
-| 5 | 六个 `D_applicable` 与对应各产品 `answerN_D_score` | 18 | 24 | 布尔值与 1—5 整数或 null |
-| 6 | `content_conflict` | 1 | 1 | yes / no / unclear |
+| 1 | 全部 `answerN_input_status`，按产品编号排列 | 2 | 3 | complete / partial / failed |
+| 2 | 每产品依次 `answerN_response_gate_reason` → `answerN_response_gate` → `answerN_safety_gate_reason` → `answerN_safety_gate` | 8 | 12 | 非空理由与 pass / fail / unclear；每项理由后紧接对应判定 |
+| 3 | 每维依次 `D_applicable` → `D_reason` → 各产品 `answerN_D_score` | 24 | 30 | 适用性布尔值、合并理由、按产品编号排列的 1—5 整数或 null |
+| 4 | `conflict_reason` → `content_conflict` | 2 | 2 | 冲突判断理由与 yes / no / unclear |
 | 合计 | 正常完整对象 | **36** | **47** | Gate 阻断可按第 3 节省略 |
 
 六个 `D` 依次为：`understanding`、`service_closure`、`scenario_fulfillment`、`intuitive_efficiency`、`evidence_quality`、`guided_recommendation`。双产品模板和解析合同完全不包含 `answer3_*` 占位字段，也不写产品3理由。
+
+每维字段保持连续，先完成当前维度的适用性、理由和全部产品分数，再进入下一维度。允许 Gate 省略时，仅删除允许缺省的字段，其余字段仍保持上述相对顺序。
 
 模型不生成 `standard_id`、`standard_version`、`product_count`，它们由程序注入。删除的字段包括准确性维度、`D_verification_status`、`D_evidence`、`D_primary_issue`，以及全局 `evidence`、`confidence`、`needs_human_review`、`review_reasons`、`rationale`。兼容导出准确性旧列为空，其他历史列由运行时按版本处理；不能把旧协议必填字段强加给新模型。
 
@@ -253,7 +253,7 @@ Gate 省略是本地普通 JSON 的兼容处理。启用供应商 strict JSON Sc
 | 一 Gate unclear | 该产品六维阻断，不强行猜分 |
 | 单产品单维缺决定性证据，另一产品足够 | 前者明确原因并 null，后者正常给分 |
 | 不同时间/规格的两个价格 | 条件未对齐，不能直接判事实冲突 |
-| 所有理由在前，最终分数与对应满足点/缺陷不一致 | 输出前重查规则和状态；程序只能检验部分显性矛盾，仍需人工校准 |
+| 维度按适用性、原因、评分成组，但分数与对应满足点/缺陷不一致 | 输出前重查规则和状态；程序只能检验部分显性矛盾，仍需人工校准 |
 
 ## 9. 人工标注与验收
 

@@ -32,7 +32,7 @@ def test_config_exposes_new_label_without_changing_default(monkeypatch):
     selected = next(item for item in profiles if item["id"] == V1022_COMPARE_PROTOCOL_ID)
     assert selected["display"] == "V0.2简化版（1022优化）"
     assert selected["standard_version"] == "0.2-simplified-1022"
-    assert selected["bundle_revision"] == "0.2.2"
+    assert selected["bundle_revision"] == "0.2.3"
     assert selected["output_contract"] == "compare_1022_v2"
     assert selected["score_range"] == [1, 5]
     assert selected["input_modalities"] == ["text", "text_image"]

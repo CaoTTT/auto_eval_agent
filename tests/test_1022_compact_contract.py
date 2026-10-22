@@ -35,12 +35,19 @@ def test_complete_output_and_provider_schema_use_only_actual_products(count, exp
     assert list(schema["properties"]) == list(raw)
     assert set(schema["required"]) == set(raw)
     assert schema["additionalProperties"] is False
-    decisions_seen = False
-    for key in raw:
-        if key.endswith("_reason"):
-            assert not decisions_seen
-        else:
-            decisions_seen = True
+    keys = list(raw)
+    assert keys[:count] == [f"answer{n}_input_status" for n in range(1, count + 1)]
+    for n in range(1, count + 1):
+        for gate in ("response", "safety"):
+            key = f"answer{n}_{gate}_gate_reason"
+            assert keys[keys.index(key) + 1] == f"answer{n}_{gate}_gate"
+    for dimension in DIMENSIONS_1022:
+        start = keys.index(f"{dimension}_applicable")
+        assert keys[start:start + count + 2] == [
+            f"{dimension}_applicable", f"{dimension}_reason",
+            *[f"answer{n}_{dimension}_score" for n in range(1, count + 1)],
+        ]
+    assert keys[-2:] == ["conflict_reason", "content_conflict"]
     assert any(key.startswith("answer3_") for key in raw) == (count == 3)
     assert "accuracy" not in DIMENSIONS_1022
 
@@ -80,13 +87,27 @@ def test_removed_or_app_managed_fields_are_not_accepted(field, value):
 
 
 @pytest.mark.parametrize("key", [
-    "answer1_response_gate_reason", "understanding_reason", "conflict_reason",
+    "answer1_input_status", "answer1_response_gate_reason",
+    "understanding_applicable", "understanding_reason", "conflict_reason",
 ])
-def test_every_reason_must_precede_all_decisions(key):
+def test_each_field_must_stay_in_its_ordered_group(key):
     raw = example_1022_output(2)
     raw[key] = raw.pop(key)
-    with pytest.raises(OutputContractError, match="所有理由字段"):
+    with pytest.raises(OutputContractError, match="字段顺序"):
         validate_1022_output(raw, 2)
+
+
+@pytest.mark.parametrize("count", [2, 3])
+def test_reasons_first_layout_belongs_only_to_frozen_r022(count):
+    from auto_eval.judges.compare_1022_contract_r022 import (
+        example_1022_output as old_example, validate_1022_output as old_validate,
+    )
+    previous = old_example(count)
+    assert old_validate(previous, count) == previous
+    with pytest.raises(OutputContractError, match="字段顺序"):
+        validate_1022_output(previous, count)
+    with pytest.raises(OutputContractError):
+        old_validate(example_1022_output(count), count)
 
 
 @pytest.mark.parametrize("count", [2, 3])
