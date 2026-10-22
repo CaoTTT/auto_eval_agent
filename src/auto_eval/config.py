@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field, StrictBool
@@ -60,6 +60,8 @@ class JudgeConfig(BaseModel):
     vl_high_resolution_images: bool = False
     enable_thinking: StrictBool | None = None
     rate_limit: RateLimitConfig | None = None
+    # 仅新对比协议显式使用；部署方须先确认模型及网关支持，不能隐式切换思考模式。
+    compare_structured_output: Literal["off", "json_object", "json_schema"] = "off"
 
     def api_key(self) -> str | None:
         return os.environ.get(self.api_key_env) if self.api_key_env else None

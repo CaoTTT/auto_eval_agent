@@ -711,6 +711,13 @@ def _make_item_evaluator(
                             res.update({key: getattr(compare_protocol, key) for key in
                                         ("standard_id", "standard_version", "bundle_revision", "result_schema_version")})
                             res["evaluation_profile"] = compare_protocol.id
+                    output_category = getattr(last_error, "error_category", None)
+                    if output_category:
+                        res.update(
+                            error_type=f"judge_output_{output_category}",
+                            error_category=output_category,
+                            finish_reason=getattr(last_error, "finish_reason", None),
+                        )
                     if isinstance(last_error, (ContextBudgetExceeded, QueryImageError)):
                         res.update(
                             error_type=last_error.code, needs_human_review=True,
@@ -1383,8 +1390,11 @@ def _write_eval_error(
         raw_output = getattr(error, "raw_output", None)
         repair_output = getattr(error, "repair_output", None)
         if raw_output is not None or repair_output is not None:
+            category = getattr(error, "error_category", None)
             record.update({
-                "stage": "judge_json_parse",
+                "stage": f"judge_output_{category}" if category else "judge_json_parse",
+                "error_category": category,
+                "finish_reason": getattr(error, "finish_reason", None),
                 "judge": getattr(error, "judge", None),
                 "model": getattr(error, "model", None),
                 "original_model_output": raw_output,

@@ -206,6 +206,7 @@ def _protocol_manifest(protocol, app_cfg, options: dict, resolved_judges=None) -
             "presence_penalty": judge.presence_penalty,
             "max_tokens": judge.max_tokens,
             "n": judge.n,
+            "compare_structured_output": judge.compare_structured_output,
             "vl_high_resolution_images": judge.vl_high_resolution_images,
             "enable_thinking": judge.enable_thinking,
         }

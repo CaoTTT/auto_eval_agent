@@ -11,6 +11,7 @@ from auto_eval.judges.compare_protocols import (
     QA_CHAT_COMPARE_PROTOCOL_ID,
     QA_CHAT_V2_COMPARE_PROTOCOL_ID,
     TIMELINESS_COMPARE_PROTOCOL_ID,
+    V1022_COMPARE_PROTOCOL_ID,
     VisualCompareObservationV02,
     list_compare_protocols,
     resolve_compare_protocol,
@@ -48,6 +49,7 @@ def test_registry_defaults_to_stable_v02_and_exposes_experimental_versions():
         QA_CHAT_COMPARE_PROTOCOL_ID,
         QA_CHAT_V2_COMPARE_PROTOCOL_ID,
         TIMELINESS_COMPARE_PROTOCOL_ID,
+        V1022_COMPARE_PROTOCOL_ID,
     }
     assert resolve_compare_protocol(V03_COMPARE_PROTOCOL_ID).status == "experimental"
     plus = resolve_compare_protocol(V02_PLUS_COMPARE_PROTOCOL_ID)
@@ -192,6 +194,7 @@ async def test_eval_api_freezes_selected_protocol_on_new_task(monkeypatch):
         QA_CHAT_COMPARE_PROTOCOL_ID,
         QA_CHAT_V2_COMPARE_PROTOCOL_ID,
         TIMELINESS_COMPARE_PROTOCOL_ID,
+        V1022_COMPARE_PROTOCOL_ID,
     ]
     assert [p["id"] for p in public if p["status"] == "stable"] == [
         DEFAULT_COMPARE_PROTOCOL_ID, V02_PLUS_COMPARE_PROTOCOL_ID,
@@ -397,7 +400,8 @@ def test_stable_plus_uploaded_prompt_is_frozen_and_preserves_output_contract(
     from pathlib import Path
     from auto_eval.judges import visual_compare_prompt_v02_simplified_plus as prompt
 
-    assert hashlib.sha256(Path(prompt.__file__).read_bytes()).hexdigest() == (
+    # Git may check out LF source as CRLF on Windows; freeze source content.
+    assert hashlib.sha256(Path(prompt.__file__).read_bytes().replace(b"\r\n", b"\n")).hexdigest() == (
         "5c774f5bf795f8b9a1047a535186a5c30044c767d2adcc3123a9f1aa7b92a7ad"
     )
     active = resolve_compare_protocol(V02_PLUS_COMPARE_PROTOCOL_ID)

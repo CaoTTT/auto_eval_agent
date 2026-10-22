@@ -12,6 +12,11 @@ from jinja2 import Template
 from pydantic import BaseModel, create_model, model_validator
 
 from ..schema import VisualCompareObservation
+from .compare_1022_contract import OUTPUT_CONTRACT_1022, STANDARD_VERSION_1022
+from .visual_compare_prompt_v02_1022 import (
+    VISUAL_COMPARE_SYSTEM as V1022_SYSTEM,
+    VISUAL_COMPARE_USER as V1022_USER,
+)
 from .visual_compare_prompt_v02_simplified import (
     VISUAL_COMPARE_SYSTEM as V02_SYSTEM,
     VISUAL_COMPARE_USER as V02_USER,
@@ -63,6 +68,7 @@ V02_PLUS_COMPARE_PROTOCOL_ID = f"{STANDARD_ID}@0.2-simplified-plus"
 V03_COMPARE_PROTOCOL_ID = f"{STANDARD_ID}@0.3"
 V02_CALIBRATED_COMPARE_PROTOCOL_ID = f"{STANDARD_ID}@0.2-simplified-calibrated"
 V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID = f"{STANDARD_ID}@0.2-simplified-thinking-exposure"
+V1022_COMPARE_PROTOCOL_ID = f"{STANDARD_ID}@{STANDARD_VERSION_1022}"
 DIMENSIONS = (
     "understanding",
     "accuracy",
@@ -125,6 +131,25 @@ VisualCompareObservationV02 = create_model(
 )
 
 
+class _VisualCompareObservation1022Base(VisualCompareObservation):
+    """Storage projection only; the independent wire contract validates first."""
+
+    standard_version: str = STANDARD_VERSION_1022
+
+    @model_validator(mode="after")
+    def normalize_compare_states(self):
+        # Unlike legacy protocols, never hide contradictory judgments by clearing
+        # scores here. compare_1022_contract rejects them before this projection.
+        return self
+
+
+VisualCompareObservation1022 = create_model(
+    "VisualCompareObservation1022",
+    __base__=_VisualCompareObservation1022Base,
+    **_v02_score_fields,
+)
+
+
 @dataclass(frozen=True)
 class CompareProtocol:
     id: str
@@ -143,9 +168,10 @@ class CompareProtocol:
     dimension_names: dict[str, str] = field(default_factory=lambda: dict(DIMENSION_NAMES))
     score_dimensions: tuple[str, ...] = tuple(d for d in DIMENSIONS if d != "accuracy")
     result_schema_version: str | None = None
+    output_contract: str = "legacy"
 
     def public_metadata(self) -> dict:
-        return {
+        metadata = {
             "id": self.id,
             "standard_id": self.standard_id,
             "standard_version": self.standard_version,
@@ -161,6 +187,9 @@ class CompareProtocol:
             "score_dimensions": list(self.score_dimensions),
             "result_schema_version": self.result_schema_version,
         }
+        if self.output_contract != "legacy":
+            metadata["output_contract"] = self.output_contract
+        return metadata
 
     def request_metadata(self) -> dict:
         """Keep legacy request fingerprints frozen when adding UI metadata.
@@ -170,7 +199,7 @@ class CompareProtocol:
         newly created manifests can expose the richer display contract.
         """
         metadata = self.public_metadata()
-        if self.standard_id != STANDARD_ID:
+        if self.standard_id != STANDARD_ID or self.output_contract != "legacy":
             return metadata
         legacy_keys = (
             "id", "standard_id", "standard_version", "bundle_revision", "display",
@@ -303,6 +332,21 @@ _PROTOCOLS = {
         dimension_names=dict(TIMELINESS_DIMENSION_NAMES),
         score_dimensions=TIMELINESS_DIMENSIONS,
         result_schema_version=TIMELINESS_RESULT_SCHEMA_VERSION,
+    ),
+    V1022_COMPARE_PROTOCOL_ID: CompareProtocol(
+        id=V1022_COMPARE_PROTOCOL_ID,
+        standard_id=STANDARD_ID,
+        standard_version=STANDARD_VERSION_1022,
+        bundle_revision="0.2.1",
+        display="V0.2简化版（1022优化）",
+        status="experimental",
+        system_template=V1022_SYSTEM,
+        user_template=V1022_USER,
+        observation_model=VisualCompareObservation1022,
+        require_response_pass=True,
+        score_min=1,
+        score_max=5,
+        output_contract=OUTPUT_CONTRACT_1022,
     ),
 }
 

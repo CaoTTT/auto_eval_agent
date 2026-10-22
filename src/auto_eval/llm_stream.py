@@ -360,7 +360,8 @@ async def _collect_stream(client, kwargs: dict, *, include_usage: bool):
             + f"：finish_reason={finish_reason or '空'}"
             + ("；请检查模型输出预算，或关闭思考模式后新建任务重试" if exhausted_reasoning else ""),
             body={"finish_reason": finish_reason, "content": ""},
-            retriable=not exhausted_reasoning,
+            # 同一输出上限下重试空的 length 响应不会补全判定；其余空响应仍可重试。
+            retriable=normalized_finish_reason != "length",
         )
         setattr(error, "_auto_eval_stream_stats", dict(stats))
         setattr(error, "_auto_eval_usage", usage)
