@@ -236,7 +236,6 @@ def test_not_applicable_requires_query_level_explanation_and_null_scores():
     "产品1：清楚；产品2：清楚；产品3：清楚",
     "产品1：清楚；产品2：清楚；产品4：清楚",
     "产品0：清楚；产品1：清楚；产品2：清楚",
-    "总体不错；产品1：清楚；产品2：清楚",
     "产品1：；产品2：清楚",
     "产品1：清楚",
 ])
@@ -266,7 +265,7 @@ def test_reason_cannot_claim_a_different_numeric_grade():
 @pytest.mark.parametrize("text", [
     '{"answer1_response_gate":"pass","answer1_response_gate":"fail"}',
     '{"key": NaN}', '{"key": Infinity}', '{"key": -Infinity}',
-    '{"key":', '[]', '{}{}', '前言 {}', chr(96) * 3 + 'json\n{}\n' + chr(96) * 3,
+    '{"key":', '[]', '{}{}', '前言 {}',
 ])
 def test_duplicate_truncated_nonfinite_and_nonobject_json_is_rejected(text):
     with pytest.raises(OutputContractError) as caught:

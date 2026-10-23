@@ -1864,6 +1864,20 @@ createApp({
       }
       return rows;
     }
+    function compact1022ProductReason(value, product) {
+      const text = String(value || '');
+      // Mask quoted source text without moving offsets into the original reason.
+      const masked = text.replace(/“[^”]*”|‘[^’]*’|「[^」]*」|『[^』]*』|"(?:\\.|[^"\\])*"|`[^`]*`/g,
+        quoted => ' '.repeat(quoted.length));
+      const sections = Array.from(masked.matchAll(/(?:^|[；;])\s*产品([123])[:：]/g));
+      const products = sections.map(section => Number(section[1]));
+      if (products.some((number, index) => index && number <= products[index - 1])) return '';
+      const index = products.indexOf(product);
+      if (index < 0) return '';
+      const section = sections[index];
+      return text.slice(section.index + section[0].length, sections[index + 1]?.index ?? text.length)
+        .trim().replace(/[；;]+$/, '').trim();
+    }
     function cell(r, c) {
       const v = r[c.key];
       if (c.key === "category") return r.category_display || (!v || v === "default" ? "通用" : v);
@@ -1899,8 +1913,7 @@ createApp({
             else if (r[`${dimension}_applicable`] !== true) status = '适用性状态缺失';
             else if (score !== null) status = `${score}分`;
             else {
-              const segment = String(r[`${dimension}_reason`] || '').match(new RegExp(`(?:^|[；;]\\s*)产品${product}[:：](.*?)(?=[；;]\\s*产品[123][:：]|$)`, 's'));
-              const reason = segment?.[1].trim().replace(/[；;]+$/, '').trim() || '';
+              const reason = compact1022ProductReason(r[`${dimension}_reason`], product);
               const justified = /^未评分（([^（）]+)）：(.+)$/s.exec(reason);
               const validReason = justified && justified.slice(1).every(text => /[\p{L}\p{N}_]/u.test(text));
               status = r[`answer${product}_${dimension}_score`] == null

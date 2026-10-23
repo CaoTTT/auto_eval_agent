@@ -26,7 +26,7 @@ from ..judges import (
     RichContentJudge,
     VisualCompareJudge,
 )
-from ..judges.base import flush_web_trace_records
+from ..judges.base import JudgeOutputEmptyError, flush_web_trace_records
 from ..judges.compare_protocols import resolve_compare_protocol
 from ..conversation import is_conversation
 from .protocol_identity import require_snapshot_protocol
@@ -685,7 +685,9 @@ def _make_item_evaluator(
                             break
                         except Exception as e:
                             last_error = e
-                            retryable = is_retriable_llm_error(e)
+                            retryable = is_retriable_llm_error(e) or (
+                                isinstance(e, JudgeOutputEmptyError) and e.retriable
+                            )
                             will_retry = attempt == 0 and retryable
                             log_event(
                                 "单题评测",
@@ -1368,6 +1370,7 @@ def _structure_error_audit(error: Exception) -> dict:
     fields = ("raw_output", "raw_model_output", "repair_output", "raw_key_pairs", "structural_diagnostics",
               "duplicate_keys", "repair_key_pairs", "original_raw_key_pairs", "locally_repaired_key_pairs",
               "repair_locally_repaired_key_pairs", "normalization_diagnostics",
+              "local_format_recovery_steps",
               "trusted_collection_metadata", "input_manifest_sha256", "judge", "model")
     return {field: getattr(error, field) for field in fields if hasattr(error, field)}
 

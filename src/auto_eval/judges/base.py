@@ -135,12 +135,24 @@ class JudgeOutputTruncatedError(JudgeOutputParseError):
     """输出达到生成上限；不可交给 JSON 修复器补造未生成的判定。"""
 
 
-def _is_empty_length_error(exc: BaseException) -> bool:
+class JudgeOutputEmptyError(JudgeOutputParseError):
+    """No final judgment was generated; retain the original response for diagnosis."""
+
+    @property
+    def retriable(self) -> bool:
+        return str(self.finish_reason or "").strip().lower() in {"", "stop"}
+
+
+def _is_empty_stream_error(exc: BaseException) -> bool:
     if not isinstance(exc, ProviderStreamError) or not isinstance(exc.body, dict):
         return False
+    # Match the stream collector's empty-answer envelope, not a gateway error
+    # payload that happens to contain an empty content field.
     return (
-        str(exc.body.get("finish_reason") or "").strip().lower() == "length"
-        and exc.body.get("content") == ""
+        exc.body.get("content") == ""
+        and not (exc.body.keys() - {"content", "finish_reason"})
+        and exc.status_code is None
+        and str(exc.body.get("finish_reason") or "").strip().lower() in {"", "stop", "length"}
     )
 
 
@@ -347,7 +359,7 @@ class JudgeClient:
             {"role": "user", "content": user_content},
         ]
         judge_label = f"{self.cfg.display or self.cfg.name}({self.cfg.name})"
-        truncation_cause = None
+        output_cause = None
         with bind_chain_context(
             module="模型裁判", judge=judge_label, round=1
         ):
@@ -369,18 +381,19 @@ class JudgeClient:
             try:
                 resp = await self._llm_create(kwargs, **call_options)
             except ProviderStreamError as exc:
-                if not require_complete or not _is_empty_length_error(exc):
+                if not require_complete or not _is_empty_stream_error(exc):
                     raise
-                # The stream layer stops retrying this terminal error. Keep its
-                # response local and reuse the non-empty truncation audit path.
-                truncation_cause = exc
+                # Preserve terminal empty streams through the same classified
+                # audit path as returned whitespace/length responses. Empty
+                # stop/unknown completions may still be retried by the runner.
+                output_cause = exc
                 resp = AggregatedResponse(
                     model=self.model,
                     usage=getattr(exc, "_auto_eval_usage", None),
                     stream_stats=getattr(exc, "_auto_eval_stream_stats", None),
                     choices=[AggregatedChoice(
                         index=0,
-                        finish_reason=exc.body["finish_reason"],
+                        finish_reason=exc.body.get("finish_reason"),
                         message=AggregatedMessage(content=""),
                     )],
                 )
@@ -399,6 +412,13 @@ class JudgeClient:
                 error_category="truncated",
                 finish_reason=finish_reason,
             )
+        elif require_complete and not content.strip():
+            output_error = JudgeOutputEmptyError(
+                "裁判返回空白响应，未生成最终JSON；不能通过格式修复补写评测结果",
+                raw_output=content, repair_output="", judge=self.cfg.name,
+                model=self.model, error_category="empty_response", finish_reason=finish_reason,
+            )
+            output_error.structural_diagnostics = [str(output_error)]
         usage = _usage_dict(getattr(resp, "usage", None))
         if usage and usage.get("image_tokens") is not None:
             log_event("模型裁判", "视觉Token用量", details={"image_tokens": usage["image_tokens"]})
@@ -442,7 +462,7 @@ class JudgeClient:
             self._write_trace(trace_detail)
 
         if output_error:
-            raise output_error from truncation_cause
+            raise output_error from output_cause
 
         return content
 
@@ -515,7 +535,7 @@ class JudgeClient:
                 max_attempts=max_attempts,
             )
         except Exception as exc:
-            if self.trace_path and not (defer_empty_length_trace and _is_empty_length_error(exc)):
+            if self.trace_path and not (defer_empty_length_trace and _is_empty_stream_error(exc)):
                 self._write_trace({
                     "ts": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
                     "status": "error",

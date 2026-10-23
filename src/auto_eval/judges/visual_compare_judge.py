@@ -21,7 +21,7 @@ from ..long_screenshot import (
 )
 from ..paths import resolve_project_path
 from ..schema import VisualCompareObservation
-from .base import JudgeClient, JudgeOutputParseError
+from .base import JudgeClient, JudgeOutputEmptyError, JudgeOutputParseError
 from .prompts import parse_json_loose, parse_json_preserving_pairs, scan_recoverable_json_object
 from .query_image_prompt import QUERY_IMAGE_INSTRUCTIONS
 from .qa_chat_schema import QA_CHAT_STANDARD_ID, QAChatObservation, finalize_qa_chat_observation
@@ -625,15 +625,31 @@ class VisualCompareJudge:
             if evidence_callback:
                 evidence_callback(audit)
         repaired = ""
+        local_format_recovery_steps: list[str] = []
         if strict_1022:
+            if not isinstance(raw_output, str) or not raw_output.strip():
+                error = JudgeOutputEmptyError(
+                    "裁判返回空白响应，未生成最终JSON；不能通过格式修复补写评测结果",
+                    raw_output=raw_output or "", repair_output="", judge=self.client.cfg.name,
+                    model=self.client.model, error_category="empty_response",
+                )
+                error.structural_diagnostics = [str(error)]
+                raise error
             try:
-                data = (parse_compact if compact_1022 else parse_1022_output_r021)(raw_output, actual_product_count)
+                if compact_1022 and not compact_r022:
+                    data = parse_1022_output(raw_output, actual_product_count,
+                                             recovery_steps=local_format_recovery_steps)
+                else:
+                    data = (parse_compact if compact_1022 else parse_1022_output_r021)(raw_output, actual_product_count)
             except OutputContractError as exc:
-                raise JudgeOutputParseError(
+                error = JudgeOutputParseError(
                     str(exc), raw_output=raw_output, repair_output="",
                     judge=self.client.cfg.name, model=self.client.model,
                     error_category=exc.category,
-                ) from exc
+                )
+                error.structural_diagnostics = [str(exc)]
+                error.local_format_recovery_steps = local_format_recovery_steps
+                raise error from exc
             if not compact_1022:
                 data["standard_id"] = self.protocol.standard_id
                 data["standard_version"] = self.protocol.standard_version
@@ -779,6 +795,9 @@ class VisualCompareJudge:
             observation, self.protocol, **({"trusted_collection_metadata": trusted_collection} if is_strict_output else {}))
         if compact_1022:
             result["evaluation_datetime"] = evaluation_datetime
+            result.update(raw_model_output=raw_output,
+                          locally_repaired_json=bool(local_format_recovery_steps),
+                          local_format_recovery_steps=local_format_recovery_steps)
         if is_strict_output:
             result.update(raw_model_output=raw_output,
                           repaired_model_output=repaired,

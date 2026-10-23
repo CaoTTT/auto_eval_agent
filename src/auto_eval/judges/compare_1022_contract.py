@@ -2,13 +2,13 @@
 from __future__ import annotations
 
 import copy
-import json
 import re
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model
 
 from .compare_1022_contract_r021 import OutputContractError, _ATTRIBUTED_QUOTE, _SCORE_CLAIM
+from .json_recovery import JsonRecoveryError, recover_json_object
 
 STANDARD_VERSION_1022 = "0.2-simplified-1022"
 OUTPUT_CONTRACT_1022 = "compare_1022_v2"
@@ -21,8 +21,28 @@ Gate = Literal["pass", "fail", "unclear"]
 InputStatus = Literal["complete", "partial", "failed"]
 GateReason = Annotated[str, Field(min_length=1, max_length=600)]
 DimensionReason = Annotated[str, Field(min_length=1, max_length=2400)]
-_PRODUCT_SECTION = re.compile(r"(?:^|[；;]\s*)产品([0-9]+)[:：]")
+_PRODUCT_SECTION = re.compile(
+    r"(?:^|[；;。！？!?\r\n])\s*(?P<heading>"
+    r"(?:(?:[-•●▪·]\s*|\*\s+)|"
+    r"(?:(?:[0-9０-９一二三四五六七八九十]+[.．、)）])|"
+    r"[（(][0-9０-９一二三四五六七八九十]+[)）])\s*)?"
+    r"(?:\*\*|__)?[【\[(（]?[ \t]*产品[ \t]*(?P<product>[0-9０-９]+)[ \t]*"
+    r"[】\])）]?(?:\*\*|__)?[ \t]*[:：](?:\*\*|__)?)"
+)
+_REASON_QUOTE = re.compile(r'“[^”]*”|‘[^’]*’|「[^」]*」|『[^』]*』|"(?:\\.|[^"\\])*"|`[^`]*`')
 _UNSCORED = re.compile(r"未评分（([^（）]+)）：(.+)", re.DOTALL)
+_NULL_REASON_NEGATION = re.compile(
+    r"(?:不存在|没有|并无|并未|并非|不是|不属于|不构成|未构成|未发现|未见|无(?!法)|不按|"
+    r"(?:不能|不应|不可)(?:认定|认为|判定|视为|视作|按))"
+    r"[^，,。；;！？!?]{0,18}"
+    r"(?:证据不足|可选|禁止|规则型\s*(?:NA|N/A)|未出现|未提供|未展示|缺失|遮挡|未覆盖|不可辨|看不清)",
+    re.IGNORECASE,
+)
+_NULL_REASON_CONTRADICTION = re.compile(
+    r"证据(?:充分|充足)|(?:所有|全部)(?:关键)?(?:信息|事实|内容)[^。；;]{0,8}(?:均|都)?(?:可确认|清晰可辨)|"
+    r"(?<!不)(?<!未)(?<!无)(?:应该|应当|必须|应)(?:予以)?评分|本应扣分|"
+    r"(?:不能|不可|不应)(?:留空|记为NA|按NA|给NA)"
+)
 
 
 class _CompactOutput(BaseModel):
@@ -81,15 +101,44 @@ def _blocked_reason(data: dict, n: int) -> str:
     return f"未评分（{label}Gate{state}）：该产品后续维度统一记为NA，详见对应Gate理由。"
 
 
+def _reason_matches(reason: str) -> list[re.Match[str]]:
+    # Keep offsets into the original reason while hiding quoted source labels.
+    # This mask is only for attribution; numeric grading checks retain their
+    # existing, stricter rule requiring explicitly attributed quotations.
+    masked = _REASON_QUOTE.sub(lambda match: " " * len(match[0]), reason)
+    return list(_PRODUCT_SECTION.finditer(masked))
+
+
+def _section_parts(reason: str, matches: list[re.Match[str]]) -> dict[int, str]:
+    parts = {}
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(reason)
+        # A sentence-ending delimiter also belongs to the preceding explanation.
+        if index + 1 < len(matches) and reason[end] in "。！？!?":
+            end += 1
+        parts[int(match["product"])] = reason[match.end():end].strip().rstrip("；;").strip()
+    return parts
+
+
+def _join_reason_sections(prefix: str, parts: dict[int, str]) -> str:
+    sections = "；".join(f"产品{n}：{parts[n]}" for n in sorted(parts))
+    if not prefix.strip():
+        return sections
+    # Preserve the Query-level explanation verbatim, including its punctuation.
+    # A semicolon also keeps the canonical first section readable by existing
+    # consumers that locate product sections using semicolon boundaries.
+    separator = "" if prefix.rstrip().endswith(("；", ";")) else "；"
+    return prefix + separator + sections
+
+
 def product_reason_1022(reason: str | None, n: int) -> str:
     if not isinstance(reason, str):
         return ""
-    matches = list(_PRODUCT_SECTION.finditer(reason))
-    for index, match in enumerate(matches):
-        if int(match[1]) == n:
-            end = matches[index + 1].start() if index + 1 < len(matches) else len(reason)
-            return reason[match.end():end].strip().rstrip("；;").strip()
-    return ""
+    matches = _reason_matches(reason)
+    ids = [int(match["product"]) for match in matches]
+    if ids != sorted(set(ids)):
+        return ""
+    return _section_parts(reason, matches).get(n, "")
 
 
 def is_unscored_reason_1022(reason: str) -> bool:
@@ -97,17 +146,58 @@ def is_unscored_reason_1022(reason: str) -> bool:
     return bool(match and all(re.search(r"\w", text) for text in match.groups()))
 
 
-def _reason_sections(reason: str, product_count: int, field: str, *, ignored: set[int] | None = None) -> dict[int, str]:
-    matches = list(_PRODUCT_SECTION.finditer(reason))
-    ids = [int(m[1]) for m in matches]
+def _normalize_explicit_unscored_reason(reason: str) -> str:
+    """Add only a presentation marker to an already explicit, justified null."""
+    if is_unscored_reason_1022(reason) or reason.startswith("未评分"):
+        return reason
+    judgment = _REASON_QUOTE.sub(lambda match: " " * len(match[0]), reason)
+    if judgment.strip(" \t\r\n。；;：:") in {"可选未出现", "禁止未出现", "规则型NA", "证据不足"}:
+        return reason
+    if _NULL_REASON_NEGATION.search(judgment) or _NULL_REASON_CONTRADICTION.search(judgment):
+        return reason
+    category = None
+    for rule in ("可选", "禁止"):
+        absence = re.search(rule + r"[^。；;]{0,48}(?:未出现|未提供|未见|未展示)", judgment)
+        positive = re.search(rule + r"[^。；;]{0,24}(?:已出现|已提供|已展示)", judgment)
+        if absence and not positive:
+            category = rule + "未出现"
+            break
+        if absence and positive:
+            return reason
+    if category is None and re.search(r"规则型\s*(?:NA|N/A)", judgment, re.IGNORECASE) and re.search(
+        r"未出现|未见|未提供|未展示|无(?:任何)?(?:来源|引用|服务|组件)", judgment
+    ):
+        category = "规则型NA"
+    if category is None and "证据不足" in judgment and re.search(
+        r"截图|画面|文字|来源|引用|上下文|关键内容", judgment
+    ) and re.search(r"未覆盖|缺失|未提供|不可辨|看不清|遮挡|无法确认|无法识别|无法区分", judgment):
+        category = "证据不足"
+    return f"未评分（{category}）：{reason}" if category else reason
+
+
+def _has_judge_score_claim(reason: str) -> bool:
+    text = _ATTRIBUTED_QUOTE.sub(lambda match: " " * len(match[0]), reason)
+    for match in _SCORE_CLAIM.finditer(text):
+        if (re.fullmatch(r"[0-5一二三四五]\s*分档", match[0]) and match.start()
+                and (text[match.start() - 1].isdigit() or text[match.start() - 1] in "零〇一二三四五六七八九十百千万亿两")):
+            # "2500分档" describes a numeric bracket, not a judge's "0分档".
+            continue
+        return True
+    return False
+
+
+def _reason_sections(
+    reason: str, product_count: int, field: str, *, ignored: set[int] | None = None,
+) -> tuple[str, dict[int, str]]:
+    matches = _reason_matches(reason)
+    ids = [int(match["product"]) for match in matches]
     if not ids or ids != sorted(set(ids)) or any(not 1 <= n <= product_count for n in ids):
         _error(f"{field}须按实际产品顺序分段，不得重复或引用不存在产品")
-    if reason[:matches[0].start()].strip():
-        _error(f"{field}不得在产品分段前附加说明")
-    parts = {n: product_reason_1022(reason, n) for n in ids}
+    prefix = reason[:matches[0].start("heading")]
+    parts = _section_parts(reason, matches)
     if any(not re.search(r"\w", text) for n, text in parts.items() if n not in (ignored or set())):
         _error(f"{field}产品说明不得为空白或纯标点")
-    return parts
+    return prefix, parts
 
 
 def _validate(data: dict, product_count: int) -> dict:
@@ -135,19 +225,23 @@ def _validate(data: dict, product_count: int) -> dict:
         for dimension in DIMENSIONS_1022:
             normalized[f"{dimension}_applicable"] = None
             normalized[f"{dimension}_reason"] = None
-    elif blocked_nos:
+    else:
         active_nos = set(range(1, product_count + 1)) - blocked_nos
         for dimension in DIMENSIONS_1022:
             key = f"{dimension}_reason"
             reason = normalized.get(key)
             if normalized.get(f"{dimension}_applicable") is True and isinstance(reason, str):
-                parts = _reason_sections(reason, product_count, key, ignored=blocked_nos)
+                prefix, parts = _reason_sections(reason, product_count, key, ignored=blocked_nos)
                 if active_nos - parts.keys():
                     _error(f"{key}缺少未被Gate阻断产品的说明")
+                for n in active_nos:
+                    score_key = f"answer{n}_{dimension}_score"
+                    if score_key in supplied and normalized[score_key] is None:
+                        parts[n] = _normalize_explicit_unscored_reason(parts[n])
                 # Ignore blocked judgments before length/score-claim checks.
                 # This also excludes app-added Gate explanations when a normalized
                 # result is validated again; normalization remains idempotent.
-                normalized[key] = "；".join(f"产品{n}：{parts[n]}" for n in sorted(active_nos))
+                normalized[key] = _join_reason_sections(prefix, {n: parts[n] for n in active_nos})
     if product_count - len(blocked_nos) < 2:
         normalized["content_conflict"] = None
         normalized["conflict_reason"] = None
@@ -161,7 +255,7 @@ def _validate(data: dict, product_count: int) -> dict:
         if key.endswith("_reason") and isinstance(text, str):
             if not re.search(r"\w", text):
                 _error(f"{key}不能仅包含空白或标点")
-            if _SCORE_CLAIM.search(_ATTRIBUTED_QUOTE.sub("", text)):
+            if _has_judge_score_claim(text):
                 _error(f"{key}不得重复裁判数值评分；数值只写score字段")
     for n in range(1, product_count + 1):
         if result[f"answer{n}_input_status"] == "failed" and any(
@@ -184,12 +278,12 @@ def _validate(data: dict, product_count: int) -> dict:
                 _error(f"{reason_key}须以“不适用：”解释查询级原因")
             parts = {}
         else:
-            parts = _reason_sections(reason, product_count, reason_key)
+            prefix, parts = _reason_sections(reason, product_count, reason_key)
             if active - parts.keys():
                 _error(f"{reason_key}缺少未被Gate阻断产品的说明")
             for n in blocked:
                 parts[n] = _blocked_reason(result, n)
-            result[reason_key] = "；".join(f"产品{n}：{parts[n]}" for n in sorted(parts))
+            result[reason_key] = _join_reason_sections(prefix, parts)
         for n in active:
             score_key = f"answer{n}_{dimension}_score"
             if score_key not in supplied:
@@ -215,24 +309,13 @@ def validate_1022_output(data: dict, product_count: int) -> dict:
     return _validate(data, product_count)
 
 
-def _read_json(raw: str) -> dict:
-    def unique(pairs):
-        result = {}
-        for key, value in pairs:
-            if key in result:
-                raise ValueError(f"重复JSON字段：{key}")
-            result[key] = value
-        return result
-
-    def reject(value):
-        raise ValueError(f"非法JSON常量：{value}")
-
+def _read_json(raw: str, recovery_steps: list[str] | None = None) -> dict:
     try:
-        data = json.loads(raw, object_pairs_hook=unique, parse_constant=reject)
-        if not isinstance(data, dict):
-            raise ValueError("顶层必须为单个JSON对象")
-        return data
-    except (TypeError, ValueError, RecursionError) as exc:
+        recovered = recover_json_object(raw)
+        if recovery_steps is not None:
+            recovery_steps.extend(recovered.steps)
+        return recovered.data
+    except (JsonRecoveryError, RecursionError) as exc:
         raise OutputContractError(f"1022输出JSON语法不合法：{exc}", "json_syntax") from exc
 
 
@@ -244,9 +327,9 @@ def parse_1022_triple_output(raw: str) -> dict:
     return _validate(_read_json(raw), 3)
 
 
-def parse_1022_output(raw: str, product_count: int) -> dict:
+def parse_1022_output(raw: str, product_count: int, *, recovery_steps: list[str] | None = None) -> dict:
     output_model_1022(product_count)
-    return parse_1022_dual_output(raw) if product_count == 2 else parse_1022_triple_output(raw)
+    return _validate(_read_json(raw, recovery_steps), product_count)
 
 
 def output_schema_1022(product_count: int) -> dict:
