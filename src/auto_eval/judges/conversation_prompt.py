@@ -33,7 +33,7 @@ def assemble_conversation(system: str, bundle: dict, protocol, evaluation_dateti
     is_timeliness = protocol.standard_id == "timeliness_compare"
     product_contexts_only = (
         protocol.output_contract == OUTPUT_CONTRACT_1022
-        and protocol.bundle_revision == "0.2.4"
+        and protocol.bundle_revision in {"0.2.4", "0.2.5", "0.2.6"}
     )
     if product_contexts_only:
         # Never let a product's legacy context alias become shared history.
@@ -42,6 +42,16 @@ def assemble_conversation(system: str, bundle: dict, protocol, evaluation_dateti
             for turn in turns
         ]
     instructions = INSTRUCTIONS
+    if protocol.output_contract == OUTPUT_CONTRACT_1022 and protocol.bundle_revision == "0.2.5":
+        instructions = instructions.replace(
+            "先分别绝对评分，再比较。",
+            "默认分别绝对评分；卡片形式、同形态同档及数字缺来源保护按本轮协议明确的评分例外执行。"
+            "政策类单个匿名引用低分特例仅影响对应产品，不连带调整其他产品。")
+    elif protocol.output_contract == OUTPUT_CONTRACT_1022 and protocol.bundle_revision == "0.2.6":
+        instructions = instructions.replace(
+            "先分别绝对评分，再比较。",
+            "按本轮协议分别评分；服务与引用先判断应该、可选或禁止，允许协议规定的逐产品合法空分。"
+            "来源形态相同不强制同分；场景化卡片及数据缺来源补充规则仅在不覆盖本轮明确分档和NA时使用。")
     if is_timeliness:
         instructions = instructions.replace(
             "每个产品只能用自身历史解释承接和指代，不能借其他产品历史补全遗漏。先分别绝对评分，再比较。",

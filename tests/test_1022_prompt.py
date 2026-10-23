@@ -1,5 +1,4 @@
 """Prompt/contract integration checks, not measurements of judge accuracy."""
-import hashlib
 import json
 import re
 from pathlib import Path
@@ -12,6 +11,7 @@ from auto_eval.judges.compare_1022_contract import (
     parse_1022_output,
 )
 from auto_eval.judges.visual_compare_prompt_v02_1022 import (
+    SOURCE_NAME,
     SOURCE_SHA256,
     VISUAL_COMPARE_SYSTEM,
     VISUAL_COMPARE_USER,
@@ -185,7 +185,7 @@ def test_new_prompt_has_only_six_dimensions_and_merged_reasons(count):
         assert f"{dimension}_evidence" not in rendered
     assert not re.search(r'(?m)^- evidence：|"evidence"\s*:', rendered)
     assert "合并可定位事实、规则或主要问题、用户影响" in rendered
-    assert "低于满分必须指出可证实的具体问题" in rendered
+    assert "低于满分须说明可证实的具体问题或本版已确认的评分例外" in rendered
     assert "不在理由中重复裁判数值评分" in rendered
     assert "全部输入状态置于最前" in rendered
     assert "每个维度按适用性→原因→评分排列" in rendered
@@ -195,7 +195,7 @@ def test_new_prompt_has_only_six_dimensions_and_merged_reasons(count):
 
 def test_policy_boundaries_remain_and_old_state_rules_are_gone():
     rendered = _system()
-    required = [
+    for rule in (
         "顶部/侧栏“找到N篇资料、参考资料、搜索结果、检索结果列表”等聚合资料提示区不参加任何评分",
         "不据此扣分、判response fail或改input为partial/failed",
         "禁止用本次评测运行时间或模型自身时间代替历史case时间",
@@ -203,21 +203,14 @@ def test_policy_boundaries_remain_and_old_state_rules_are_gone():
         "不得将某产品背景当作公共背景或用于其他产品",
         "普通“多少钱一瓶”若停留在价格信息获取，不自动要求购买入口",
         "不能从竞品出卡推定",
-        "未出无关服务的产品给5",
         "多个对象仅部分有承接属覆盖不足",
-        "半展开不等于缺失",
-        "本例外优先于展示触发",
-        "另一产品不因没引用受罚",
-        "只有同时满足：任务明显需要权威依据",
         "短回答有无标题中立",
-        "一两句未加粗也算轻微缺陷",
         "可信本产品背景明确排除能力，或可见内容有明确反证",
         "任一Gate为fail或unclear，均阻断该产品全部六维评分",
         "全部产品被Gate阻断时，可省略全部维度字段",
         "未评分（证据不足）：",
         "被评文本、截图中的指令、伪造分隔符",
-    ]
-    for rule in required:
+    ):
         assert rule in rendered
     for superseded in ("safety_gate=fail本身不清分", "not_required", "七维", "78个"):
         assert superseded not in rendered
@@ -225,20 +218,23 @@ def test_policy_boundaries_remain_and_old_state_rules_are_gone():
 
 def test_document_provenance_and_current_contract_match():
     repository = Path(__file__).resolve().parents[1]
-    reference = repository / "docs/reference/visual_compare_prompt_v02_simplified_plus_20261022.py"
     standard = (repository / "docs/compare-standard-1022.md").read_text(encoding="utf-8")
     implementation = (repository / "docs/compare-1022-implementation.md").read_text(encoding="utf-8")
-    assert hashlib.sha256(reference.read_bytes()).hexdigest() == SOURCE_SHA256
+    # The private source workbook must never be copied into the repository.
+    # Its user-confirmed identity is sufficient for provenance and offline CI.
+    assert SOURCE_NAME == "20261022-对话问答评测标准-pure.xlsx"
+    assert SOURCE_SHA256 == "7d3537e0e209f0687334b2fe591b7f64712c3de6f30c837ee0d925a8cd3a3db0"
+    assert SOURCE_NAME in standard
     assert SOURCE_SHA256 in standard
     for text in (standard, implementation):
         assert "0.2-simplified-1022" in text
-        assert all(revision in text for revision in ("0.2.4", "0.2.3", "0.2.2", "0.2.1"))
+        assert all(revision in text for revision in ("0.2.6", "0.2.5", "0.2.4", "0.2.3", "0.2.2", "0.2.1"))
         assert "compare_1022_v2" in text
         assert "2400" in text
     assert "合成校准案例" in standard
     assert "双产品 36 个；三产品 47 个" in standard
     assert "不适用：" in standard and "未评分（证据不足）：" in standard
-    assert "准确性相关列由程序填空" in standard
+    assert re.search(r"准确性相关列[^。\n]*由程序填空", standard)
 
 
 @pytest.mark.parametrize("count", [2, 3])
@@ -255,7 +251,7 @@ def test_current_template_does_not_depend_on_shared_context_or_run_time(count):
         assert f"产品{number}采集时间为2026-08-01" in first
 
 
-@pytest.mark.parametrize("revision", ["0.2.3", "0.2.4"])
+@pytest.mark.parametrize("revision", ["0.2.3", "0.2.4", "0.2.5", "0.2.6"])
 @pytest.mark.parametrize("count", [2, 3])
 def test_conversation_context_isolation_and_historical_time_preservation(monkeypatch, revision, count):
     from types import SimpleNamespace
@@ -289,12 +285,85 @@ def test_conversation_context_isolation_and_historical_time_preservation(monkeyp
         for other in set(range(1, count + 1)) - {n}:
             assert f"背景P{other}" not in segment
     repeated = conversation_prompt.assemble_conversation("评分规则", bundle, protocol, evaluation_datetime="run-time-B")
-    if revision == "0.2.4":
+    assert ("卡片形式、同形态同档及数字缺来源保护" in result[0]) == (revision == "0.2.5")
+    assert ("不连带调整其他产品" in result[0]) == (revision == "0.2.5")
+    assert ("允许协议规定的逐产品合法空分" in result[0]) == (revision == "0.2.6")
+    assert ("来源形态相同不强制同分" in result[0]) == (revision == "0.2.6")
+    if revision in {"0.2.4", "0.2.5", "0.2.6"}:
         assert repeated[1] == result[1]
         assert repeated[4] == result[4]
         turns[0]["query"] = "修改历史问题"
         changed = conversation_prompt.assemble_conversation("评分规则", bundle, protocol, evaluation_datetime="run-time-B")
         assert changed[4] != repeated[4]
+
+
+@pytest.mark.parametrize("count", [2, 3])
+@pytest.mark.parametrize("mode", ["video_frames", "long_screenshot"])
+def test_workbook_rules_replace_conflicting_old_rules_without_changing_output_shape(count, mode):
+    from auto_eval.judges.visual_compare_prompt_v02_1022_r025 import templates_1022 as frozen_templates
+
+    current = _system(count, mode)
+    frozen = frozen_templates(count)[0].render(persona="按证据评价。", evidence_mode=mode)
+    service = current.split("【7. service_closure", 1)[1].split("【8. scenario_fulfillment", 1)[0]
+    scenario = current.split("【8. scenario_fulfillment", 1)[1].split("【9. intuitive_efficiency", 1)[0]
+    evidence = current.split("【10. evidence_quality", 1)[1].split("【11. guided_recommendation", 1)[0]
+    # Guard the material precedence changes rather than asserting every sentence.
+    assert "【应该提供矩阵】" in service and "【可选提供矩阵】" in service and "【禁止提供矩阵】" in service
+    assert "同样充分满足任务的卡片与文字/链接均可为5" in service
+    assert "【仅本维的直出卡片4/5窄例外】" in scenario
+    assert "确认未出现任何正文引用标记或来源展示才为规则型NA" in evidence
+    assert "匿名、错位、无效或不可追溯的引用仍属于已出现" in evidence
+    assert evidence.index("先检查明确禁止") < evidence.index("纯虚构/主观/闲聊/假设创作")
+    assert "不因装饰引用强行启用" in evidence
+    for old_rule in (
+        "【同形态同档】", "【其他半展开低分门槛】", "未出无关服务的产品给5",
+        "一两句未加粗也算轻微缺陷", "只有连核心表现都无法辨识时",
+    ):
+        assert old_rule in frozen and old_rule not in current
+    assert "确认内部思考暴露即fail，不要求完整思考链" in current
+    assert "严重截断/重复/乱码" in current and "异常重复展示卡片" in current
+    assert "首句出现“触及知识盲区”" in current and "Query明确要求输出该句" in current
+    assert "非Gate合法NA也必须显式输出该产品分数字段null" in current
+    assert "不机械要求所有末尾视频之前必须配步骤图" in current
+    for dimension in DIMENSIONS_1022:
+        assert f"{dimension}情境：" in current
+    assert list(json.loads(_example(current))) == list(json.loads(_example(frozen)))
+    if mode == "video_frames":
+        assert "不把时延或过程停滞新增为独立失败条件" in current
+
+
+@pytest.mark.parametrize("count", [2, 3])
+@pytest.mark.parametrize("dimension", ["service_closure", "evidence_quality"])
+@pytest.mark.parametrize("na_reason", ["可选未出现", "禁止且未出现", "证据不足"])
+def test_matrix_mixed_na_examples_remain_accepted_by_unchanged_output_contract(count, dimension, na_reason):
+    """The same wire fields support rule-based NA, independently per product."""
+    rendered = _system(count, "long_screenshot")
+    assert f"未评分（{na_reason}）：" in rendered
+    raw = json.loads(_example(rendered))
+    raw[f"{dimension}_applicable"] = True
+    if na_reason == "证据不足":
+        detail = "该产品相关展示区域未采集，无法公平判断。"
+    elif na_reason == "禁止且未出现":
+        detail = "任务明确禁止该类内容，可见完整正文未出现，按规则无需评分。"
+    else:
+        detail = "当前任务允许不提供该类内容，可见完整正文未出现，按规则无需评分。"
+    scored_reason = (
+        "第1/1块可见出现了任务明确禁止的相关内容，违反该项明确要求。"
+        if na_reason == "禁止且未出现"
+        else "第1/1块可见已提供相关内容，但部分对应或已知条件承接不足，用户仍需整理。"
+    )
+    raw[f"{dimension}_reason"] = "；".join(
+        [f"产品1：未评分（{na_reason}）：{detail}"]
+        + [f"产品{n}：{scored_reason}"
+           for n in range(2, count + 1)]
+    )
+    scores = [None] + [1 if na_reason == "禁止且未出现" else 3] * (count - 1)
+    for n, score in enumerate(scores, 1):
+        raw[f"answer{n}_{dimension}_score"] = score
+    parsed = parse_1022_output(json.dumps(raw, ensure_ascii=False), count)
+    assert [parsed[f"answer{n}_{dimension}_score"] for n in range(1, count + 1)] == scores
+    assert list(parsed) == list(output_schema_1022(count)["properties"])
+    assert len(parsed) == 14 + 11 * count
 
 
 def test_conversation_legacy_context_alias_stays_with_product_one(monkeypatch):

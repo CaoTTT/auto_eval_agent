@@ -134,7 +134,7 @@ def test_unfinished_export_uses_frozen_contract_and_old_columns_keep_old_values(
     assert stats.score_state(compact_case(old), 1, "understanding", legacy) == ("核验状态缺失", None)
 
 
-@pytest.mark.parametrize("revision", ["0.2.2", "0.2.3", "0.2.4"])
+@pytest.mark.parametrize("revision", ["0.2.2", "0.2.3", "0.2.4", "0.2.5", "0.2.6"])
 def test_revision_fallback_preserves_compact_export_and_statistics(revision):
     policy = compact_protocol(revision)
     row = compact_result()

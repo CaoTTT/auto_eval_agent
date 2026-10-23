@@ -179,6 +179,10 @@ class CompareProtocol:
                 from .visual_compare_prompt_v02_1022_r022 import templates_1022
             elif self.bundle_revision == "0.2.3":
                 from .visual_compare_prompt_v02_1022_r023 import templates_1022
+            elif self.bundle_revision == "0.2.4":
+                from .visual_compare_prompt_v02_1022_r024 import templates_1022
+            elif self.bundle_revision == "0.2.5":
+                from .visual_compare_prompt_v02_1022_r025 import templates_1022
             else:
                 from .visual_compare_prompt_v02_1022 import templates_1022
             return templates_1022(product_count)
@@ -351,7 +355,7 @@ _PROTOCOLS = {
         id=V1022_COMPARE_PROTOCOL_ID,
         standard_id=STANDARD_ID,
         standard_version=STANDARD_VERSION_1022,
-        bundle_revision="0.2.4",
+        bundle_revision="0.2.6",
         display="V0.2简化版（1022优化）",
         status="experimental",
         system_template=V1022_SYSTEM,
@@ -377,6 +381,24 @@ def resolve_compare_protocol(protocol_id: str | None, bundle_revision: str | Non
     try:
         protocol = _PROTOCOLS[selected]
         if bundle_revision and bundle_revision != protocol.bundle_revision:
+            if selected == V1022_COMPARE_PROTOCOL_ID and bundle_revision == "0.2.5":
+                from .visual_compare_prompt_v02_1022_r025 import (
+                    VISUAL_COMPARE_SYSTEM as legacy_system,
+                    VISUAL_COMPARE_USER as legacy_user,
+                )
+                return replace(
+                    protocol, bundle_revision=bundle_revision,
+                    system_template=legacy_system, user_template=legacy_user,
+                )
+            if selected == V1022_COMPARE_PROTOCOL_ID and bundle_revision == "0.2.4":
+                from .visual_compare_prompt_v02_1022_r024 import (
+                    VISUAL_COMPARE_SYSTEM as legacy_system,
+                    VISUAL_COMPARE_USER as legacy_user,
+                )
+                return replace(
+                    protocol, bundle_revision=bundle_revision,
+                    system_template=legacy_system, user_template=legacy_user,
+                )
             if selected == V1022_COMPARE_PROTOCOL_ID and bundle_revision == "0.2.3":
                 from .visual_compare_prompt_v02_1022_r023 import (
                     VISUAL_COMPARE_SYSTEM as legacy_system,

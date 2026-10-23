@@ -34,8 +34,9 @@ def make_judge(count=2, revision=None):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("count", [2, 3])
-async def test_new_task_time_does_not_change_1022_prompt_or_scores(count):
-    judge, client = make_judge(count)
+@pytest.mark.parametrize("revision", ["0.2.4", "0.2.5", "0.2.6"])
+async def test_new_task_time_does_not_change_1022_prompt_or_scores(count, revision):
+    judge, client = make_judge(count, revision)
     contexts = {f"context{n}": f"仅产品{n}背景" for n in range(1, count + 1)}
     first = await judge.evaluate(question="你好", product_count=count, context="不应共享的文本",
         evaluation_time=datetime(2026, 10, 22, tzinfo=timezone.utc), **contexts)
@@ -54,8 +55,9 @@ async def test_new_task_time_does_not_change_1022_prompt_or_scores(count):
 
 
 @pytest.mark.asyncio
-async def test_legacy_alias_is_used_only_for_first_product():
-    judge, client = make_judge()
+@pytest.mark.parametrize("revision", ["0.2.4", "0.2.5", "0.2.6"])
+async def test_legacy_alias_is_used_only_for_first_product(revision):
+    judge, client = make_judge(revision=revision)
     await judge.evaluate(question="你好", product_count=2, context="旧字段产品1背景", context2="产品2背景")
     user = client.calls[0][1]
     assert user.count("旧字段产品1背景") == 1
@@ -63,21 +65,23 @@ async def test_legacy_alias_is_used_only_for_first_product():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("revision", ["0.2.4", "0.2.5", "0.2.6"])
 @pytest.mark.parametrize("contexts", [
     {}, {"context1": "产品1背景"}, {"context1": "", "context": "不能回退", "context2": "产品2背景"},
     {"context1": None, "context": "不能回退", "context2": "产品2背景"},
     {"context1": "产品1背景", "context2": "  "},
 ])
-async def test_missing_context_never_reaches_model(contexts):
-    judge, client = make_judge()
+async def test_missing_context_never_reaches_model(contexts, revision):
+    judge, client = make_judge(revision=revision)
     with pytest.raises(ProductContextError):
         await judge.evaluate(question="你好", product_count=2, **contexts)
     assert not client.calls
 
 
 @pytest.mark.asyncio
-async def test_triple_product_requires_own_third_context():
-    judge, client = make_judge(3)
+@pytest.mark.parametrize("revision", ["0.2.4", "0.2.5", "0.2.6"])
+async def test_triple_product_requires_own_third_context(revision):
+    judge, client = make_judge(3, revision)
     with pytest.raises(ProductContextError, match="context3"):
         await judge.evaluate(question="你好", product_count=3, context1="产品1背景", context2="产品2背景")
     assert not client.calls

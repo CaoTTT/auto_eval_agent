@@ -69,9 +69,9 @@ createApp({
       const profile = row.evaluation_profile || (row.standard_id && row.standard_version
         ? `${row.standard_id}@${row.standard_version}` : taskEvaluationProfile.value);
       if (profile !== 'qa_competitor_compare@0.2-simplified-1022') return false;
-      if (row.bundle_revision) return ['0.2.2','0.2.3','0.2.4'].includes(row.bundle_revision);
+      if (row.bundle_revision) return ['0.2.2','0.2.3','0.2.4','0.2.5','0.2.6'].includes(row.bundle_revision);
       const manifest = taskProtocolManifest.value;
-      return manifest.output_contract ? manifest.output_contract === 'compare_1022_v2' : ['0.2.2','0.2.3','0.2.4'].includes(manifest.bundle_revision);
+      return manifest.output_contract ? manifest.output_contract === 'compare_1022_v2' : ['0.2.2','0.2.3','0.2.4','0.2.5','0.2.6'].includes(manifest.bundle_revision);
     }
     function isTimelinessRow(row = {}) {
       if (row.standard_id) return row.standard_id === 'timeliness_compare';

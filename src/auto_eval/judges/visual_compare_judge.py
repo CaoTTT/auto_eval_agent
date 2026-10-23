@@ -405,7 +405,7 @@ class VisualCompareJudge:
         output_label = "时效性评估V1" if is_timeliness else "问答闲聊V2"
         trusted_collection = collection_metadata(trusted_collection_metadata, actual_product_count) if is_strict_output else None
         compact_1022 = self.protocol.output_contract == OUTPUT_CONTRACT_1022
-        product_contexts_only = compact_1022 and self.protocol.bundle_revision == "0.2.4"
+        product_contexts_only = compact_1022 and self.protocol.bundle_revision in {"0.2.4", "0.2.5", "0.2.6"}
         if product_contexts_only:
             supplied_contexts = {"context": context, "context2": context2, "context3": context3}
             if context1 is not _CONTEXT_NOT_PROVIDED:

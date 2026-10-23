@@ -481,7 +481,7 @@ def test_1022_r023_preserves_prompt_bytes_when_new_revision_removes_shared_conte
 
     active = resolve_compare_protocol(V1022_COMPARE_PROTOCOL_ID)
     frozen = resolve_compare_protocol(V1022_COMPARE_PROTOCOL_ID, "0.2.3")
-    assert active.bundle_revision == "0.2.4"
+    assert active.bundle_revision == "0.2.6"
     assert frozen.system_template is frozen_prompt.VISUAL_COMPARE_SYSTEM
     assert frozen.user_template is frozen_prompt.VISUAL_COMPARE_USER
     assert frozen not in list_compare_protocols()
@@ -501,3 +501,116 @@ def test_1022_r023_preserves_prompt_bytes_when_new_revision_removes_shared_conte
     assert "frozen shared context" in rendered and "evaluation_datetime" in rendered
     assert "frozen shared context" not in current and "evaluation_datetime" not in current
     assert frozen.prompt_templates(product_count) == frozen_prompt.templates_1022(product_count)
+
+
+@pytest.mark.parametrize("product_count,evidence_mode,expected_sha256", [
+    (2, "video_frames", "aa57f37c8754507a72211f3a82b0c4d589640c94504c6e6759fc7fbefa792562"),
+    (2, "long_screenshot", "d5d69fa20a334b2892b2936cb29efee38d7a2da40b4fc8faa31047e9e050bdd2"),
+    (3, "video_frames", "713943002f7aa0f7f514cb1cb7ee72c14ca3ae67e59aee751c8db9fc22942cab"),
+    (3, "long_screenshot", "bd4a5b98b66fe9fa958d7f6bb045015efcd3d3cfb6fc3541f85badf28cacef44"),
+])
+def test_1022_r024_restores_frozen_rules_after_v4_merge(product_count, evidence_mode, expected_sha256, monkeypatch):
+    import hashlib
+    import importlib
+    from pathlib import Path
+    from auto_eval.judges import compare_1022_contract as live_contract
+    from auto_eval.judges import visual_compare_prompt_v02_1022_r024 as frozen_prompt
+
+    def changed_live_helper(*args, **kwargs):
+        raise AssertionError("Historical r024 rendering must not use current contract helpers")
+
+    monkeypatch.setattr(live_contract, "example_1022_output", changed_live_helper)
+    monkeypatch.setattr(live_contract, "output_field_instructions_1022", changed_live_helper)
+    frozen_prompt = importlib.reload(frozen_prompt)
+    assert hashlib.sha256(Path(frozen_prompt.__file__).read_bytes().replace(b"\r\n", b"\n")).hexdigest() == (
+        "3427b3b71173295cf1786b18579dc913962a95d97488a7314615eb1fcf1eb4f9"
+    )
+    active = resolve_compare_protocol(V1022_COMPARE_PROTOCOL_ID)
+    frozen = resolve_compare_protocol(V1022_COMPARE_PROTOCOL_ID, "0.2.4")
+    assert active.bundle_revision == "0.2.6"
+    assert frozen.system_template is frozen_prompt.VISUAL_COMPARE_SYSTEM
+    assert frozen.user_template is frozen_prompt.VISUAL_COMPARE_USER
+    assert frozen.prompt_templates(product_count) == frozen_prompt.templates_1022(product_count)
+    assert frozen not in list_compare_protocols()
+    assert frozen.observation_model is active.observation_model
+    assert frozen.public_metadata() == {**active.public_metadata(), "bundle_revision": "0.2.4"}
+
+    task = Task(id="frozen-1022-r024", mode="compare", items=[], options={},
+                evaluation_profile=frozen.id, protocol_manifest=frozen.public_metadata())
+    restored = _task_from_snapshot(snapshot_payload(task_to_snapshot(task)), task.id)
+    restored_protocol = resolve_compare_protocol(restored.evaluation_profile, restored.protocol_manifest["bundle_revision"])
+    assert restored_protocol.prompt_templates(product_count) == frozen.prompt_templates(product_count)
+    values = dict(persona="frozen-1022-r024", evaluation_datetime="2026-10-22T10:30:00+08:00",
+                  question="frozen query", context="frozen shared context", product_count=product_count,
+                  evidence_mode=evidence_mode, context1="c1", context2="c2", context3="c3",
+                  answer1="a1", answer2="a2", answer3="a3", frame_count1=1, frame_count2=2, frame_count3=3,
+                  image_count1=1, image_count2=2, image_count3=3,
+                  split_manifest1="{}", split_manifest2="{}", split_manifest3="{}")
+    system, user = restored_protocol.prompt_templates(product_count)
+    rendered = system.render(**values) + "\0" + user.render(**values)
+    assert hashlib.sha256(rendered.encode("utf-8")).hexdigest() == expected_sha256
+    latest_system, latest_user = active.prompt_templates(product_count)
+    assert rendered != latest_system.render(**values) + "\0" + latest_user.render(**values)
+    assert "frozen shared context" not in rendered and "evaluation_datetime" not in rendered
+
+
+@pytest.mark.parametrize("product_count,evidence_mode,expected_sha256", [
+    (2, "video_frames", "e12ce6c7bbd46dbaf77beca03324c1d06a2d7ce02fca66b059386de7d0c2057f"),
+    (2, "long_screenshot", "4ee2078bd75f9378034e96ca6c4097072030a4f89da71a04932536c9b5856e7e"),
+    (3, "video_frames", "11c6c068b6e612b8a693eaabeb2accde4465cdd777f54f32fc29ec90fa3d4251"),
+    (3, "long_screenshot", "9692faef02ed8d768d774d56b6546db011ba6f4b2036b0a7dbf0ce13dbf787cb"),
+])
+def test_1022_r025_remains_frozen_after_latest_workbook_revision(product_count, evidence_mode, expected_sha256, monkeypatch):
+    import hashlib
+    import importlib
+    from pathlib import Path
+    from auto_eval.judges import compare_1022_contract as live_contract
+    from auto_eval.judges import visual_compare_prompt_v02_1022_r025 as frozen_prompt
+
+    def changed_live_helper(*args, **kwargs):
+        raise AssertionError("Historical r025 rendering must not use current contract helpers")
+
+    monkeypatch.setattr(live_contract, "example_1022_output", changed_live_helper)
+    monkeypatch.setattr(live_contract, "output_field_instructions_1022", changed_live_helper)
+    frozen_prompt = importlib.reload(frozen_prompt)
+    assert hashlib.sha256(Path(frozen_prompt.__file__).read_bytes().replace(b"\r\n", b"\n")).hexdigest() == (
+        "ea8347f8d9569e214d65f10f3a6d38811a7e2af25a6e5d1af3fc23838e85a3d1"
+    )
+    active = resolve_compare_protocol(V1022_COMPARE_PROTOCOL_ID)
+    frozen = resolve_compare_protocol(V1022_COMPARE_PROTOCOL_ID, "0.2.5")
+    assert active.bundle_revision == "0.2.6"
+    assert frozen.system_template is frozen_prompt.VISUAL_COMPARE_SYSTEM
+    assert frozen.user_template is frozen_prompt.VISUAL_COMPARE_USER
+    assert frozen.prompt_templates(product_count) == frozen_prompt.templates_1022(product_count)
+    assert frozen not in list_compare_protocols()
+    assert frozen.observation_model is active.observation_model
+    task = Task(id="frozen-1022-r025", mode="compare", items=[], options={},
+                evaluation_profile=frozen.id, protocol_manifest=frozen.public_metadata())
+    restored = _task_from_snapshot(snapshot_payload(task_to_snapshot(task)), task.id)
+    restored_protocol = resolve_compare_protocol(restored.evaluation_profile, restored.protocol_manifest["bundle_revision"])
+    values = dict(persona="frozen-1022-r025", question="frozen query", context="shared",
+                  evaluation_datetime="2026-10-22T10:30:00+08:00", product_count=product_count,
+                  evidence_mode=evidence_mode, context1="c1", context2="c2", context3="c3",
+                  answer1="a1", answer2="a2", answer3="a3", frame_count1=1, frame_count2=2, frame_count3=3,
+                  image_count1=1, image_count2=2, image_count3=3,
+                  split_manifest1="{}", split_manifest2="{}", split_manifest3="{}")
+    system, user = restored_protocol.prompt_templates(product_count)
+    rendered = system.render(**values) + "\0" + user.render(**values)
+    assert hashlib.sha256(rendered.encode("utf-8")).hexdigest() == expected_sha256
+    assert "shared" not in rendered and "evaluation_datetime" not in rendered
+    latest_system, latest_user = active.prompt_templates(product_count)
+    assert rendered != latest_system.render(**values) + "\0" + latest_user.render(**values)
+
+
+@pytest.mark.parametrize("product_count,expected_schema_hash", [
+    (2, "f83c4160954d4066780d8e83fc7a2277dbad0f1df4a049a9505173c6fe99b635"),
+    (3, "a2c705c9a47594d6f9d0cbafaf6aea196abfd4793ccc835bf066f322f02ed682"),
+])
+def test_latest_workbook_revision_preserves_exact_json_schema(product_count, expected_schema_hash):
+    import hashlib
+    import json
+    from auto_eval.judges.compare_1022_contract import output_schema_1022
+
+    schema = output_schema_1022(product_count)
+    digest = hashlib.sha256(json.dumps(schema, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
+    assert digest == expected_schema_hash

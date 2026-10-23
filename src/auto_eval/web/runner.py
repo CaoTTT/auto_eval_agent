@@ -519,7 +519,7 @@ def _make_item_evaluator(
                 conversation_input = None
                 if (compare_protocol is not None
                         and compare_protocol.output_contract == "compare_1022_v2"
-                        and compare_protocol.bundle_revision == "0.2.4"):
+                        and compare_protocol.bundle_revision in {"0.2.4", "0.2.5", "0.2.6"}):
                     try:
                         item_dict.update(normalize_product_contexts(item_dict, _compare_product_count(item_dict)))
                     except ValueError as exc:
@@ -1435,7 +1435,7 @@ async def _eval_one(
     if mode == "compare" and compare_judges:
         protocol = getattr(compare_judges[0], "protocol", None)
         if (getattr(protocol, "output_contract", None) == "compare_1022_v2"
-                and getattr(protocol, "bundle_revision", None) == "0.2.4"):
+                and getattr(protocol, "bundle_revision", None) in {"0.2.4", "0.2.5", "0.2.6"}):
             item_dict = {**item_dict, **normalize_product_contexts(item_dict, _compare_product_count(item_dict))}
             item_dict.pop("context", None)
     item = _to_evalitem(item_dict, idx)

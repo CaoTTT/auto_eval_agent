@@ -43,7 +43,7 @@ async def evaluate(output, *, count=2, mode="off", revision=None, **kwargs):
     for n in range(1, count + 1):
         kwargs.setdefault(f"context{n}", f"产品{n}测试背景")
     result = await VisualCompareJudge(client, profile(), protocol).evaluate(
-        question="你好", product_count=count,
+        question=kwargs.pop("question", "你好"), product_count=count,
         evaluation_time=datetime(2026, 10, 22, tzinfo=timezone.utc), **kwargs,
     )
     return result, client
@@ -69,7 +69,7 @@ async def test_new_revision_uses_actual_product_fields_and_derived_only_metadata
     assert result["standard_version"] == "0.2-simplified-1022"
     assert result["product_count"] == count
     assert result["evaluation_profile"] == V1022_COMPARE_PROTOCOL_ID
-    assert result["bundle_revision"] == "0.2.4"
+    assert result["bundle_revision"] == "0.2.6"
     assert result["output_contract"] == "compare_1022_v2"
     assert result["evaluation_datetime"] == "2026-10-22T00:00:00+00:00"
     assert result["understanding_rank_groups"] == [[f"product{n}" for n in range(1, count + 1)]]
@@ -105,7 +105,7 @@ async def test_frozen_r022_keeps_reasons_first_prompt_schema_parser_and_projecti
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("revision", ["0.2.2", "0.2.3", "0.2.4"])
+@pytest.mark.parametrize("revision", ["0.2.2", "0.2.3", "0.2.4", "0.2.5", "0.2.6"])
 async def test_runtime_does_not_mix_frozen_output_order(revision):
     from auto_eval.judges.compare_1022_contract_r022 import example_1022_output as old_example
 
@@ -264,4 +264,109 @@ def test_compact_summary_does_not_invent_review_count():
     summary = _summarize(task, include_subsets=False)
     assert "needs_human_review_count" not in summary
     assert summary["understanding_answer1_avg"] == 5
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("count", [2, 3])
+@pytest.mark.parametrize("case", ["card_preference", "anonymous_policy"])
+async def test_r025_confirmed_exceptions_survive_parsing_ranking_and_export(count, case):
+    """Transport the judge's approved exceptional scores without rewriting them."""
+    from auto_eval.web import history
+
+    raw = example_1022_output(count)
+    if case == "card_preference":
+        question = "推荐附近适合两人晚餐且人均预算内的餐厅，说明推荐理由。"
+        dimensions = ("service_closure", "scenario_fulfillment")
+        scores = [5] + [4] * (count - 1)
+        descriptions = [
+            "第1帧相关直出卡包含符合地点、人数与预算的餐厅及推荐依据，可直接使用，适用直出形式优势。",
+        ] + [
+            "第1帧文字列表与有效入口完整满足地点、人数、预算和推荐依据；无功能缺陷，按直出形式比较例外定档。",
+        ] * (count - 1)
+        ranks = [["product1"], [f"product{n}" for n in range(2, count + 1)]]
+    else:
+        question = "申请某项公共补贴需要满足什么政策条件？"
+        dimensions = ("evidence_quality",)
+        scores = [1] + [3] * (count - 1)
+        descriptions = [
+            "第1帧政策条件仅有单个匿名引用，来源身份不可识别，命中政策类单个匿名引用特例。",
+        ] + [
+            "第1帧多处匿名角标对应主要条件，未展开机构身份但不触发特殊低分条件，按普通半展开形态评价。",
+        ] * (count - 1)
+        ranks = [[f"product{n}" for n in range(2, count + 1)], ["product1"]]
+    for dimension in dimensions:
+        raw[f"{dimension}_applicable"] = True
+        raw[f"{dimension}_reason"] = "；".join(
+            f"产品{n}：{descriptions[n - 1]}" for n in range(1, count + 1)
+        )
+        for n, score in enumerate(scores, 1):
+            raw[f"answer{n}_{dimension}_score"] = score
+    result, client = await evaluate(raw, count=count, question=question, mode="json_schema", revision="0.2.5")
+    exported = history._visual_compare_export_rows([result])[0]
+    labels = {"service_closure": "服务闭环", "scenario_fulfillment": "场景化满足", "evidence_quality": "有理有据"}
+    assert result["bundle_revision"] == "0.2.5"
+    for dimension in dimensions:
+        assert result[f"{dimension}_reason"] == raw[f"{dimension}_reason"]
+        assert result[f"{dimension}_rank_groups"] == ranks
+        for n, score in enumerate(scores, 1):
+            assert result[f"answer{n}_{dimension}_score"] == score
+            assert exported[f"产品{n}{labels[dimension]}分"] == score
+    assert exported["产品1内容准确性分"] == ""
+    assert_compact_fields(result, count)
+    assert client.repair_calls == 0 and len(client.calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("count", [2, 3])
+@pytest.mark.parametrize("dimension,label", [("service_closure", "服务闭环"), ("evidence_quality", "有理有据")])
+@pytest.mark.parametrize("rule", ["可选未出现", "禁止且未出现"])
+async def test_r026_rule_based_na_preserves_scores_export_and_statistics(count, dimension, label, rule):
+    """Exercise mixed numeric/NA output through the real offline judge pipeline."""
+    from auto_eval.web import history, compare_statistics as stats
+
+    raw = example_1022_output(count)
+    raw[f"{dimension}_applicable"] = True
+    score = 5 if rule == "可选未出现" else 1
+    raw[f"{dimension}_reason"] = "产品1：第1帧提供了对应展示，按本任务明确的展示要求评价。；" + "；".join(
+        f"产品{n}：未评分（{rule}）：第1帧完整展示回答，没有出现本任务可选或禁止的内容，按规则留空。"
+        for n in range(2, count + 1)
+    )
+    raw[f"answer1_{dimension}_score"] = score
+    for n in range(2, count + 1):
+        raw[f"answer{n}_{dimension}_score"] = None
+    result, client = await evaluate(raw, count=count, mode="json_schema")
+    assert result["bundle_revision"] == "0.2.6"
+    assert result[f"{dimension}_reason"] == raw[f"{dimension}_reason"]
+    assert result[f"{dimension}_rank_groups"] == [["product1"]]
+    exported = history._visual_compare_export_rows([result])[0]
+    assert exported[f"产品1{label}分"] == score
+    protocol = resolve_compare_protocol(V1022_COMPARE_PROTOCOL_ID)
+    case = stats.Case(0, {}, result, "done", count, protocol.standard_version, protocol.bundle_revision)
+    for n in range(2, count + 1):
+        assert result[f"answer{n}_{dimension}_score"] is None
+        assert exported[f"产品{n}{label}分"] == "N/A"
+        assert stats.score_state(case, n, dimension, protocol) == ("有说明的未评分", None)
+    assert stats.score_state(case, 1, dimension, protocol) == ("有效评分", score)
+    assert exported["产品1内容准确性分"] == ""
+    assert_compact_fields(result, count)
+    assert len(client.calls) == 1 and client.repair_calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("count", [2, 3])
+@pytest.mark.parametrize("dimension", ["service_closure", "evidence_quality"])
+@pytest.mark.parametrize("error", ["missing_score", "score_with_na_reason"])
+async def test_rule_based_na_does_not_relax_required_fields_or_reason_consistency(count, dimension, error):
+    raw = example_1022_output(count)
+    raw[f"{dimension}_applicable"] = True
+    raw[f"{dimension}_reason"] = "；".join(
+        f"产品{n}：未评分（可选未出现）：本产品没有展示可选内容，按规则留空。"
+        for n in range(1, count + 1)
+    )
+    if error == "missing_score":
+        del raw[f"answer1_{dimension}_score"]
+    else:
+        raw[f"answer1_{dimension}_score"] = 5
+    with pytest.raises(JudgeOutputParseError):
+        await evaluate(raw, count=count)
 
