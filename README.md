@@ -7,7 +7,7 @@
 | 模式 | 说明 | 裁判 |
 | --- | --- | --- |
 | **垂域视觉评测**（`rich_content`） | 识别回答中的挂卡（天气/音乐等垂域卡片）与 Superlink，统计数量、判定适用性，标记需人工复核的条目 | 终端用户（`judge_2`） |
-| **垂域视觉对比评测**（`compare`） | 同一问题的两个或三个回答视频；任务级选择 V0.2 简化版或 V0.3 标准 | 终端用户（`judge_2`） |
+| **垂域视觉对比评测**（`compare`） | 同一问题的两个或三个回答视频；任务级选择 V0.2 简化版、1022 优化或 V0.3 标准 | 终端用户（`judge_2`） |
 
 裁判「终端用户」使用多模态模型，一次生成评审说明和结论 JSON，不联网、不调工具。仓库默认配置为采购渠道 `qwen3.8-flash`；页面可选择 `qwen3.5-397b-a17b` / `qwen3.8-flash` 的不同渠道，支持思考开关的渠道可独立设置原生思考。每个任务固定模型及思考设置，恢复和失败补跑沿用原配置。固定采样参数有助于控制波动，但不能保证跨模型或服务版本逐字复现。
 
@@ -65,7 +65,9 @@ python -m uvicorn auto_eval.web.server:app --host 0.0.0.0 --port 8054
 
 ![历史记录源文件下载](docs/images/history-source-download.png)
 
-垂域视觉对比提供两个可并存的评测协议：`qa_competitor_compare@0.2-simplified`（稳定默认，1–5 分）和 `qa_competitor_compare@0.3`（实验版，0–3 分）。协议不仅冻结 Prompt，还冻结输出 Schema、Gate 规则和分数范围。任务一旦创建就不能更换协议；失败补跑强制继承原任务协议。若要用另一标准重评同一数据，应新建任务，避免不同口径的结果写入同一任务。
+垂域视觉对比支持多套并存的评测协议，包括 V0.2 简化版、稳定 plus、评分校准、思考暴露优化、V0.3、问答闲聊 V1/V2 和时效性评估。本次新增 `qa_competitor_compare@0.2-simplified-1022`（V0.2简化版（1022优化），实验，1–5 分），默认仍为 `qa_competitor_compare@0.2-simplified`。协议不仅冻结 Prompt，还冻结输出 Schema、Gate 规则和分数范围。任务一旦创建就不能更换协议；失败补跑强制继承原任务协议。若要用另一标准重评同一数据，应新建任务，避免不同口径的结果写入同一任务。
+
+1022 版本的人工标注规则、七维分档及冲突取舍见 [测评标准](docs/compare-standard-1022.md)，接口合同、结构化输出配置和错误排查见 [实现说明](docs/compare-1022-implementation.md)。新版本严格区分合法 NA 与技术失败；不通过模型修复补造评分，也不静默清分。
 
 运行中仍可继续提交新的全量评测任务。后端按 FIFO 队列逐个启动任务，任意时刻只运行一个队列项；每个任务开始后，仍按它提交时设置的 `concurrency` 并发评测内部题目。页面顶部的“任务队列”会显示当前运行项、等待顺序和进度，尚未开始的任务可取消、上移或置顶（不会打断当前运行项）。`GET /api/queue` 可获取队列状态，`DELETE /api/queue/{job_id}` 可取消等待项，`PATCH /api/queue/{job_id}/position` 可调整等待位置。队列驻留在当前服务进程中，服务关闭时尚未开始的排队任务会标记为中断。
 
@@ -82,10 +84,12 @@ python -m uvicorn auto_eval.web.server:app --host 0.0.0.0 --port 8054
 
 问答闲聊新增 **V2·1-5分（候选）**，可在对比模式的评测标准中选择 `qa_chat_compare@1.1`。V1 和默认标准保留；V2 使用独立的 56/78 键输出合同，统计、导出与人工基准同步支持。[使用与版本说明](docs/qa-chat-compare-v2-implementation.md)。
 
+**V0.2简化版（1022优化）**使用 `qa_competitor_compare@0.2-simplified-1022`，当前修订 `0.2.6 / compare_1022_v2`。双产品和三产品使用独立 Prompt 与解析模型，完整输出分别为 36、47 个字段：全部输入状态最先，Gate 理由与对应判定相邻，每个维度按适用性→原因→评分排列，冲突理由与结论最后。任一 Gate 未通过或无法确认时，该产品六维均为 NA；准确性不再送模型评估，Excel 保留原列并填空。当前 Prompt 仅使用各产品的 `contextN`，不注入评测运行时间或共享 `context`。导入 compare 数据时，每个参评产品的背景都须为非空字符串；仅当 `context1` 字段不存在时兼容读取 `context` 为产品1背景，显式空值不回退。旧修订 `0.2.1`、`0.2.2`、`0.2.3`、`0.2.4`、`0.2.5` 仍按各自冻结规则恢复；所有版本的请求均不注入公共背景。[测评标准](docs/compare-standard-1022.md)及[输出与实现说明](docs/compare-1022-implementation.md)。
+
 **时效性评估V1·1-3分（候选）**使用 `timeliness_compare@1.0`，当前修订 `1.0.2 / timeliness-result-3`。在原有两个Gate和三个评分维度之外，同次调用输出整组“内容冲突理由”和“有冲突／无冲突／不确定”；检测规则沿用v0.2稳定plus，冲突不自动改变分数。页面、历史、CSV/XLSX及统计同步展示，旧修订仍按原合同读取和续跑；使用新规则重评旧数据需新建任务。见[时效性评估完整标准](docs/timeliness-standard-v1.0.md)和[完整Prompt](docs/timeliness-evaluation-prompt-final.md)。
 
 - **垂域视觉评测**：`query`（必填）、`video_path`（必填）、可选 `id` / `category`（垂域）/ `answer_text` / `task_start_time`+`task_end_time`（截取作答区间）。共享约束直接写入 `query`。
-- **垂域视觉对比评测**：`query`、`video1`+`video2`（必填）、`answer1`+`answer2`，各产品背景分别使用 `context1` / `context2`，三产品时使用对应的 `context3`。所有测评版本及多轮请求均不传公共 `context`；旧数据中的该字段兼容接收，但不参与模型请求或输入指纹。真实用户历史及产品专属背景仍保留。
+- **垂域视觉对比评测**：`query`、各产品非空 `contextN`，以及完整的 `screenshot1/2` 或 `video1/2`（必填）；`answer1/2` 可选。三产品另需 `context3` 和同类型的第三产品视觉材料。只有 `context1` 字段不存在时，兼容读取 `context` 为产品1背景；它不会成为产品间共享背景。所有测评版本及多轮请求均不传公共 `context`，真实用户历史及产品专属背景仍保留。
 
 ### 裁判明细日志（可选）
 

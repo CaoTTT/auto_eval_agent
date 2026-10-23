@@ -195,7 +195,8 @@ def api(monkeypatch):
 async def test_all_creation_paths_save_effective_runtime(api, mode, upsert):
     item = {"id": "one", "query": "test"}
     if mode == "compare":
-        item.update(answer1="A", answer2="B", video1="a.mp4", video2="b.mp4")
+        item.update(answer1="A", answer2="B", video1="a.mp4", video2="b.mp4",
+                    context1="产品1背景", context2="产品2背景")
     options = {"judge_model_profile": "qwen3.8-flash", "enable_thinking": False}
     if upsert:
         response = await server.api_eval_items(server.EvalItemsReq(task_id="created", mode=mode, items=[item], options=options))

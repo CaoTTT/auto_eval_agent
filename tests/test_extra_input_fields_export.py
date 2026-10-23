@@ -35,7 +35,7 @@ def _parse(objects, mode, document_format="jsonl"):
 
 
 def _source(case_index, mode, **extra):
-    media = {"video1": "a.mp4", "video2": "b.mp4"} if mode == "compare" else {"video_path": "a.mp4"}
+    media = {"video1": "a.mp4", "video2": "b.mp4", "context1": "产品1背景", "context2": "产品2背景"} if mode == "compare" else {"video_path": "a.mp4"}
     return {"id": f"case-{case_index}", "query": f"问题{case_index}", **media, **extra}
 
 

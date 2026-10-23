@@ -1,4 +1,4 @@
-import { createApp, ref, computed, onMounted, onUnmounted, nextTick, selectEvidenceMode } from "./compare-data.js?v=20261016_source_files";
+import { createApp, ref, computed, onMounted, onUnmounted, nextTick, selectEvidenceMode, productContextValue, missingProductContexts } from "./compare-data.js?v=20261022_product_contexts";
 
 createApp({
   setup() {
@@ -64,6 +64,15 @@ createApp({
     const taskProtocolDiagnostics = ref([]);
     const taskIsChat = computed(() => (taskEvaluationProfile.value || '').startsWith('qa_chat_compare@'));
     const taskIsTimeliness = computed(() => (taskEvaluationProfile.value || '').startsWith('timeliness_compare@'));
+    function compact1022(row = {}) {
+      if (row.output_contract) return row.output_contract === 'compare_1022_v2';
+      const profile = row.evaluation_profile || (row.standard_id && row.standard_version
+        ? `${row.standard_id}@${row.standard_version}` : taskEvaluationProfile.value);
+      if (profile !== 'qa_competitor_compare@0.2-simplified-1022') return false;
+      if (row.bundle_revision) return ['0.2.2','0.2.3','0.2.4','0.2.5','0.2.6'].includes(row.bundle_revision);
+      const manifest = taskProtocolManifest.value;
+      return manifest.output_contract ? manifest.output_contract === 'compare_1022_v2' : ['0.2.2','0.2.3','0.2.4','0.2.5','0.2.6'].includes(manifest.bundle_revision);
+    }
     function isTimelinessRow(row = {}) {
       if (row.standard_id) return row.standard_id === 'timeliness_compare';
       if (row.evaluation_profile) return row.evaluation_profile.startsWith('timeliness_compare@');
@@ -204,6 +213,9 @@ createApp({
     const taskDimensions = computed(() => {
       const frozen = taskProtocolManifest.value.dimensions;
       const registered = evaluationProfiles.value.find(p => p.id === taskEvaluationProfile.value)?.dimensions;
+      if (compact1022()) return (frozen?.length ? frozen : legacyScoreDimensions.filter(d => !d.gate)).filter(d => d.key !== 'accuracy');
+      if (taskEvaluationProfile.value === 'qa_competitor_compare@0.2-simplified-1022'
+          && taskProtocolManifest.value.bundle_revision === '0.2.1') return frozen?.length ? frozen : legacyScoreDimensions.filter(d => !d.gate);
       return frozen?.length ? frozen : registered?.length ? registered : taskIsTimeliness.value ? timelinessDimensions : taskIsChat.value ? chatDimensions : legacyScoreDimensions.filter(d => !d.gate);
     });
     const scoreDimensions = computed(() => [...legacyScoreDimensions.filter(d => d.gate), ...taskDimensions.value]);
@@ -262,6 +274,15 @@ createApp({
       ? scoreRules.value.map((rule, i) => scoreRuleError(rule) ? `条件 ${i + 1}：${scoreRuleError(rule)}` : '').filter(Boolean).join('；') : '');
     function scoreValue(row, dimension, product) {
       if (taskProtocolDiagnostics.value.length) return null;
+      if (compact1022(row)) {
+        const value = row[`answer${product}_${dimension}_score`];
+        const count = Number(row.product_count || items.value[row.index]?.product_count || 2);
+        return !row.error && product >= 1 && product <= count && dimension !== 'accuracy'
+          && row[`${dimension}_applicable`] === true
+          && ['complete','partial'].includes(row[`answer${product}_input_status`])
+          && row[`answer${product}_response_gate`] === 'pass' && row[`answer${product}_safety_gate`] === 'pass'
+          && Number.isInteger(value) && value >= 1 && value <= 5 ? value : null;
+      }
       if (isTimelinessRow(row)) {
         const prefix = `answer${product}_${dimension}`, value = row[`${prefix}_score`];
         const verification = row[`${prefix}_verification_status`];
@@ -567,7 +588,7 @@ createApp({
     const formatHint = computed(
       () =>
         ({
-          compare: "支持文字题与图文题混合导入：query_images 可选填一张提问图片路径；product_count 为2或3。每题优先使用全产品长截图，否则回退全产品录屏；无法统一证据的题目在导入时拒绝。",
+          compare: "每个产品的 contextN 背景必填；缺少 context1 字段时兼容读取 context 作为产品1背景。支持文字题与图文题混合导入：query_images 可选填一张提问图片路径；product_count 为2或3。每题优先使用全产品长截图，否则回退全产品录屏；无法统一证据的题目在导入时拒绝。",
           rich_content: "可逐题上传，也可导入 JSON / JSONL / CSV：query、context(可选)、video_path、category/answer_text/task_start_time/task_end_time(均可选)；sessionid 等额外字段会保留到 Excel 导出。普通图片不算挂卡，回答区域蓝色文字按 Superlink 统计。",
         }[mode.value])
     );
@@ -863,8 +884,8 @@ createApp({
           ...taskDimensions.value.map(d => ({key:`${d.key}_summary`, label:d.key === 'accuracy' ? '内容准确（暂不汇总）' : d.label})),
           ...((taskIsTimeliness.value ? timelinessHasConflict() : !chatUsesSharedReasons())
             ? [{ key: "has_conflict", label: "内容冲突" }] : []),
-          { key: "needs_human_review", label: "需人工复核" },
-          ...(chatUsesSharedReasons() ? [] : [{ key: "rationale", label: "理由" }]),
+          ...(compact1022() ? [] : [{ key: "needs_human_review", label: "需人工复核" }]),
+          ...(compact1022() || chatUsesSharedReasons() ? [] : [{ key: "rationale", label: "理由" }]),
           { key: "latency_s", label: "总耗时" },
         ];
       // rich_content（默认）
@@ -1083,7 +1104,7 @@ createApp({
           evidenceMode:item.evidence_mode || (item.screenshot1 ? 'long_screenshot' : 'video_frames'),
           ...Object.fromEntries([1,2,3].flatMap(n => [
             [`video${n}Path`,item[`video${n}`] || ''], [`screenshot${n}Path`,item[`screenshot${n}`] || ''],
-            [`answer${n}`,item[`answer${n}`] || ''], [`context${n}`,item[`context${n}`] || ''],
+            [`answer${n}`,item[`answer${n}`] || ''], [`context${n}`,productContextValue(item, n)],
             [`screenshotMeta${n}`,item[`screenshot_meta${n}`] || {}],
             [`videoSource${n}`,item[`video_source${n}`] || {}],
           ])), taskStartTime:item.task_start_time ?? null, taskEndTime:item.task_end_time ?? null,
@@ -1202,10 +1223,11 @@ createApp({
         if (!parseResponse.ok) throw new Error(parsed.detail || (isCsv ? "CSV 解析请求失败" : "JSON / JSONL 解析请求失败"));
         const importErrors = [...(parsed.errors || [])];
         const report = {filename: file.name || '', accepted: (parsed.items || []).length,
+          blocked: importMode === 'compare' && (parsed.blocked === true || importErrors.some(error => String(error).includes('compare_context_missing'))),
           rejected: parsed.rejected_count ?? importErrors.length,
           screenshots: parsed.evidence_counts?.long_screenshot ?? (parsed.items || []).filter(it => it.evidence_mode === 'long_screenshot').length,
           videos: parsed.evidence_counts?.video_frames ?? (parsed.items || []).filter(it => it.evidence_mode === 'video_frames').length};
-        if (!(parsed.items || []).length) {
+        if (report.blocked || !(parsed.items || []).length) {
           importReport.value = report;
           errors.value = importErrors.length ? importErrors : ["文件中没有可导入的数据"];
           console.warn("[onOpManifestFile] no items parsed");
@@ -1285,11 +1307,12 @@ createApp({
     function opItemReady(it) {
       if (!it.query.trim()) return false;
       if (mode.value !== "compare") return Boolean((it.frames || []).length || it.videoPath);
-      return Boolean(selectEvidenceMode(it));
+      return Boolean(selectEvidenceMode(it)) && missingProductContexts(it).length === 0;
     }
 
     const canSubmit = computed(() =>
       !opPreparing.value && !opItems.value.some(it => it.queryUploading)
+      && !(mode.value === 'compare' && importReport.value?.blocked)
       && (mode.value === 'compare' ? opItems.value.length > 0 && opItems.value.every(opItemReady) : opItems.value.some(opItemReady))
     );
 
@@ -1298,13 +1321,21 @@ createApp({
       cancelHistoryLoad();
       const submitViewVersion = historyLoadVersion;
       runError.value = "";
+      if (mode.value === 'compare' && importReport.value?.blocked) {
+        runError.value = '导入文件存在缺失或无效的产品背景，请补齐后重新导入，或重新选择历史数据；当前不能开始评估。';
+        return;
+      }
       if (judgeModelProfiles.value.length && !selectedModelProfile.value) {
         runError.value = "请选择可用的裁判模型。";
         return;
       }
       const valid = mode.value === 'compare' ? opItems.value : opItems.value.filter(opItemReady);
       if (mode.value === 'compare' && valid.some(item => !opItemReady(item))) {
-        runError.value = '存在未填写问题或缺少产品证据的 Case，请展开检查；不会跳过这些条目提交。';
+        const missing = valid.flatMap((item, index) => {
+          const fields = missingProductContexts(item);
+          return fields.length ? [`第${index+1}条（Case ${item.id || index+1}）：${fields.join('、')} 必须填写非空背景`] : [];
+        });
+        runError.value = (missing.length ? missing.slice(0,8).join('；') : '存在未填写问题或缺少产品证据的 Case') + '，请展开检查；不会跳过这些条目提交。';
         return;
       }
       if (!valid.length) {
@@ -1316,7 +1347,6 @@ createApp({
         const item = {
           id: it.id || `${prefix}${idx + 1}`,
           query: it.query.trim(),
-          context: (it.context || "").trim(),
         };
         if (mode.value === "compare") {
           item.query_images = [...(it.queryImages || [])];
@@ -1337,6 +1367,7 @@ createApp({
           }
           item.category = (it.category || "").trim() || "default";
         } else {
+          item.context = (it.context || "").trim();
           item.video_path = it.videoPath;
           item.category = (it.category || "").trim() || "default";
           item.answer_text = (it.answer || "").trim();
@@ -1850,6 +1881,35 @@ createApp({
       }
       if (c.key.endsWith("_summary") && !["input_status_summary", "response_gate_summary", "safety_gate_summary"].includes(c.key)) {
         const dimension = c.key.slice(0, -"_summary".length);
+        if (compact1022(r)) {
+          return Array.from({length:Number(r.product_count || items.value[r.index]?.product_count || 2)}, (_, i) => {
+            const product = i + 1, score = scoreValue(r, dimension, product);
+            let status = 'N/A';
+            if (r.error) status = '评估失败';
+            else if (taskProtocolDiagnostics.value.length) status = '协议待恢复';
+            else if (r[`answer${product}_input_status`] === 'failed') status = '输入失败';
+            else if (r[`answer${product}_response_gate`] === 'fail') status = '响应Gate阻断';
+            else if (r[`answer${product}_safety_gate`] === 'fail') status = '安全Gate阻断';
+            else if (!['complete','partial'].includes(r[`answer${product}_input_status`])) status = '输入状态缺失';
+            else if (!['pass','fail','unclear'].includes(r[`answer${product}_response_gate`])
+                || !['pass','fail','unclear'].includes(r[`answer${product}_safety_gate`])) status = 'Gate状态缺失';
+            else if (r[`answer${product}_response_gate`] !== 'pass') status = '响应Gate阻断';
+            else if (r[`answer${product}_safety_gate`] !== 'pass') status = '安全Gate阻断';
+            else if (r[`${dimension}_applicable`] === false) status = '不适用';
+            else if (r[`${dimension}_applicable`] !== true) status = '适用性状态缺失';
+            else if (score !== null) status = `${score}分`;
+            else {
+              const segment = String(r[`${dimension}_reason`] || '').match(new RegExp(`(?:^|[；;]\\s*)产品${product}[:：](.*?)(?=[；;]\\s*产品[123][:：]|$)`, 's'));
+              const reason = segment?.[1].trim().replace(/[；;]+$/, '').trim() || '';
+              const justified = /^未评分（([^（）]+)）：(.+)$/s.exec(reason);
+              const validReason = justified && justified.slice(1).every(text => /[\p{L}\p{N}_]/u.test(text));
+              status = r[`answer${product}_${dimension}_score`] == null
+                ? validReason ? reason.startsWith('未评分（证据不足）：') ? '证据不足' : '有说明的未评分' : '应评分但缺失'
+                : '分数格式或范围异常';
+            }
+            return `P${product}:${status}`;
+          }).join('；');
+        }
         if (isTimelinessRow(r) || taskIsChat.value || r.standard_id === 'qa_chat_compare') {
           return Array.from({length:Number(r.product_count || items.value[r.index]?.product_count || 2)}, (_,i) => {
             const score = scoreValue(r,dimension,i+1);
@@ -2192,6 +2252,8 @@ createApp({
           return;
         }
         loaded = true;
+        importReport.value = null;
+        errors.value = [];
         closeActiveStream();
         taskId.value = d.task_id || id;
         setTaskProtocol(d);
@@ -2392,7 +2454,7 @@ createApp({
       reasonOnlyColumn, cellReasons, reasonsExpanded, toggleCellReasons, allReasonsExpanded, setAllReasonsExpanded,
       datasetSourceFileId, datasetSourceTaskId, datasetRevision, useComparisonDataset,
       evaluationProfiles, compareProfiles, selectedEvaluationProfile, evaluationProfileLabel,
-      taskEvaluationProfile, taskProtocolManifest, taskProtocolDiagnostics, taskIsChat, taskIsTimeliness, summaryDimensions, setTaskProtocol,
+      taskEvaluationProfile, taskProtocolManifest, taskProtocolDiagnostics, taskIsChat, taskIsTimeliness, compact1022, summaryDimensions, setTaskProtocol,
       isTimelinessRow, timelinessColumn, timelinessProductScores, timelinessSummaryRows, timelinessPairedRows, summaryPercent,
       timelinessHasConflict, timelinessConflictColumn, timelinessConflictSummary,
       judgeModelProfiles, selectedJudgeModelProfile, selectedModelProfile, enableThinking, changeJudgeModel,

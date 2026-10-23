@@ -19,6 +19,7 @@ from ..timing import StageTimings, collect_timings, timing_span
 from ..task_control import PauseRequested, bind_pause_check, check_pause, pause_aware, wait_for_active
 from .scheduler import MAX_CONCURRENCY, MODEL_LIMITER, PIPELINE_LIMITER, PREP_LIMITER, get_settings
 from ..config import AppConfig, JudgeConfig, VisualModeProfile
+from ..compare_input import normalize_product_contexts
 from ..query_images import prepare_query_images, QueryImageError, PREPARED_FIELDS
 from ..judges import (
     JudgeClient,
@@ -516,6 +517,13 @@ def _make_item_evaluator(
                 res = None
                 request_evidence = None
                 conversation_input = None
+                if (compare_protocol is not None
+                        and compare_protocol.output_contract == "compare_1022_v2"
+                        and compare_protocol.bundle_revision in {"0.2.4", "0.2.5", "0.2.6"}):
+                    try:
+                        item_dict.update(normalize_product_contexts(item_dict, _compare_product_count(item_dict)))
+                    except ValueError as exc:
+                        last_error = exc
                 item_dict.pop("screenshot_evidence", None)
                 task.items[idx].pop("screenshot_evidence", None)
                 def save_evidence(record):
@@ -526,7 +534,7 @@ def _make_item_evaluator(
                         item_dict["screenshot_evidence"] = request_evidence
                         task.items[idx]["screenshot_evidence"] = request_evidence
                         _persist_task(task)
-                if conversation_preparer is not None and _runtime_conversation(item_dict):
+                if last_error is None and conversation_preparer is not None and _runtime_conversation(item_dict):
                     try:
                         conversation_input = await run_preparation(conversation_preparer.prepare, item_dict,
                             timeout=float(runtime_options.get("video_prepare_timeout_s") or 300))
@@ -551,7 +559,7 @@ def _make_item_evaluator(
                     if task.mode == "compare"
                     else not item_dict.get("frames")
                 )
-                if needs_visual_prepare and not (_runtime_conversation(item_dict) if task.mode == "compare" else item_dict.get("session_id")):
+                if last_error is None and needs_visual_prepare and not (_runtime_conversation(item_dict) if task.mode == "compare" else item_dict.get("session_id")):
                     try:
                         log_event(
                             "视觉证据准备" if is_screenshot else "视频准备",
@@ -711,6 +719,13 @@ def _make_item_evaluator(
                             res.update({key: getattr(compare_protocol, key) for key in
                                         ("standard_id", "standard_version", "bundle_revision", "result_schema_version")})
                             res["evaluation_profile"] = compare_protocol.id
+                    output_category = getattr(last_error, "error_category", None)
+                    if output_category:
+                        res.update(
+                            error_type=f"judge_output_{output_category}",
+                            error_category=output_category,
+                            finish_reason=getattr(last_error, "finish_reason", None),
+                        )
                     if isinstance(last_error, (ContextBudgetExceeded, QueryImageError)):
                         res.update(
                             error_type=last_error.code, needs_human_review=True,
@@ -1383,8 +1398,11 @@ def _write_eval_error(
         raw_output = getattr(error, "raw_output", None)
         repair_output = getattr(error, "repair_output", None)
         if raw_output is not None or repair_output is not None:
+            category = getattr(error, "error_category", None)
             record.update({
-                "stage": "judge_json_parse",
+                "stage": f"judge_output_{category}" if category else "judge_json_parse",
+                "error_category": category,
+                "finish_reason": getattr(error, "finish_reason", None),
                 "judge": getattr(error, "judge", None),
                 "model": getattr(error, "model", None),
                 "original_model_output": raw_output,
@@ -1414,6 +1432,12 @@ async def _eval_one(
     evaluation_time: datetime | None = None,
 ) -> dict:
     t0 = time.perf_counter()
+    if mode == "compare" and compare_judges:
+        protocol = getattr(compare_judges[0], "protocol", None)
+        if (getattr(protocol, "output_contract", None) == "compare_1022_v2"
+                and getattr(protocol, "bundle_revision", None) in {"0.2.4", "0.2.5", "0.2.6"}):
+            item_dict = {**item_dict, **normalize_product_contexts(item_dict, _compare_product_count(item_dict))}
+            item_dict.pop("context", None)
     item = _to_evalitem(item_dict, idx)
     out: dict = {"query": item.question}
     if item.context:
@@ -1524,7 +1548,8 @@ async def _eval_one(
                    {f"产品{product_no}{result_protocol.dimension_names[dimension]}分": compare_result.get(f"answer{product_no}_{dimension}_score")
                     for product_no in range(1, product_count + 1)
                     for dimension in result_protocol.score_dimensions}),
-                "需要复核": compare_result.get("needs_human_review"),
+                **({"需要复核": compare_result.get("needs_human_review")}
+                   if result_protocol.output_contract != "compare_1022_v2" else {}),
                 **({"内容冲突": compare_result.get("has_conflict")}
                    if result_protocol.result_schema_version not in {"qa-chat-result-2", "timeliness-result-1", "timeliness-result-2"} else {}),
             },
@@ -1586,6 +1611,10 @@ def _summarize(task: Task, *, include_subsets: bool = True) -> dict:
             bool(row.get("needs_human_review")) for row in valid
         ) + sum(bool(row.get("needs_human_review")) for row in res if row.get("error")),
     }
+    if (task.protocol_manifest.get("output_contract") == "compare_1022_v2"
+            or any(row.get("output_contract") == "compare_1022_v2" for row in ok)):
+        # This contract does not collect a review verdict; zero would imply a judgment.
+        summary.pop("needs_human_review_count", None)
     max_product_count = max(
         (int(row.get("product_count") or 2) for row in valid),
         default=2,

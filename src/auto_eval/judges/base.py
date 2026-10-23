@@ -18,7 +18,10 @@ import time
 from typing import Any, Callable
 
 from ..config import JudgeConfig
-from ..llm_stream import build_openai_client, stream_chat_completion
+from ..llm_stream import (
+    AggregatedChoice, AggregatedMessage, AggregatedResponse, ProviderStreamError,
+    build_openai_client, stream_chat_completion,
+)
 from ..observability import bind_chain_context, current_context, log_event
 from ..paths import resolve_project_path
 from .prompts import persona_text
@@ -47,6 +50,10 @@ _TRACE_FIELDS = {
     "messages",
     "error",
     "error_type",
+    "error_category",
+    "finish_reason",
+    "response_format",
+    "require_complete",
     "round",
 }
 
@@ -102,7 +109,7 @@ def flush_web_trace_records(
 
 
 class JudgeOutputParseError(ValueError):
-    """裁判调用成功，但最终结构化输出在定向修复后仍无法解析。"""
+    """裁判输出无法用于评测；保留原始响应和分类供诊断。"""
 
     def __init__(
         self,
@@ -112,12 +119,30 @@ class JudgeOutputParseError(ValueError):
         repair_output: str,
         judge: str,
         model: str,
+        error_category: str | None = None,
+        finish_reason: str | None = None,
     ):
         super().__init__(message)
         self.raw_output = raw_output
         self.repair_output = repair_output
         self.judge = judge
         self.model = model
+        self.error_category = error_category
+        self.finish_reason = finish_reason
+
+
+class JudgeOutputTruncatedError(JudgeOutputParseError):
+    """输出达到生成上限；不可交给 JSON 修复器补造未生成的判定。"""
+
+
+def _is_empty_length_error(exc: BaseException) -> bool:
+    if not isinstance(exc, ProviderStreamError) or not isinstance(exc.body, dict):
+        return False
+    return (
+        str(exc.body.get("finish_reason") or "").strip().lower() == "length"
+        and exc.body.get("content") == ""
+    )
+
 
 def _usage_dict(usage) -> dict | None:
     if usage is None:
@@ -303,7 +328,10 @@ class JudgeClient:
                        user_images: list[str] | None = None,
                        user_image_refs: list[str] | None = None,
                        content_parts: list[dict] | None = None,
-                       image_metadata: list[dict] | None = None) -> str:
+                       image_metadata: list[dict] | None = None,
+                       *,
+                       response_format: dict | None = None,
+                       require_complete: bool = False) -> str:
         """单轮生成裁判输出（多模态：传入关键帧 data_url 时 user content 为 [text, image_url...]）。"""
         user_content: Any = user
         if content_parts is not None and user_images:
@@ -319,10 +347,13 @@ class JudgeClient:
             {"role": "user", "content": user_content},
         ]
         judge_label = f"{self.cfg.display or self.cfg.name}({self.cfg.name})"
+        truncation_cause = None
         with bind_chain_context(
             module="模型裁判", judge=judge_label, round=1
         ):
             kwargs = {"model": self.model, "messages": messages, **self._sampling_kwargs()}
+            if response_format is not None:
+                kwargs["response_format"] = response_format
             has_images = isinstance(user_content, list) and any(
                 part.get("type") == "image_url" for part in user_content
             )
@@ -332,17 +363,50 @@ class JudgeClient:
                 }
                 kwargs["extra_body"].pop("max_pixels", None)
             kwargs = self._request_kwargs(kwargs)
-            resp = await self._llm_create(kwargs, stream_callback=stream_callback)
+            call_options = {"stream_callback": stream_callback}
+            if require_complete:
+                call_options["defer_empty_length_trace"] = True
+            try:
+                resp = await self._llm_create(kwargs, **call_options)
+            except ProviderStreamError as exc:
+                if not require_complete or not _is_empty_length_error(exc):
+                    raise
+                # The stream layer stops retrying this terminal error. Keep its
+                # response local and reuse the non-empty truncation audit path.
+                truncation_cause = exc
+                resp = AggregatedResponse(
+                    model=self.model,
+                    usage=getattr(exc, "_auto_eval_usage", None),
+                    stream_stats=getattr(exc, "_auto_eval_stream_stats", None),
+                    choices=[AggregatedChoice(
+                        index=0,
+                        finish_reason=exc.body["finish_reason"],
+                        message=AggregatedMessage(content=""),
+                    )],
+                )
         msg = resp.choices[0].message
         content = msg.content or ""
+        finish_reason = getattr(resp.choices[0], "finish_reason", None)
+        truncated = require_complete and str(finish_reason or "").strip().lower() == "length"
+        output_error = None
+        if truncated:
+            output_error = JudgeOutputTruncatedError(
+                "裁判输出被截断：finish_reason=length；保留原文，不进行 JSON 修复或补评分",
+                raw_output=content,
+                repair_output="",
+                judge=self.cfg.name,
+                model=self.model,
+                error_category="truncated",
+                finish_reason=finish_reason,
+            )
         usage = _usage_dict(getattr(resp, "usage", None))
         if usage and usage.get("image_tokens") is not None:
             log_event("模型裁判", "视觉Token用量", details={"image_tokens": usage["image_tokens"]})
 
         if self.trace_path:
-            self._write_trace({
+            trace_detail = {
                 "ts": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
-                "status": "success",
+                "status": "error" if output_error else "success",
                 "judge": self.cfg.name,
                 "model": self.model,
                 "inference_parameters": _inference_parameters(kwargs),
@@ -353,7 +417,7 @@ class JudgeClient:
                     "round": 1,
                     "content": content,
                     "tool_calls": [],
-                    "finish_reason": getattr(resp.choices[0], "finish_reason", None),
+                    "finish_reason": finish_reason,
                     "usage": _usage_dict(getattr(resp, "usage", None)),
                     "stream_stats": getattr(resp, "stream_stats", None),
                     "response_model": getattr(resp, "model", None),
@@ -363,7 +427,22 @@ class JudgeClient:
                 "image_refs": user_image_refs,
                 "image_metadata": image_metadata,
                 "messages": _redact_image_urls(messages, user_image_refs),
-            })
+            }
+            if response_format is not None:
+                trace_detail["response_format"] = response_format
+            if require_complete:
+                trace_detail["require_complete"] = True
+            if output_error:
+                trace_detail.update({
+                    "error_type": type(output_error).__name__,
+                    "error_category": output_error.error_category,
+                    "error": str(output_error),
+                    "finish_reason": finish_reason,
+                })
+            self._write_trace(trace_detail)
+
+        if output_error:
+            raise output_error from truncation_cause
 
         return content
 
@@ -414,12 +493,17 @@ class JudgeClient:
         extras = {**(defaults.get("extra_body") or {}), **(kwargs.get("extra_body") or {})}
         if self.cfg.enable_thinking is not None:
             extras["enable_thinking"] = self.cfg.enable_thinking
+        if extras.get("vl_high_resolution_images"):
+            # Finalize mutually exclusive image options after merging defaults;
+            # repeated request normalization must not restore max_pixels.
+            extras.pop("max_pixels", None)
         if extras:
             request["extra_body"] = extras
         return request
 
     async def _llm_create(self, kwargs: dict, max_attempts: int | None = None,
-                          stream_callback: Callable[[str], None] | None = None):
+                          stream_callback: Callable[[str], None] | None = None,
+                          defer_empty_length_trace: bool = False):
         """始终使用流式接口；callback 只负责可选的前端分片通知。"""
         # Use one request boundary for both judging and JSON repair. Preserve
         # visual/provider extras and send False explicitly (None means omitted).
@@ -431,7 +515,7 @@ class JudgeClient:
                 max_attempts=max_attempts,
             )
         except Exception as exc:
-            if self.trace_path:
+            if self.trace_path and not (defer_empty_length_trace and _is_empty_length_error(exc)):
                 self._write_trace({
                     "ts": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
                     "status": "error",

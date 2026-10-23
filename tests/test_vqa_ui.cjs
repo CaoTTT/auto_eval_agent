@@ -11,7 +11,7 @@ async function main() {
     {id:'image-video', query:'image', query_images:['q.png'], video1:'a.mp4', video2:'b.mp4'},
     {id:'text-shot', query:'text', screenshot1:'a.png', screenshot2:'b.png'},
     {id:'image-shot', query:'image', query_images:['q.png'], screenshot1:'a.png', screenshot2:'b.png'},
-  ];
+  ].map(item=>({...item,context1:'产品1背景',context2:'产品2背景'}));
   const sandbox = {
     ref: value => ({value}), computed: getter => ({get value() {return getter();}}),
     onMounted() {}, onUnmounted() {}, nextTick: async () => {},

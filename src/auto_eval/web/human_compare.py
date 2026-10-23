@@ -200,6 +200,8 @@ def _policy(snapshot: dict, row: dict, recovered_identity: dict | None = None):
 
 def align_baseline_to_run(baseline: dict, snapshot: dict, mapping: TaskMapping, scope: list[str], dimensions: list[str], mode: str) -> list[dict]:
     human_policy = baseline_protocol(baseline)
+    if human_policy.id == "qa_competitor_compare@0.2-simplified-1022" and not baseline.get("human_bundle_revision"):
+        raise HumanError("1022人工基准缺少冻结修订号，不能用当前标准补写历史")
     products = {p["product_id"] for p in baseline["products"]}
     if not mapping.product_map or len(set(mapping.product_map.values())) != len(mapping.product_map):
         raise HumanError("请提供一对一产品映射")
@@ -227,7 +229,8 @@ def align_baseline_to_run(baseline: dict, snapshot: dict, mapping: TaskMapping, 
         result_runtime_summary = (judge_runtime_summary({}, result)
                                   if result.get("judge_runtime") or result.get("judge_model") else runtime_summary)
         policy = _policy(snapshot,result,recovered_identity)
-        shared_reasons = bool(policy and policy.result_schema_version in ("qa-chat-result-2", "timeliness-result-1", "timeliness-result-2", "timeliness-result-3"))
+        compact = bool(policy and policy.output_contract == "compare_1022_v2")
+        shared_reasons = compact or bool(policy and policy.result_schema_version in ("qa-chat-result-2", "timeliness-result-1", "timeliness-result-2", "timeliness-result-3"))
         same_family = bool(policy and policy.standard_id == human_policy.standard_id)
         compatible = bool(policy and same_family and [policy.score_min,policy.score_max]==baseline["score_range"] and (
             policy.standard_version==baseline["human_standard_version"] or mode=="regression"))
@@ -235,6 +238,10 @@ def align_baseline_to_run(baseline: dict, snapshot: dict, mapping: TaskMapping, 
             raise HumanError("人工与模型标准家族不同，回归模式也不能跨家族生成数字一致性")
         if policy and human_policy.standard_id in ("qa_chat_compare", "timeliness_compare") and (policy.id, policy.bundle_revision) != (human_policy.id, human_policy.bundle_revision):
             raise HumanError("此评测必须使用相同完整标准与冻结修订号")
+        if (policy and "compare_1022_v2" in (policy.output_contract, human_policy.output_contract)
+                and (policy.id, policy.bundle_revision) != (human_policy.id, human_policy.bundle_revision)
+                and mode != "regression"):
+            raise HumanError("1022精简版的完整标准或冻结修订号不同，请显式选择相对人工基准的回归比较")
         if policy and [policy.score_min,policy.score_max] != baseline["score_range"]:
             raise HumanError("人工与模型分制不兼容，不能进行线性换分或生成数字一致性报告")
         if policy and policy.standard_version != baseline["human_standard_version"] and mode != "regression":
@@ -287,10 +294,11 @@ def align_baseline_to_run(baseline: dict, snapshot: dict, mapping: TaskMapping, 
                            human_reason=label.get("reason",""), model_score=model, model_status=model_status,
                            model_reason=(result.get(f"{dim}_reason") or "") if shared_reasons else
                                         (result.get(f"answer{slot}_{dim}_reason") or "") if policy and policy.standard_id == "qa_chat_compare" else result.get(f"{dim}_rationale") or result.get(f"{dim}_reason") or "",
-                           model_evidence=result.get(f"{dim}_evidence", []) if shared_reasons else result.get(f"answer{slot}_{dim}_evidence", []),
+                           model_evidence=[] if compact else result.get(f"{dim}_evidence", []) if shared_reasons else result.get(f"answer{slot}_{dim}_evidence", []),
                            model_reason_scope="dimension_shared" if shared_reasons else "product" if policy and policy.standard_id == "qa_chat_compare" else "dimension_shared",
                            model_evidence_scope="dimension_shared" if shared_reasons else "product",
                            model_result_schema_version=policy.result_schema_version if policy else result.get("result_schema_version"),
+                           model_output_contract=policy.output_contract if policy else result.get("output_contract"),
                            model_verification_status=result.get(f"answer{slot}_{dim}_verification_status"),
                            model_na_reason=result.get(f"answer{slot}_{dim}_na_reason"),
                            human_verification_status=label.get("verification_status"),

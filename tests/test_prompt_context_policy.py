@@ -7,7 +7,8 @@ import pytest
 from PIL import Image
 
 from auto_eval.config import JudgeConfig, VisualExtractionConfig, VisualModeProfile
-from auto_eval.judges.compare_protocols import DIMENSIONS, list_compare_protocols
+from auto_eval.judges.compare_1022_contract import example_1022_output
+from auto_eval.judges.compare_protocols import DIMENSIONS, V1022_COMPARE_PROTOCOL_ID, list_compare_protocols
 from auto_eval.judges.conversation_prompt import assemble_conversation
 from auto_eval.judges.rich_content_judge import RichContentJudge
 from auto_eval.judges.visual_compare_judge import VisualCompareJudge
@@ -26,6 +27,8 @@ EVALUATION_TIME = datetime(2026, 10, 22, tzinfo=timezone.utc)
 
 
 def response_data(protocol, count):
+    if protocol.id == V1022_COMPARE_PROTOCOL_ID:
+        return example_1022_output(count)
     if protocol.standard_id == "timeliness_compare":
         return timeliness_payload(count)
     if protocol.result_schema_version == "qa-chat-result-2":

@@ -15,7 +15,8 @@ async def test_timeliness_source_download_restores_compact_scores_and_frozen_pro
     snapshot, rows, protocol = dataset(((3, 2, None),))
     item = snapshot["items"][0]
     for product in (1, 2, 3):
-        item.update({f"answer{product}": f"产品{product}", f"video{product}": f"{product}.mp4"})
+        item.update({f"answer{product}": f"产品{product}", f"video{product}": f"{product}.mp4",
+                     f"context{product}": f"产品{product}背景"})
     # Original file formatting and unknown input fields must survive separately
     # from the parsed items and the finalized, compact timeliness result.
     content = ('\ufeff[\r\n  {"query":"今天几点开园？", "extra": "原样保留"}\r\n]\r\n').encode("utf-8")

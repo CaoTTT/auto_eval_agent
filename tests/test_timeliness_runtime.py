@@ -87,7 +87,7 @@ async def test_multiturn_has_own_histories_no_future_and_one_request(conversatio
     if count == 3:
         for item in items:
             item.update(product_count=3, screenshot3=item["screenshot1"].replace("p1-", "p3-"),
-                        answer3="产品3原始回答")
+                        answer3="产品3原始回答", context3="产品3背景")
     prepared, service = prepare_conversation(conversation_data)
     target = prepared[1]
     bundle = service.prepare(target)

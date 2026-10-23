@@ -137,6 +137,7 @@ def test_legacy_does_not_invent_prompt_or_history(prepared, tmp_path):
 def test_untrusted_request_record_is_removed(prepared):
     from auto_eval.config import AppConfig
     item = {"query": "q", "screenshot1": "a.png", "screenshot2": "b.png",
+            "context1": "产品1背景", "context2": "产品2背景",
             "screenshot_evidence": {"images": [{"ref_path": "secret"}]}}
     req = server.EvalReq(mode="compare", items=[item])
     server._validate_eval_request(req, AppConfig(judges=[]))

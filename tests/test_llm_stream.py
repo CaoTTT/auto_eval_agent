@@ -229,6 +229,37 @@ async def test_stream_retries_empty_response():
 
 
 @pytest.mark.asyncio
+async def test_stream_does_not_retry_empty_length_response():
+    client, completions = _client([
+        [_chunk(finish="length")],
+        [_chunk("不应通过重试补评分", finish="stop")],
+    ])
+
+    with pytest.raises(ProviderStreamError) as raised:
+        await stream_chat_completion(
+            client,
+            {"model": "fake-model", "messages": []},
+            max_attempts=5,
+            retry_base_s=0,
+        )
+
+    assert raised.value.retriable is False
+    assert raised.value.body == {"finish_reason": "length", "content": ""}
+    assert len(completions.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_keeps_nonempty_length_response_for_callers_to_handle():
+    client, completions = _client([[_chunk('{"score":', finish="length")]])
+    response = await stream_chat_completion(
+        client, {"model": "fake-model", "messages": []}, max_attempts=5,
+    )
+    assert response.choices[0].finish_reason == "length"
+    assert response.choices[0].message.content == '{"score":'
+    assert len(completions.requests) == 1
+
+
+@pytest.mark.asyncio
 async def test_stream_does_not_retry_blocked_error_chunk():
     client, completions = _client(
         [

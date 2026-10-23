@@ -5,6 +5,8 @@ from ..paths import resolve_project_path
 from ..query_images import encode_query_image, QueryImageError
 from ..image_limits import request_budget
 from ..conversation import digest, VERSION
+from ..compare_input import normalize_product_contexts
+from .compare_1022_contract import OUTPUT_CONTRACT_1022
 
 INSTRUCTIONS = """
 【多轮上下文解释规则】
@@ -29,7 +31,27 @@ def assemble_conversation(system: str, bundle: dict, protocol, evaluation_dateti
     target, turns = bundle["target_turn"], bundle["turns"]
     profile, limits = bundle["profile"], bundle["limits"]
     is_timeliness = protocol.standard_id == "timeliness_compare"
+    product_contexts_only = (
+        protocol.output_contract == OUTPUT_CONTRACT_1022
+        and protocol.bundle_revision in {"0.2.4", "0.2.5", "0.2.6"}
+    )
+    if product_contexts_only:
+        # Never let a product's legacy context alias become shared history.
+        turns = [
+            {**turn, **normalize_product_contexts(turn, turn.get("product_count", 2))}
+            for turn in turns
+        ]
     instructions = INSTRUCTIONS
+    if protocol.output_contract == OUTPUT_CONTRACT_1022 and protocol.bundle_revision == "0.2.5":
+        instructions = instructions.replace(
+            "先分别绝对评分，再比较。",
+            "默认分别绝对评分；卡片形式、同形态同档及数字缺来源保护按本轮协议明确的评分例外执行。"
+            "政策类单个匿名引用低分特例仅影响对应产品，不连带调整其他产品。")
+    elif protocol.output_contract == OUTPUT_CONTRACT_1022 and protocol.bundle_revision == "0.2.6":
+        instructions = instructions.replace(
+            "先分别绝对评分，再比较。",
+            "按本轮协议分别评分；服务与引用先判断应该、可选或禁止，允许协议规定的逐产品合法空分。"
+            "来源形态相同不强制同分；场景化卡片及数据缺来源补充规则仅在不覆盖本轮明确分档和NA时使用。")
     if is_timeliness:
         instructions = instructions.replace(
             "每个产品只能用自身历史解释承接和指代，不能借其他产品历史补全遗漏。先分别绝对评分，再比较。",
@@ -47,7 +69,7 @@ def assemble_conversation(system: str, bundle: dict, protocol, evaluation_dateti
     if is_timeliness:
         text("时间依据：仅采用各产品各轮材料中的明确测试条件和用户目标时间。"
              "未提供测试时间时保留未知；任务创建时间和审核时间不是产品测试时间。")
-    else:
+    elif not product_contexts_only:
         text("评测基准时间 evaluation_datetime：" + (evaluation_datetime or datetime.now().astimezone().isoformat(timespec="seconds")))
     for turn in turns:
         t = turn["turn_index"]
@@ -82,7 +104,7 @@ def assemble_conversation(system: str, bundle: dict, protocol, evaluation_dateti
         bundle["diagnostics"]["input_diagnostic_status"] = "blocked"
         raise QueryImageError("conversation_request_budget_exceeded", "完整历史请求超过平台保护预算：" + ", ".join(report["blocking_reasons"]))
     manifest = digest({"prefix": bundle["diagnostics"]["history_prefix_sha256"], "protocol": protocol.request_metadata(),
-                       "system": system, "roles": [p["text"] for i, p in enumerate(parts) if p["type"] == "text" and (is_timeliness or i != 1)],
+                       "system": system, "roles": [p["text"] for i, p in enumerate(parts) if p["type"] == "text" and (is_timeliness or product_contexts_only or i != 1)],
                        "images": [{k: m.get(k) for k in ("asset_id", "sha256", "request_role")} for m in metadata],
                        "limits": limits, "adapter": VERSION})
     return system, parts, metadata, refs, manifest
