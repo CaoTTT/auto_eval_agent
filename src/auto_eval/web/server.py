@@ -1258,8 +1258,9 @@ def api_dataset_media_file(token: str, download: bool = False):
 
 @app.get("/api/history")
 async def api_history(limit: int = 50, page: int | None = None):
-    # Keep the legacy limit-only API; paginated callers can reach all history.
-    rows = await asyncio.to_thread(list_snapshots, limit=limit if page is None else None)
+    # The history panel shows the latest 200 records; archived snapshots and
+    # the legacy limit-only API remain available independently of this view.
+    rows = await asyncio.to_thread(list_snapshots, limit=limit if page is None else 200)
     pagination = {}
     if page is not None:
         total = len(rows)

@@ -76,7 +76,7 @@
 
   <details class="history-section">
     <summary>历史记录（{{ historyTotal }}）<button @click.stop="loadHistory()" :disabled="loadingHistory" style="margin-left:8px">刷新</button></summary>
-    <p class="hint">历史结果保存在本地 runs/web_history，服务重启后仍可加载；运行中断时会保留已完成的题目。</p>
+    <p class="hint">仅展示最新 200 条历史记录，每页 10 条；更早的记录仍会保留。服务重启后仍可加载已保存的结果；运行中断时会保留已完成的题目。</p>
     <div class="actions">
       <button @click="exportComparisonXlsx()" :disabled="comparisonTaskIds.length !== 2 || !!exportingTaskId">合并对比导出 Excel（{{ comparisonTaskIds.length }}/2）</button>
       <button @click="comparisonTaskIds = []" :disabled="!comparisonTaskIds.length">清空选择</button>
