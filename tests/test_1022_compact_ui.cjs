@@ -51,5 +51,5 @@ const context={};vm.runInNewContext(panelSource+'\nthis.Panel=HumanComparePanel;
 assert.match(context.Panel.template,/<template v-if="r.model_output_contract!=='compare_1022_v2'">；核验：/);
 const index=fs.readFileSync(path.join(__dirname,'../src/auto_eval/web/static/index.html'),'utf8');
 assert.match(index,/!compact1022\(\) && summary.needs_review_count/);
-assert.match(index,/app\.js\?v=20261026_prompt_availability/);
+assert.match(index,/app\.js\?v=20261026_history_notes/);
 console.log('1022 compact UI: six dimensions, Gate blocking, shared reasons, no third product, hidden retired fields and frozen legacy display passed');

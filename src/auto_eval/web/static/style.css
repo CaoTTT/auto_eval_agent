@@ -357,12 +357,16 @@ tr.result-error td, tr.result-error-detail td { background: #fef2f2 !important; 
 }
 .history-text-link {
   flex: 0 0 auto;
+  border: 0;
+  padding: 0;
+  background: transparent;
   color: #2563eb;
   font-size: 12px;
   text-decoration: underline;
   white-space: nowrap;
 }
 .history-text-link:hover { color: #1d4ed8; }
+.history-text-link:disabled { color: #9ca3af; cursor: default; }
 .history-cancel-link { color: #64748b; }
 .cell-tooltip {
   position: fixed;

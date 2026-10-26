@@ -489,6 +489,9 @@ createApp({
     const historyError = ref("");
     const historyNoteDrafts = ref({});
     const historyNoteEditing = ref({});
+    const historyNoteSaving = ref({});
+    const historyNoteUpdates = new Map();
+    let historyNoteVersion = 0;
     const loadingHistory = ref(false);
     const loadingTaskId = ref("");
     const exportingTaskId = ref("");
@@ -2052,6 +2055,7 @@ createApp({
       requestedPage = Math.max(1, Math.trunc(Number(requestedPage)) || 1);
       historyRequestedPage = requestedPage;
       const version = ++historyListVersion;
+      const noteVersion = historyNoteVersion;
       loadingHistory.value = true;
       historyError.value = "";
       try {
@@ -2059,7 +2063,14 @@ createApp({
         if (!r.ok) throw new Error("请稍后重试");
         const d = await r.json();
         if (version !== historyListVersion || disposed) return;
-        historyItems.value = (d.items || []).map(item => ({ ...item, task_timing: receiveTaskTiming(item.task_timing) }));
+        historyItems.value = (d.items || []).map(item => {
+          const update = historyNoteUpdates.get(item.task_id);
+          // A list request started before a successful save can still contain
+          // the old note. Later requests read the persisted server value.
+          const note = update && update.version > noteVersion ? update.note : item.note || "";
+          if (update && update.version <= noteVersion) historyNoteUpdates.delete(item.task_id);
+          return { ...item, note, task_timing: receiveTaskTiming(item.task_timing) };
+        });
         historyTotal.value = d.total ?? historyItems.value.length;
         historyPage.value = d.page || requestedPage;
         historyRequestedPage = historyPage.value;
@@ -2206,30 +2217,43 @@ createApp({
     }
 
     function editHistoryNote(item) {
+      if (historyNoteSaving.value[item.task_id]) return;
       historyNoteDrafts.value[item.task_id] = item.note || "";
       historyNoteEditing.value[item.task_id] = true;
     }
 
     function cancelHistoryNote(item) {
+      if (historyNoteSaving.value[item.task_id]) return;
       historyNoteDrafts.value[item.task_id] = item.note || "";
       historyNoteEditing.value[item.task_id] = false;
     }
 
     async function saveHistoryNote(item) {
-      const note = String(historyNoteDrafts.value[item.task_id] || "").trim();
-      const response = await fetch(`/api/history/${item.task_id}/note`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ note }),
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        alert("备注保存失败：" + (data.detail || "未知错误"));
-        return;
+      const id = item.task_id;
+      if (historyNoteSaving.value[id]) return;
+      const note = String(historyNoteDrafts.value[id] || "").trim();
+      historyNoteSaving.value[id] = true;
+      try {
+        const response = await fetch(`/api/history/${encodeURIComponent(id)}/note`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ note }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.detail || "未知错误");
+        if (typeof data.note !== "string") throw new Error("服务器未返回已保存的备注");
+        historyNoteUpdates.set(id, { note: data.note, version: ++historyNoteVersion });
+        // Refreshes replace row objects while the request is in flight, so
+        // update the current row by identity instead of the captured object.
+        const current = historyItems.value.find(row => row.task_id === id);
+        if (current) current.note = data.note;
+        historyNoteDrafts.value[id] = data.note;
+        historyNoteEditing.value[id] = false;
+      } catch (error) {
+        alert("备注保存失败：" + (error?.message || "网络错误") + "，请重试。");
+      } finally {
+        delete historyNoteSaving.value[id];
       }
-      item.note = data.note || "";
-      historyNoteDrafts.value[item.task_id] = item.note;
-      historyNoteEditing.value[item.task_id] = false;
     }
 
     async function delHistory(id) {
@@ -2255,6 +2279,7 @@ createApp({
       comparisonTaskIds.value = comparisonTaskIds.value.filter(value => value !== id);
       delete historyNoteDrafts.value[id];
       delete historyNoteEditing.value[id];
+      historyNoteUpdates.delete(id);
       await loadHistory();
     }
 
@@ -2503,7 +2528,7 @@ createApp({
       repairStatus, retryStatusLabel, retrySubmitting, selectedRetryIndexes, activeRetry,
       failedResultIndexes, retryIndexSelected, toggleRetryIndex, retryFailedCases,
       itemProgress, progressEvents, expandedProgressLogs, pagedProgressRows, progressStages,
-      comparisonTaskIds, exportComparisonXlsx, historyItems, historyNoteDrafts, historyNoteEditing, loadingHistory, pageSize,
+      comparisonTaskIds, exportComparisonXlsx, historyItems, historyNoteDrafts, historyNoteEditing, historyNoteSaving, loadingHistory, pageSize,
       historyPage, historyTotal, historyPageSize, historyPageCount, historyError,
       loadingTaskId, exportingTaskId, exportIncludeImages, exportMessage, exportError, exportDownloadUrl,
       opPage, opPageSize, opPageCount, opJumpPage,

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <title>auto_eval 评估台</title>
-  <link rel="stylesheet" href="/static/style.css?v=20261026_prompt_availability">
+  <link rel="stylesheet" href="/static/style.css?v=20261026_history_notes">
   <style>
     .op-cards { display:flex; flex-direction:column; gap:12px; }
     .op-card { border:1px solid #e2e8f0; border-radius:8px; padding:12px; background:#fafbfc; }
@@ -112,19 +112,20 @@
               <div v-if="historyNoteEditing[h.task_id]" class="history-note-editor">
                 <input
                   v-model="historyNoteDrafts[h.task_id]"
+                  :disabled="historyNoteSaving[h.task_id]"
                   maxlength="1000"
                   placeholder="填写批跑备注"
                   @keyup.enter="saveHistoryNote(h)"
                   @keyup.escape="cancelHistoryNote(h)"
                   autofocus
                 >
-                <a href="#" class="history-text-link" @click.prevent="saveHistoryNote(h)">保存</a>
-                <a href="#" class="history-text-link history-cancel-link" @click.prevent="cancelHistoryNote(h)">取消</a>
+                <button type="button" class="history-text-link" :disabled="historyNoteSaving[h.task_id]" @click="saveHistoryNote(h)">{{ historyNoteSaving[h.task_id] ? '保存中…' : '保存' }}</button>
+                <button type="button" class="history-text-link history-cancel-link" :disabled="historyNoteSaving[h.task_id]" @click="cancelHistoryNote(h)">取消</button>
               </div>
               <div v-else class="history-note-display">
                 <span v-if="h.note" class="history-note-text" :title="h.note">{{ h.note }}</span>
                 <span v-else class="history-note-empty">未备注</span>
-                <a href="#" class="history-text-link" @click.prevent="editHistoryNote(h)">编辑</a>
+                <button type="button" class="history-text-link" @click="editHistoryNote(h)">编辑</button>
               </div>
             </td>
           </tr>
@@ -692,6 +693,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20261026_prompt_availability"></script>
+  <script type="module" src="/static/app.js?v=20261026_history_notes"></script>
 </body>
 </html>
