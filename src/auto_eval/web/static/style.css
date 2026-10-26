@@ -206,6 +206,7 @@ tr.trace td { background: #eff6ff !important; color: #1e40af; font-size: 12px; }
 .summary { display: flex; gap: 20px; flex-wrap: wrap; font-size: 14px; padding: 10px 0; color: #374151; }
 .summary span { background: #eef2ff; padding: 4px 12px; border-radius: 16px; }
 select, input[type=number] { padding: 6px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 14px; }
+select option:disabled { color: #9ca3af; }
 details { margin-top: 10px; }
 summary { cursor: pointer; color: #2563eb; font-size: 14px; }
 pre { background: #fef2f2; padding: 10px; border-radius: 6px; font-size: 12px; white-space: pre-wrap; }

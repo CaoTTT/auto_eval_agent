@@ -100,9 +100,11 @@ createApp({
         + ` · 协议异常 ${data.conflict_identity_error ?? 0} · 技术失败 ${data.conflict_technical_failure ?? 0} · 未完成 ${data.conflict_unfinished ?? 0}`
         + ` · 明确冲突率 ${summaryPercent(data.conflict_rate)}（有冲突 / 明确判断 ${data.conflict_known ?? 0}）`;
     }
-    const compareProfiles = computed(() =>
-      evaluationProfiles.value.filter((profile) => (profile.modes || []).includes("compare"))
-    );
+    const compareProfiles = computed(() => {
+      const profiles = evaluationProfiles.value.filter((profile) => (profile.modes || []).includes("compare"));
+      return [...profiles.filter(profile => profile.selectable !== false),
+        ...profiles.filter(profile => profile.selectable === false)];
+    });
     const globalConcurrency = ref(5);
     const maxInFlight = ref(40);
     const waitingCapacity = ref(10);
@@ -1040,14 +1042,27 @@ createApp({
     }
 
     function defaultEvaluationProfile() {
-      return compareProfiles.value.find((profile) => profile.status === "stable")?.id
-        || compareProfiles.value[0]?.id
+      const selectable = compareProfiles.value.filter(profile => profile.selectable !== false);
+      return selectable.find((profile) => profile.status === "stable")?.id
+        || selectable[0]?.id
         || "";
+    }
+
+    function evaluationProfileDisabled(id) {
+      return compareProfiles.value.some(profile => profile.id === id && profile.selectable === false);
+    }
+
+    function newTaskEvaluationProfile(id) {
+      return id && !evaluationProfileDisabled(id) ? id : defaultEvaluationProfile();
     }
 
     function evaluationProfileLabel(id) {
       if (!id) return "—";
       return evaluationProfiles.value.find((profile) => profile.id === id)?.display || id;
+    }
+
+    function evaluationProfileOptionLabel(profile) {
+      return profile.selectable === false ? profile.display.replace('（可用）', '') : profile.display;
     }
 
     function cancelDatasetImport() {
@@ -1124,6 +1139,7 @@ createApp({
     function useComparisonDataset(data) {
       if (mode.value !== 'compare' || !confirmDatasetReplacement()) return;
       cancelDatasetImport();cancelHistoryLoad();detachResultView();
+      selectedEvaluationProfile.value = newTaskEvaluationProfile(selectedEvaluationProfile.value);
       items.value=JSON.parse(JSON.stringify(data.items));
       opItems.value=comparisonDraftRows(items.value);
       datasetName.value=data.dataset_name || '历史测评数据';datasetSourceFileId.value='';datasetSourceTaskId.value=data.task_id;
@@ -1313,6 +1329,7 @@ createApp({
     const canSubmit = computed(() =>
       !opPreparing.value && !opItems.value.some(it => it.queryUploading)
       && !(mode.value === 'compare' && importReport.value?.blocked)
+      && !(mode.value === 'compare' && evaluationProfileDisabled(selectedEvaluationProfile.value))
       && (mode.value === 'compare' ? opItems.value.length > 0 && opItems.value.every(opItemReady) : opItems.value.some(opItemReady))
     );
 
@@ -1321,6 +1338,10 @@ createApp({
       cancelHistoryLoad();
       const submitViewVersion = historyLoadVersion;
       runError.value = "";
+      if (mode.value === 'compare' && evaluationProfileDisabled(selectedEvaluationProfile.value)) {
+        runError.value = '该评测标准暂不可选，请选择其他评测标准。';
+        return;
+      }
       if (mode.value === 'compare' && importReport.value?.blocked) {
         runError.value = '导入文件存在缺失或无效的产品背景，请补齐后重新导入，或重新选择历史数据；当前不能开始评估。';
         return;
@@ -2276,7 +2297,7 @@ createApp({
         selectedTaskTiming.value = receiveTaskTiming(d.task_timing);
         mode.value = d.mode;
         if (d.mode === "compare") {
-          selectedEvaluationProfile.value = d.evaluation_profile || defaultEvaluationProfile();
+          selectedEvaluationProfile.value = newTaskEvaluationProfile(d.evaluation_profile);
         }
         datasetName.value = d.dataset_name || "";
         datasetSourceFileId.value = "";
@@ -2466,7 +2487,7 @@ createApp({
       addScoreRule, changeScoreDimension, removeScoreRule, clearScoreRules, scoreFilterError, resetResultFilters,
       reasonOnlyColumn, cellReasons, reasonsExpanded, toggleCellReasons, allReasonsExpanded, setAllReasonsExpanded,
       datasetSourceFileId, datasetSourceTaskId, datasetRevision, useComparisonDataset,
-      evaluationProfiles, compareProfiles, selectedEvaluationProfile, evaluationProfileLabel,
+      evaluationProfiles, compareProfiles, selectedEvaluationProfile, evaluationProfileLabel, evaluationProfileOptionLabel,
       taskEvaluationProfile, taskProtocolManifest, taskProtocolDiagnostics, taskIsChat, taskIsTimeliness, compact1022, summaryDimensions, setTaskProtocol,
       isTimelinessRow, timelinessColumn, timelinessProductScores, timelinessSummaryRows, timelinessPairedRows, summaryPercent,
       timelinessHasConflict, timelinessConflictColumn, timelinessConflictSummary,

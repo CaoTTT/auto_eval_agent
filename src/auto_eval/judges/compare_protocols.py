@@ -171,6 +171,8 @@ class CompareProtocol:
     score_dimensions: tuple[str, ...] = tuple(d for d in DIMENSIONS if d != "accuracy")
     result_schema_version: str | None = None
     output_contract: str = "legacy"
+    # Selection policy is independent of frozen prompt/request metadata.
+    selectable: bool = True
 
     def prompt_templates(self, product_count: int) -> tuple[Template, Template]:
         """Select the product count within the task's frozen prompt revision."""
@@ -262,6 +264,7 @@ _PROTOCOLS = {
         bundle_revision="0.3.1",
         display="V0.3（实验）",
         status="experimental",
+        selectable=False,
         system_template=V03_SYSTEM,
         user_template=V03_USER,
         observation_model=VisualCompareObservation,
@@ -276,6 +279,7 @@ _PROTOCOLS = {
         bundle_revision="0.2.3",
         display="V0.2 简化版·评分校准（实验）",
         status="experimental",
+        selectable=False,
         system_template=V02_CALIBRATED_SYSTEM,
         user_template=V02_CALIBRATED_USER,
         observation_model=VisualCompareObservationV02,
@@ -290,6 +294,7 @@ _PROTOCOLS = {
         bundle_revision="0.2.3",
         display="V0.2 简化版·思考暴露优化（可用）",
         status="experimental",
+        selectable=False,
         system_template=V02_THINKING_EXPOSURE_SYSTEM,
         user_template=V02_THINKING_EXPOSURE_USER,
         observation_model=VisualCompareObservationV02,
@@ -304,6 +309,7 @@ _PROTOCOLS = {
         bundle_revision="1.0.0",
         display="问答闲聊V1·1-5分（候选）",
         status="experimental",
+        selectable=False,
         system_template=QA_CHAT_SYSTEM,
         user_template=QA_CHAT_USER,
         observation_model=QAChatObservation,

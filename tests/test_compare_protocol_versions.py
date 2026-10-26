@@ -152,41 +152,17 @@ async def test_eval_api_freezes_selected_protocol_on_new_task(monkeypatch):
     assert created[-1].protocol_manifest["bundle_revision"] == "0.2.3"
     assert created[-1].protocol_manifest["score_range"] == [1, 5]
 
-    v03_response = await server_module.api_eval(
-        server_module.EvalReq(
-            mode="compare",
-            items=[item],
-            evaluation_profile=V03_COMPARE_PROTOCOL_ID,
-        )
-    )
-    assert v03_response["evaluation_profile"] == V03_COMPARE_PROTOCOL_ID
-    assert created[-1].protocol_manifest["score_range"] == [0, 3]
-
-    calibrated_response = await server_module.api_eval(
-        server_module.EvalReq(
-            mode="compare",
-            items=[item],
-            evaluation_profile=V02_CALIBRATED_COMPARE_PROTOCOL_ID,
-        )
-    )
-    assert calibrated_response["evaluation_profile"] == V02_CALIBRATED_COMPARE_PROTOCOL_ID
-    manifest = created[-1].protocol_manifest
-    assert manifest["standard_version"] == "0.2-simplified-calibrated"
-    assert manifest["bundle_revision"] == "0.2.3"
-    assert manifest["score_range"] == [1, 5]
-    thinking_exposure_response = await server_module.api_eval(
-        server_module.EvalReq(
-            mode="compare",
-            items=[item],
-            evaluation_profile=V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID,
-        )
-    )
-    assert thinking_exposure_response["evaluation_profile"] == V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID
-    manifest = created[-1].protocol_manifest
-    assert manifest["standard_version"] == "0.2-simplified-thinking-exposure"
-    assert manifest["bundle_revision"] == "0.2.3"
-    assert manifest["score_range"] == [1, 5]
-    assert manifest["status"] == "experimental"
+    for disabled_id in (
+        V03_COMPARE_PROTOCOL_ID, V02_CALIBRATED_COMPARE_PROTOCOL_ID,
+        V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID, QA_CHAT_COMPARE_PROTOCOL_ID,
+    ):
+        with pytest.raises(HTTPException) as error:
+            await server_module.api_eval(server_module.EvalReq(
+                mode="compare", items=[item], evaluation_profile=disabled_id,
+            ))
+        assert error.value.status_code == 422
+        assert "暂不可用于新建任务" in error.value.detail
+    assert len(created) == 2
     public = server_module.api_config()["evaluation_profiles"]
     assert [p["id"] for p in public] == [
         DEFAULT_COMPARE_PROTOCOL_ID, V02_PLUS_COMPARE_PROTOCOL_ID, V03_COMPARE_PROTOCOL_ID,

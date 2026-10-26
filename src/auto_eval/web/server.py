@@ -177,11 +177,14 @@ class ResumeReq(BaseModel):
 _VIDEO_EXTENSIONS = VIDEO_EXTENSIONS
 
 
-def _compare_protocol_or_422(protocol_id: str | None):
+def _compare_protocol_or_422(protocol_id: str | None, *, require_selectable: bool = False):
     try:
-        return resolve_compare_protocol(protocol_id)
+        protocol = resolve_compare_protocol(protocol_id)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+    if require_selectable and not protocol.selectable:
+        raise HTTPException(422, f"评测标准「{protocol.display}」暂不可用于新建任务，请选择其他版本")
+    return protocol
 
 
 def _protocol_manifest(protocol, app_cfg, options: dict, resolved_judges=None) -> dict:
@@ -381,7 +384,8 @@ def api_config():
             for j in c.judges
         ],
         "evaluation_profiles": [
-            profile.public_metadata() for profile in list_compare_protocols()
+            {**profile.public_metadata(), "selectable": profile.selectable}
+            for profile in list_compare_protocols()
         ],
     }
 
@@ -410,11 +414,11 @@ async def api_compare_preflight(req: EvalReq):
     from .conversation_prepare import ConversationPreparation
     if req.mode != "compare":
         raise HTTPException(422, "多轮预检查仅支持 compare")
+    protocol = _compare_protocol_or_422(req.evaluation_profile, require_selectable=True)
     app_cfg = cfg()
     _validate_eval_request(req, app_cfg)
     _, judges = _new_judge_runtime(app_cfg, req.options)
     profile = app_cfg.visual_modes["rich_content"]
-    protocol = _compare_protocol_or_422(req.evaluation_profile)
     limits = resolve_image_limits(judges[0], profile)
     def inspect():
         prepared = ConversationPreparation(req.items, "preflight-" + uuid.uuid4().hex, profile, limits)
@@ -548,7 +552,7 @@ async def api_eval(req: EvalReq):
     judge_runtime, judges = _new_judge_runtime(app_cfg, req.options)
     # 模型调用并发统一由全局 MODEL_LIMITER 决定，不再从每个任务的 options 单独设置。
     protocol = (
-        _compare_protocol_or_422(req.evaluation_profile)
+        _compare_protocol_or_422(req.evaluation_profile, require_selectable=True)
         if req.mode == "compare"
         else None
     )
@@ -871,7 +875,8 @@ async def api_eval_items(req: EvalItemsReq):
         _check_judge_options(task, req.options)
     protocol = (
         _compare_protocol_or_422(
-            requested_profile if created else task.evaluation_profile
+            requested_profile if created else task.evaluation_profile,
+            require_selectable=created,
         )
         if mode == "compare"
         else None

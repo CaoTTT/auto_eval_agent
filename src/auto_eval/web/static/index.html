@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <title>auto_eval 评估台</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260923_result_filters">
+  <link rel="stylesheet" href="/static/style.css?v=20261026_prompt_availability">
   <style>
     .op-cards { display:flex; flex-direction:column; gap:12px; }
     .op-card { border:1px solid #e2e8f0; border-radius:8px; padding:12px; background:#fafbfc; }
@@ -241,8 +241,8 @@
     <div v-if="mode==='compare'" class="row">
       <span class="lbl">评测标准：</span>
       <select v-model="selectedEvaluationProfile">
-        <option v-for="profile in compareProfiles" :key="profile.id" :value="profile.id">
-          {{ profile.display }} · {{ profile.score_range[0] }}–{{ profile.score_range[1] }}分
+        <option v-for="profile in compareProfiles" :key="profile.id" :value="profile.id" :disabled="profile.selectable === false">
+          {{ evaluationProfileOptionLabel(profile) }} · {{ profile.score_range[0] }}–{{ profile.score_range[1] }}分{{ profile.selectable === false ? '（暂不可选）' : '' }}
         </option>
       </select>
       <span class="hint">任务创建后版本冻结；失败补跑沿用原版本。</span>
@@ -692,6 +692,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20261022_1022_r026"></script>
+  <script type="module" src="/static/app.js?v=20261026_prompt_availability"></script>
 </body>
 </html>
