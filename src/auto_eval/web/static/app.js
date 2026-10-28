@@ -487,6 +487,10 @@ createApp({
     const historyPageSize = 10;
     const historyPageCount = computed(() => Math.max(1, Math.ceil(historyTotal.value / historyPageSize)));
     const historyError = ref("");
+    const historySearchDraft = ref({ dataset_name: "", evaluation_profile: "", start_time: "", end_time: "" });
+    const historySearchFilters = ref({});
+    const historySearchError = ref("");
+    const historyHasFilters = computed(() => Object.keys(historySearchFilters.value).length > 0);
     const historyNoteDrafts = ref({});
     const historyNoteEditing = ref({});
     const historyNoteSaving = ref({});
@@ -2051,6 +2055,36 @@ createApp({
       return d.toLocaleString();
     }
 
+    async function applyHistorySearch() {
+      historySearchError.value = "";
+      const draft = historySearchDraft.value;
+      const filters = {};
+      if (draft.dataset_name.trim()) filters.dataset_name = draft.dataset_name.trim();
+      if (draft.evaluation_profile) filters.evaluation_profile = draft.evaluation_profile;
+      for (const [key, label] of [["start_time", "开始时间"], ["end_time", "结束时间"]]) {
+        if (!draft[key]) continue;
+        const timestamp = new Date(draft[key]).getTime() / 1000;
+        if (!Number.isFinite(timestamp)) {
+          historySearchError.value = `${label}无效，请重新选择。`;
+          return;
+        }
+        filters[key] = timestamp;
+      }
+      if (filters.start_time != null && filters.end_time != null && filters.start_time > filters.end_time) {
+        historySearchError.value = "开始时间不能晚于结束时间。";
+        return;
+      }
+      historySearchFilters.value = filters;
+      await loadHistory(1);
+    }
+
+    async function resetHistorySearch() {
+      historySearchDraft.value = { dataset_name: "", evaluation_profile: "", start_time: "", end_time: "" };
+      historySearchFilters.value = {};
+      historySearchError.value = "";
+      await loadHistory(1);
+    }
+
     async function loadHistory(requestedPage = historyRequestedPage) {
       requestedPage = Math.max(1, Math.trunc(Number(requestedPage)) || 1);
       historyRequestedPage = requestedPage;
@@ -2059,7 +2093,9 @@ createApp({
       loadingHistory.value = true;
       historyError.value = "";
       try {
-        const r = await fetch(`/api/history?page=${requestedPage}`);
+        const query = [`page=${requestedPage}`, ...Object.entries(historySearchFilters.value)
+          .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`)].join("&");
+        const r = await fetch(`/api/history?${query}`);
         if (!r.ok) throw new Error("请稍后重试");
         const d = await r.json();
         if (version !== historyListVersion || disposed) return;
@@ -2530,6 +2566,7 @@ createApp({
       itemProgress, progressEvents, expandedProgressLogs, pagedProgressRows, progressStages,
       comparisonTaskIds, exportComparisonXlsx, historyItems, historyNoteDrafts, historyNoteEditing, historyNoteSaving, loadingHistory, pageSize,
       historyPage, historyTotal, historyPageSize, historyPageCount, historyError,
+      historySearchDraft, historySearchFilters, historySearchError, historyHasFilters, applyHistorySearch, resetHistorySearch,
       loadingTaskId, exportingTaskId, exportIncludeImages, exportMessage, exportError, exportDownloadUrl,
       opPage, opPageSize, opPageCount, opJumpPage,
       progressPage, progressPageCount, progressJumpPage,

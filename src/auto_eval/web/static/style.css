@@ -336,6 +336,12 @@ tr.result-error td, tr.result-error-detail td { background: #fef2f2 !important; 
 .row-export-cell { text-align: center; white-space: nowrap; }
 .row-export-link { color: #2563eb; text-decoration: underline; font-size: 13px; }
 .row-export-link:hover { color: #1d4ed8; }
+.history-search { display: grid; grid-template-columns: minmax(160px, 1.2fr) minmax(190px, 1.4fr) minmax(170px, 1fr) minmax(170px, 1fr) auto; gap: 10px; align-items: end; margin: 14px 0 8px; }
+.history-search label { display: flex; flex-direction: column; gap: 5px; min-width: 0; font-size: 13px; color: #374151; }
+.history-search input, .history-search select { box-sizing: border-box; width: 100%; min-width: 0; padding: 7px 8px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 13px; background: #fff; }
+.history-search-actions { display: flex; gap: 6px; white-space: nowrap; }
+@media (max-width: 1050px) { .history-search { grid-template-columns: repeat(2, minmax(0, 1fr)); } .history-search-actions { grid-column: 1 / -1; } }
+@media (max-width: 560px) { .history-search { grid-template-columns: minmax(0, 1fr); } }
 .history-note-cell { width: 300px; min-width: 300px !important; max-width: 300px !important; }
 .history-note-display { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .history-note-text {

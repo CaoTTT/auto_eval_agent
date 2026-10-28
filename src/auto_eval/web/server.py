@@ -8,6 +8,7 @@ import asyncio
 import copy
 import hashlib
 import json
+import math
 import time
 import uuid
 from pathlib import Path
@@ -1256,11 +1257,61 @@ def api_dataset_media_file(token: str, download: bool = False):
                         headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
 
 
+def _history_timestamp(value) -> float | None:
+    if not value or isinstance(value, bool):
+        return None
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return timestamp if math.isfinite(timestamp) else None
+
+
+def _history_display_time(row: dict) -> float | None:
+    for value in (row.get("updated_at"), row.get("created_at")):
+        timestamp = _history_timestamp(value)
+        if timestamp is not None:
+            return timestamp
+    return None
+
+
 @app.get("/api/history")
-async def api_history(limit: int = 50, page: int | None = None):
-    # The history panel shows the latest 200 records; archived snapshots and
-    # the legacy limit-only API remain available independently of this view.
-    rows = await asyncio.to_thread(list_snapshots, limit=limit if page is None else 200)
+async def api_history(
+    limit: int = 50,
+    page: int | None = None,
+    dataset_name: str = "",
+    evaluation_profile: str = "",
+    start_time: float | None = None,
+    end_time: float | None = None,
+):
+    for value in (start_time, end_time):
+        if value is not None and not math.isfinite(value):
+            raise HTTPException(422, "历史记录检索时间必须是有效时间")
+    if start_time is not None and end_time is not None and start_time > end_time:
+        raise HTTPException(422, "开始时间不能晚于结束时间")
+    name = dataset_name.strip().casefold()
+    profile = evaluation_profile.strip()
+    has_filters = bool(name or profile or start_time is not None or end_time is not None)
+    # Filter the full archive before limiting the displayed matches. This keeps
+    # older matching tasks searchable while retaining the panel's 200-row cap.
+    rows = await asyncio.to_thread(
+        list_snapshots, limit=None if has_filters else (limit if page is None else 200),
+    )
+    if has_filters:
+        filtered = []
+        for row in rows:
+            if name and name not in str(row.get("dataset_name") or "").casefold():
+                continue
+            if profile and row.get("evaluation_profile") != profile:
+                continue
+            if start_time is not None or end_time is not None:
+                timestamp = _history_display_time(row)
+                if timestamp is None or (start_time is not None and timestamp < start_time) or (
+                    end_time is not None and timestamp > end_time
+                ):
+                    continue
+            filtered.append(row)
+        rows = filtered[:limit if page is None else 200]
     pagination = {}
     if page is not None:
         total = len(rows)
@@ -1271,6 +1322,11 @@ async def api_history(limit: int = 50, page: int | None = None):
     # 磁盘历史会把 pending/running/queued 视为上次服务中断；当前进程中的活
     # 对象需覆盖回来，避免历史列表把正在排队或运行的任务误显示为 error。
     for row in rows:
+        # Keep the visible fallback consistent with filtering, and never send
+        # non-finite cached timestamps to the JSON response serializer.
+        for field in ("updated_at", "created_at"):
+            if field in row and _history_timestamp(row[field]) is None:
+                row[field] = None
         task = TASKS.get(row.get("task_id"))
         if task is not None:
             row["task_timing"] = task.timing_snapshot()

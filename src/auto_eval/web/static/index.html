@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <title>auto_eval 评估台</title>
-  <link rel="stylesheet" href="/static/style.css?v=20261026_history_notes">
+  <link rel="stylesheet" href="/static/style.css?v=20261028_history_search">
   <style>
     .op-cards { display:flex; flex-direction:column; gap:12px; }
     .op-card { border:1px solid #e2e8f0; border-radius:8px; padding:12px; background:#fafbfc; }
@@ -76,7 +76,18 @@
 
   <details class="history-section">
     <summary>历史记录（{{ historyTotal }}）<button @click.stop="loadHistory()" :disabled="loadingHistory" style="margin-left:8px">刷新</button></summary>
-    <p class="hint">仅展示最新 200 条历史记录，每页 10 条；更早的记录仍会保留。服务重启后仍可加载已保存的结果；运行中断时会保留已完成的题目。</p>
+    <form class="history-search" role="search" aria-label="检索历史记录" @submit.prevent="applyHistorySearch">
+      <label>数据集名称<input v-model="historySearchDraft.dataset_name" type="search" placeholder="输入名称关键词" aria-label="历史数据集名称"></label>
+      <label>测评标准<select v-model="historySearchDraft.evaluation_profile" aria-label="历史测评标准">
+        <option value="">全部标准</option>
+        <option v-for="profile in compareProfiles" :key="profile.id" :value="profile.id">{{ profile.display }}</option>
+      </select></label>
+      <label>开始时间<input v-model="historySearchDraft.start_time" type="datetime-local" step="1" aria-label="历史开始时间"></label>
+      <label>结束时间<input v-model="historySearchDraft.end_time" type="datetime-local" step="1" aria-label="历史结束时间"></label>
+      <div class="history-search-actions"><button type="submit" :disabled="loadingHistory">搜索</button><button type="button" @click="resetHistorySearch" :disabled="loadingHistory">重置</button></div>
+    </form>
+    <p v-if="historySearchError" class="err" role="alert">{{ historySearchError }}</p>
+    <p class="hint">从全部历史中检索，展示匹配的最新 200 条，每页 10 条。时间按列表显示的时间和本地时区筛选，未填的一端不限；多个条件同时生效。</p>
     <div class="actions">
       <button @click="exportComparisonXlsx()" :disabled="comparisonTaskIds.length !== 2 || !!exportingTaskId">合并对比导出 Excel（{{ comparisonTaskIds.length }}/2）</button>
       <button @click="comparisonTaskIds = []" :disabled="!comparisonTaskIds.length">清空选择</button>
@@ -132,7 +143,7 @@
         </tbody>
       </table>
     </div>
-    <p v-else-if="!loadingHistory && !historyError" class="hint">暂无历史记录。</p>
+    <p v-else-if="!loadingHistory && !historyError" class="hint">{{ historyHasFilters ? '没有符合检索条件的历史记录，请调整条件后重试。' : '暂无历史记录。' }}</p>
     <nav v-if="historyTotal > 0" class="pagination" aria-label="历史记录分页">
       <span class="page-size page-size-fixed">共 {{ historyTotal }} 条 · 每页 {{ historyPageSize }} 条</span>
       <button @click="loadHistory(historyPage - 1)" :disabled="historyPage <= 1 || loadingHistory">上一页</button>
@@ -693,6 +704,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20261026_history_notes"></script>
+  <script type="module" src="/static/app.js?v=20261028_history_search"></script>
 </body>
 </html>
