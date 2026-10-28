@@ -15,6 +15,7 @@ from pathlib import Path
 
 from ..paths import RUNS_DIR
 from ..preparation import PreparationLimiter, run_preparation, preparation_limit, preparation_concurrency
+from ..remote_media import cleanup_item_downloads
 from ..timing import StageTimings, collect_timings, timing_span
 from ..task_control import PauseRequested, bind_pause_check, check_pause, pause_aware
 from ..request_throttle import (
@@ -267,6 +268,16 @@ def _mark_interrupted_if_stuck(task: Task) -> bool:
     return True
 
 
+async def _cleanup_task_media_downloads(task: Task) -> None:
+    await asyncio.gather(
+        *(
+            asyncio.to_thread(cleanup_item_downloads, item)
+            for item in task.items
+        ),
+        return_exceptions=True,
+    )
+
+
 async def run_eval(task: Task, cfg: AppConfig) -> None:
     """全量评测入口。pin 契约（R1）：调用方须在提交时同步 `active_runs += 1`
     （endpoint 在 spawn_background 之前），本函数只负责结束时解除——否则
@@ -292,6 +303,7 @@ async def run_eval(task: Task, cfg: AppConfig) -> None:
             await task.publish("error", {"message": task.error})
             await _persist_task_and_wait(task)
     finally:
+        await _cleanup_task_media_downloads(task)
         task.active_runs -= 1
         task.finish_timing()
         if not await finish_pause(task):
@@ -746,6 +758,7 @@ def _make_item_evaluator(
                 )
             res["timings"] = timings.finish()
             res["total_s"] = res["timings"]["total_s"]
+            await asyncio.to_thread(cleanup_item_downloads, item_dict)
             await finish(idx, res, started)
             return res
 
@@ -833,6 +846,7 @@ async def _run(task: Task, cfg: AppConfig) -> None:
         await asyncio.gather(*coros)
     finally:
         await _aclose_judge_clients(clients)
+        await _cleanup_task_media_downloads(task)
 
 
 _PREPARED_ITEM_FIELDS = {
@@ -1304,6 +1318,8 @@ async def run_update_batch(
         )
     finally:
         task.active_runs -= 1
+        if task.active_runs <= 0:
+            await _cleanup_task_media_downloads(task)
         if manage_status:
             task.finish_timing()
         idle = task.active_runs <= 0

@@ -97,8 +97,23 @@ async function main(){
   const requests=[],watchers=[];let cleanup;
   const caseContext={...context,watch(source,fn){watchers.push({source,fn});},onUnmounted(fn){cleanup=fn;},
     fetch(url,options){return new Promise(resolve=>requests.push({url,options,resolve}));}};
-  vm.runInNewContext(strip(read('compare-cases.js'))+'\nthis.CaseList=CompareCaseList;this.mapper=fromDatasetItem;',caseContext);
+  vm.runInNewContext(strip(read('compare-cases.js'))+'\nthis.CaseList=CompareCaseList;this.mapper=fromDatasetItem;this.isRemoteUrl=isRemoteUrl;',caseContext);
   const props={items:raw.map(caseContext.mapper)},cases=caseContext.CaseList.setup(props);
+  const remoteQuery=caseContext.mapper({query:'remote image',query_images:['snapshot.png'],
+    query_image_meta:[{source_url:'https://example.test/question.png',original_path:'snapshot.png',
+      preview_url:'/api/query-images/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'}]},0);
+  assert.equal(remoteQuery.queryImages[0],'https://example.test/question.png');
+  const remoteQueryFile=context.caseMedia(remoteQuery)[0];
+  assert.equal(remoteQueryFile.path,'snapshot.png');
+  assert.equal(remoteQueryFile.inputPath,'https://example.test/question.png');
+  assert.equal(remoteQueryFile.previewUrl,'/api/query-images/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+  assert.equal(remoteQueryFile.sourceUrl,'https://example.test/question.png');
+  cases.toggleMedia(remoteQuery,remoteQueryFile);
+  assert.equal(requests.length,0,'query snapshots must render without dataset-media registration');
+  assert.equal(cases.media.value[cases.key(remoteQuery,remoteQueryFile)].preview_url,remoteQueryFile.previewUrl);
+  cases.toggleMedia(remoteQuery,remoteQueryFile);
+  assert.equal(caseContext.isRemoteUrl('https://example.test/a.png'),true);
+  assert.equal(caseContext.isRemoteUrl('ftp://example.test/a.png'),false);
   const legacy={id:'legacy',query:'old question',product_count:2,video1:'a.mp4',video2:'b.mp4',
     source_data:{session_id:'business-session',turn_index:3}};
   assert.equal(caseContext.mapper(legacy,0).sessionId,'','source metadata must not activate conversations');
@@ -116,6 +131,65 @@ async function main(){
   cases.toggleMedia(item,file);assert.equal(requests[0].options.signal.aborted,true);
   requests[0].resolve({ok:true,json:async()=>({preview_url:'/stale.png'})});await tick();
   assert.equal(cases.media.value[cases.key(item,file)],undefined,'late preview cannot reopen a collapsed image');
+  const remoteDraft=caseContext.mapper({query:'remote',product_count:2,
+    video1:'https://example.test/one.mp4',video2:'https://example.test/two.mp4'},0);
+  const remoteFile=cases.caseMedia(remoteDraft)[0];
+  cases.toggleMedia(remoteDraft,remoteFile);
+  assert.equal(requests.length,1,'remote media must not be sent to dataset-media');
+  assert.equal(cases.media.value[cases.key(remoteDraft,remoteFile)].preview_url,'https://example.test/one.mp4');
+  const remoteShot=caseContext.mapper({query:'remote shot',product_count:2,evidence_mode:'long_screenshot',
+    screenshot1:'https://example.test/one.png',screenshot2:'https://example.test/two.png',
+    screenshot_meta1:{source_url:'https://example.test/one.png',original_path:'runs/screenshots/case/product1/source.png',
+      original_sha256:'shot-sha'}},1);
+  const remoteShotFile=cases.caseMedia(remoteShot)[0];
+  assert.equal(remoteShot.screenshot1Path,'https://example.test/one.png','reuse keeps the original URL as input');
+  assert.equal(remoteShotFile.path,'runs/screenshots/case/product1/source.png');
+  assert.equal(remoteShotFile.inputPath,'https://example.test/one.png');
+  assert.equal(remoteShotFile.sourceUrl,'https://example.test/one.png');
+  cases.toggleMedia(remoteShot,remoteShotFile);
+  assert.equal(requests.length,2,'snapshot-backed screenshots use the local media endpoint');
+  const shotRequest=JSON.parse(requests[1].options.body);
+  assert.equal(shotRequest.path,'runs/screenshots/case/product1/source.png');
+  assert.equal(shotRequest.role,'screenshot');
+  assert.equal(shotRequest.expected_sha256,'shot-sha');
+  requests[1].resolve({ok:true,json:async()=>({preview_url:'/api/dataset-media/snapshot',download_url:'/api/dataset-media/snapshot?download=true'})});
+  await tick();
+  assert.equal(cases.media.value[cases.key(remoteShot,remoteShotFile)].preview_url,'/api/dataset-media/snapshot');
+  const failedShot=caseContext.mapper({query:'missing snapshot',product_count:2,evidence_mode:'long_screenshot',
+    screenshot1:'https://example.test/missing.png',screenshot2:'https://example.test/two.png',
+    screenshot_meta1:{source_url:'https://example.test/missing.png',original_path:'runs/screenshots/case/product1/missing.png',
+      original_sha256:'missing-sha'}},2);
+  const failedShotFile=cases.caseMedia(failedShot)[0];
+  cases.toggleMedia(failedShot,failedShotFile);
+  assert.equal(requests.length,3,'snapshot-backed screenshots use the local media endpoint');
+  requests[2].resolve({ok:false,json:async()=>({detail:'本地快照不存在'})});
+  await tick();
+  const failedShotMedia=cases.media.value[cases.key(failedShot,failedShotFile)];
+  assert.equal(failedShotMedia.preview_url,undefined,'failed snapshots must not fall back to the source URL');
+  assert.match(failedShotMedia.error,/本地快照不存在/);
+  assert.equal(failedShotFile.sourceUrl,'https://example.test/missing.png');
+  const unbackedShot=caseContext.mapper({query:'no snapshot',product_count:2,evidence_mode:'long_screenshot',
+    screenshot1:'https://example.test/unbacked.png',screenshot2:'https://example.test/two.png'},3);
+  const unbackedShotFile=cases.caseMedia(unbackedShot)[0];
+  cases.toggleMedia(unbackedShot,unbackedShotFile);
+  assert.equal(requests.length,3,'unbacked remote images must not be previewed from their source URL');
+  assert.equal(cases.media.value[cases.key(unbackedShot,unbackedShotFile)].preview_url,undefined);
+  assert.match(cases.media.value[cases.key(unbackedShot,unbackedShotFile)].error,/本地快照不可用/);
+  assert.equal(unbackedShotFile.sourceUrl,'https://example.test/unbacked.png');
+  const unbackedQuery=caseContext.mapper({query:'remote query without snapshot',
+    query_images:['https://example.test/query.png']},4);
+  const unbackedQueryFile=cases.caseMedia(unbackedQuery)[0];
+  cases.toggleMedia(unbackedQuery,unbackedQueryFile);
+  assert.equal(requests.length,3,'query images without snapshots must not be previewed from their source URL');
+  assert.equal(cases.media.value[cases.key(unbackedQuery,unbackedQueryFile)].preview_url,undefined);
+  assert.match(cases.media.value[cases.key(unbackedQuery,unbackedQueryFile)].error,/本地快照不可用/);
+  assert.equal(unbackedQueryFile.sourceUrl,'https://example.test/query.png');
+  app.items.value=[{query:'remote',product_count:2,
+    video1:'https://example.test/one.mp4',video2:'https://example.test/two.mp4'}];
+  app.taskId.value='remote-task';app.mode.value='compare';
+  assert.equal(JSON.stringify(app.itemVideoLinks({index:0})),JSON.stringify([
+    {label:'产品1',url:'https://example.test/one.mp4'},
+    {label:'产品2',url:'https://example.test/two.mp4'}]));
   cases.changePage(3);assert.equal(cases.rows.value.length,5);cleanup();
 
   const panelRequests=[],panelContext={...caseContext,nextTick:async()=>{},caseMedia:cases.caseMedia,

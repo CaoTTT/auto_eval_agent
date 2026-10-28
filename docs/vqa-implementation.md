@@ -4,7 +4,7 @@
 
 ## 使用
 
-在统一“垂域视觉对比”入口中导入 JSONL 或编辑题卡。每题可上传提问图、填写授权本地路径、替换或移除图片。产品回答仍提供同题同类的录屏或长截图；不同题的回答证据类型可不同。
+在统一“垂域视觉对比”入口中导入 JSONL 或编辑题卡。每题可上传提问图、填写授权本地路径或 HTTP(S) URL、替换或移除图片。产品回答仍提供同题同类的录屏或长截图；不同题的回答证据类型可不同。
 
 ```jsonl
 {"id":"text-video","query":"介绍这款产品","video1":"data/a.mp4","video2":"data/b.mp4"}
@@ -13,7 +13,7 @@
 {"id":"image-shot","query":"图中有几个红色方块？","query_images":["data/question.png"],"screenshot1":"data/a.png","screenshot2":"data/b.png"}
 ```
 
-示例路径需替换为真实文件。`query_images` 缺省或 `[]` 表示文字题；`null`、字符串、空路径、多图及显式题型冲突会报错。题图打不开或超预算是该题技术失败，不产生产品零分，也不阻止同批其他题。
+示例路径需替换为真实文件，也可将 `query_images`、`screenshotN`、`videoN` 改为 HTTP(S) URL。`query_images` 缺省或 `[]` 表示文字题；`null`、字符串、空路径、多图及显式题型冲突会报错。题图打不开或超预算是该题技术失败，不产生产品零分，也不阻止同批其他题。
 
 任务级选用 `qa_competitor_compare@0.2-simplified`（1–5 分，bundle `0.2.1`）或 `qa_competitor_compare@0.3`（0–3 分，bundle `0.3.1`）。新任务冻结标准、实现版本、视觉策略和所选裁判的模型/采样参数。评分维度、Gate、准确性不汇总、总分与整体胜负置空等规则沿用原标准。
 
@@ -23,6 +23,8 @@
 - 原文件固化在 `runs/query_images/`，方向正常时原字节发送；EXIF 旋转保存独立 PNG 模型视图。原图、模型视图及请求输入均记录 SHA-256。
 - `POST /api/upload/query-image` 接收文件。`GET /api/query-images/{image_id}` 只访问已登记图片；`?original=true` 下载原文件。没有任意路径文件预览接口。
 - 本地路径默认限项目目录和 runs。外部题图目录配置在 `config/visual_modes/rich_content.yaml` 的 `query_images.allowed_roots`；回答视频/截图继续沿用 `OPERATION_VIDEO_ROOTS`。
+- HTTP(S) URL 只在评测准备阶段下载，历史记录保留原始 URL。录屏下载到 `runs/downloads/` 并在单题结束后清理；回答长截图按内容 SHA-256 固化为不可变快照；题图固化到 `runs/query_images/`，原始 URL 记录在 `source_url`。仅识别 `http://` 和 `https://`，不把 `data:`、`file:` 等当作远程媒体。
+- 远程下载失败、内容为空或图片无法解码会阻断该题，不静默跳过。下载超时默认 120 秒，可用 `AUTO_EVAL_MEDIA_DOWNLOAD_TIMEOUT_S` 调整；服务部署方应只接受可信数据源，并注意 HTTP(S) URL 下载带来的网络访问风险。
 - 配置中的数量、尺寸、上下文和请求体预算是本地保守限制，不代表特定厂商的承诺或精确计费；使用真实模型前应按实际网关核实。
 - 补跑重新判断，复用固化题图而不缓存评分。同 ID 更新是整条替换；已有图文题必须显式传 `query_images`，移除用 `[]`，并清除旧结果。运行中的图文任务暂不接受更新，避免不同图片版本并发覆盖。
 - 旧 bundle `0.2.0/0.3.0` 可继续文字题重跑；向旧任务新增题图须新建任务。多题 compare 不注入前题总结。已有 rich_content 多轮链路保持原行为。
@@ -56,4 +58,4 @@ node tests/test_vqa_ui.cjs
 & C:\workspace\venv\Scripts\python.exe -m uvicorn auto_eval.web.server:app --app-dir C:\workspace\auto_eval_vqa\src --host 127.0.0.1 --port 8057
 ```
 
-首版不支持多图、纯图无文字、text_only 产品回答、动态图片/PDF、任意 URL 抓图，也不新增上游手机采集自动化。验证使用合成图片及 mock 模型；真实模型网关集成和人工一致性校准尚未执行，不能据此宣称裁判准确性已验证。
+仍不支持单题多张提问图、纯图无文字、text_only 产品回答、动态图片/PDF，也不新增上游手机采集自动化；URL 输入仅支持 HTTP(S) 静态媒体。验证使用合成图片及 mock 模型；真实模型网关集成和人工一致性校准尚未执行，不能据此宣称裁判准确性已验证。

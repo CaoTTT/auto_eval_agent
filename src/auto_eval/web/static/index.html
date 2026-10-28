@@ -172,8 +172,8 @@
           <span v-if="datasetName" class="hint">数据集：{{ datasetName }}</span>
           <span v-if="errors.length" class="err">⚠ {{ errors.length }} 条未导入</span>
         </div>
-        <p v-if="mode==='compare'" class="hint">双产品示例：{"id":"c001","query":"查询天气","product_count":2,"video1":"./video_a.mp4","video2":"./video_b.mp4","answer1":"今天多云","answer2":"今天晴"}<br>三产品示例再增加："product_count":3、"video3"、"context3"、"answer3"。</p>
-        <p v-if="mode==='compare'" class="hint">长截图示例：{"id":"c002","query":"查询天气","screenshot1":"./product1.png","screenshot2":"./product2.png","answer1":"今天多云","answer2":"今天晴"}；三产品增加 screenshot3。路径须为服务可读取的本地文件，同一题不可混用截图与录屏。</p>
+        <p v-if="mode==='compare'" class="hint">双产品示例：{"id":"c001","query":"查询天气","product_count":2,"video1":"./video_a.mp4","video2":"https://example.com/video_b.mp4","answer1":"今天多云","answer2":"今天晴"}<br>三产品示例再增加："product_count":3、"video3"、"context3"、"answer3"。</p>
+        <p v-if="mode==='compare'" class="hint">长截图示例：{"id":"c002","query":"查询天气","screenshot1":"./product1.png","screenshot2":"https://example.com/product2.png","answer1":"今天多云","answer2":"今天晴"}；三产品增加 screenshot3。screenshotN、videoN、query_images 支持本地文件或 HTTP(S) URL，同一题不可混用截图与录屏。</p>
         <p v-else class="hint">示例：{"id":"rich_001","query":"北京明天天气怎么样","context":"当前地点北京","video_path":"data/rich_content/weather.mp4","category":"weather","answer_text":"北京明天晴","task_start_time":0,"task_end_time":18.5}</p>
         <p class="hint">支持 JSON 数组或单个对象，也支持每行一个对象的 JSONL。每条数据可添加 sessionid 等自定义字段，导出 Excel 时自动保留。</p>
         <details v-if="errors.length"><summary>导入错误明细</summary><pre>{{ errors.join('\n') }}</pre></details>
@@ -568,7 +568,7 @@
                   </details>
                 </td>
                 <td v-if="isVideoMode" class="row-export-cell">
-                  <a v-if="itemArtifactUrl(r, 'video')" :href="itemArtifactUrl(r, 'video')" class="row-export-link">下载</a>
+                  <template v-if="itemVideoLinks(r).length"><a v-for="video in itemVideoLinks(r)" :key="video.label" :href="video.url" class="row-export-link" target="_blank" rel="noopener">{{video.label}}</a></template>
                   <span v-else>—</span>
                 </td>
                 <td v-if="isVideoMode" class="row-export-cell">
@@ -647,6 +647,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20261012_model_input_evidence"></script>
+  <script type="module" src="/static/app.js?v=20261028_snapshot_preview"></script>
 </body>
 </html>

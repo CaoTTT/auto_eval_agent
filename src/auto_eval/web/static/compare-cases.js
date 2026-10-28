@@ -1,5 +1,9 @@
 import {ref, computed, watch, onUnmounted} from "https://unpkg.com/vue@3/dist/vue.esm-browser.js";
 
+export function isRemoteUrl(value) {
+  return /^https?:\/\/[^\s/]+/i.test(String(value || '').trim());
+}
+
 export function selectEvidenceMode(item) {
   const count = Number(item.productCount);
   if (count !== 2 && count !== 3) return '';
@@ -17,13 +21,36 @@ export function caseEvidenceMode(item) {
   return item._savedEvidenceMode || selectEvidenceMode(item);
 }
 
+function matchedMediaMeta(meta, inputPath) {
+  if (!meta) return {};
+  const input = String(inputPath || '').trim();
+  if (!input) return meta;
+  const matches = String(meta.source_url || '').trim() === input
+    || String(meta.original_path || '').trim() === input;
+  return matches ? meta : {};
+}
+
+function imagePreview(inputPath, meta, {direct = false} = {}) {
+  const matched = matchedMediaMeta(meta, inputPath);
+  const path = String(matched.original_path || inputPath || '').trim();
+  const sourceUrl = String(matched.source_url || '').trim()
+    || (isRemoteUrl(inputPath) ? String(inputPath).trim() : '');
+  const previewUrl = direct ? String(matched.preview_url || '').trim() : '';
+  return {
+    path, inputPath, meta: matched, sourceUrl, previewUrl,
+    downloadUrl: previewUrl ? `${previewUrl}?original=true` : '',
+  };
+}
+
 export function fromDatasetItem(item, index) {
   const source = item.source_data || {};
   const value = key => item[key] ?? source[key];
   const conversation = item.session_id && Number.isInteger(item.turn_index) && item.turn_index >= 1;
   return {
     _uiKey: `preview-${index}`, id: value('id') || '', query: value('query') || value('question') || '',
-    context: value('context') || '', queryImages: [...(item.query_images || [])],
+    context: value('context') || '',
+    queryImages: [...(item.query_images || [])].map((path, imageIndex) =>
+      item.query_image_meta?.[imageIndex]?.source_url || path),
     sessionId:conversation ? item.session_id : '', turnIndex:conversation ? item.turn_index : null,
     screenshotScope:conversation ? item.screenshot_scope || '' : '',
     queryImageMeta: item.query_image_meta || [], productCount: value('product_count') || (value('video3') || value('screenshot3') ? 3 : 2),
@@ -40,7 +67,10 @@ export function fromDatasetItem(item, index) {
 
 export function caseMedia(item) {
   const files = [];
-  (item.queryImages || []).forEach((path,i) => files.push({id:i ? `query${i+1}` : 'query', role:'query', label:`提问图片 ${i+1}`, path, meta:item.queryImageMeta?.[i]}));
+  (item.queryImages || []).forEach((path,i) => files.push({
+    id:i ? `query${i+1}` : 'query', role:'query', label:`提问图片 ${i+1}`,
+    ...imagePreview(path, item.queryImageMeta?.[i], {direct:true}),
+  }));
   const evidenceMode = caseEvidenceMode(item);
   if (!evidenceMode) return files;
   for (let n=1;n<=item.productCount;n++) {
@@ -48,9 +78,15 @@ export function caseMedia(item) {
     const rawPath = item[`${screenshot ? 'screenshot' : 'video'}${n}Path`];
     const path = typeof rawPath === 'string' ? rawPath.trim() : '';
     const source = item[`videoSource${n}`] || {};
-    if (path) files.push({id:`product${n}`, role:screenshot ? 'screenshot' : 'video',
-      label:`产品${n}${screenshot ? '回答长截图' : '录屏'}`, path,
-      meta:screenshot ? item[`screenshotMeta${n}`] : {original_path:source.input_path || source.path,original_sha256:source.sha256}});
+    if (!path) continue;
+    if (screenshot) {
+      files.push({id:`product${n}`, role:'screenshot', label:`产品${n}回答长截图`,
+        ...imagePreview(path, item[`screenshotMeta${n}`])});
+    } else {
+      files.push({id:`product${n}`, role:'video', label:`产品${n}录屏`, path,
+        inputPath:path, sourceUrl:isRemoteUrl(path) ? path : '',
+        meta:{original_path:source.input_path || source.path,original_sha256:source.sha256}});
+    }
   }
   return files;
 }
@@ -71,6 +107,18 @@ export const CompareCaseList = {
     async function openMedia(item,file) {
       const k=key(item,file);
       if(media.value[k])return;
+      if(file.previewUrl) {
+        media.value[k]={preview_url:file.previewUrl,download_url:file.downloadUrl || file.previewUrl,loading:false,snapshot:true};
+        return;
+      }
+      if(isRemoteUrl(file.path) && file.role==='video') {
+        media.value[k]={preview_url:file.path,download_url:file.path,loading:false,remote:true};
+        return;
+      }
+      if(isRemoteUrl(file.path)) {
+        media.value[k]={error:'本地快照不可用，原始 URL 仅作为来源信息',loading:false};
+        return;
+      }
       const controller=new AbortController();controllers.set(k,controller);
       media.value[k]={loading:true};
       try {
@@ -81,7 +129,7 @@ export const CompareCaseList = {
         if(!response.ok)throw Error(typeof data.detail==='string'?data.detail:'预览加载失败');
         if(controllers.get(k)===controller)media.value[k]={...data,loading:false};
       } catch(error) {
-        if(error.name!=='AbortError' && controllers.get(k)===controller)media.value[k]={error:error.message};
+        if(error.name!=='AbortError' && controllers.get(k)===controller)media.value[k]={error:error.message,loading:false};
       }
     }
     function toggleMedia(item,file) {media.value[key(item,file)] ? closeMedia(item,file) : openMedia(item,file);}
@@ -143,7 +191,7 @@ export const CompareCaseList = {
             <div class="case-media-list"><div v-for="file in caseMedia(entry.item)" :key="file.id" class="case-media">
               <div class="dataset-toolbar"><button @click="toggleMedia(entry.item,file)" :aria-expanded="!!media[key(entry.item,file)]">{{media[key(entry.item,file)]?'收起':'查看'}}{{file.label}}</button><span class="hint">{{basename(file.path)}}</span></div>
               <div v-if="media[key(entry.item,file)]" class="case-media-view">
-                <div v-if="media[key(entry.item,file)].preview_url" class="dataset-toolbar"><a :href="media[key(entry.item,file)].preview_url" target="_blank" rel="noopener">{{file.role==='video'?'在新窗口查看':'查看原图'}}</a><a :href="media[key(entry.item,file)].download_url">{{file.role==='video'?'下载录屏':'下载原图'}}</a></div>
+                <div v-if="media[key(entry.item,file)].preview_url || file.sourceUrl" class="dataset-toolbar"><a v-if="media[key(entry.item,file)].preview_url" :href="media[key(entry.item,file)].preview_url" target="_blank" rel="noopener">{{file.role==='video'?'在新窗口查看':'查看原图'}}</a><a v-if="media[key(entry.item,file)].download_url" :href="media[key(entry.item,file)].download_url">{{file.role==='video'?'下载录屏':'下载原图'}}</a><a v-if="file.sourceUrl && file.sourceUrl!==media[key(entry.item,file)].preview_url" :href="file.sourceUrl" target="_blank" rel="noopener">原始来源</a></div>
                 <p v-if="media[key(entry.item,file)].loading" class="hint">正在加载…</p>
                 <p v-else-if="media[key(entry.item,file)].error" class="err">{{media[key(entry.item,file)].error}}；请检查文件信息，收起后可重试。</p>
                 <template v-else>
@@ -153,14 +201,14 @@ export const CompareCaseList = {
               </div>
             </div><p v-if="!caseMedia(entry.item).length" class="hint">尚未关联图片或录屏。</p></div>
             <details class="case-file-info"><summary>文件信息{{readonly?'':'与编辑'}} · {{entry.item.id || '未设置题号'}}</summary>
-              <template v-if="readonly"><p v-for="file in caseMedia(entry.item)" :key="file.id" class="case-text">{{file.label}}：{{file.path}}</p></template>
+              <template v-if="readonly"><p v-for="file in caseMedia(entry.item)" :key="file.id" class="case-text">{{file.label}}：{{file.path}}<template v-if="file.sourceUrl"> · 来源：<a :href="file.sourceUrl" target="_blank" rel="noopener">{{basename(file.sourceUrl)}}</a></template></p></template>
               <template v-else>
                 <label class="dataset-label">题号</label><input v-model="entry.item.id" placeholder="Case 唯一编号">
-                <label class="dataset-label">提问原图路径（可选）</label><input :value="entry.item.queryImages?.[0] || ''" @input="$emit('query-path',entry.item,$event.target.value)" :disabled="entry.item.queryUploading" placeholder="后端可读取的图片路径">
+                <label class="dataset-label">提问原图路径（可选）</label><input :value="entry.item.queryImages?.[0] || ''" @input="$emit('query-path',entry.item,$event.target.value)" :disabled="entry.item.queryUploading" placeholder="本地图片路径或 HTTP(S) URL">
                 <label class="op-upload-btn"><input type="file" accept=".png,.jpg,.jpeg,.webp" hidden :disabled="entry.item.queryUploading" @change="$emit('query-upload',$event,entry.index)">上传 / 替换提问图片</label>
                 <button v-if="entry.item.queryImages?.length" @click="$emit('query-path',entry.item,'')" :disabled="entry.item.queryUploading">移除提问图片</button>
                 <span v-if="entry.item.queryUploading">上传中…</span><p v-if="entry.item.queryUploadError" class="err">{{entry.item.queryUploadError}}</p>
-                <template v-for="n in entry.item.productCount" :key="n"><label class="dataset-label">产品 {{n}} {{entry.item.evidenceMode==='long_screenshot'?'长截图':'录屏'}}路径</label><input v-if="entry.item.evidenceMode==='long_screenshot'" v-model="entry.item['screenshot'+n+'Path']" placeholder="回答长截图路径"><input v-else v-model="entry.item['video'+n+'Path']" placeholder="录屏路径"></template>
+                <template v-for="n in entry.item.productCount" :key="n"><label class="dataset-label">产品 {{n}} {{entry.item.evidenceMode==='long_screenshot'?'长截图':'录屏'}}路径</label><input v-if="entry.item.evidenceMode==='long_screenshot'" v-model="entry.item['screenshot'+n+'Path']" placeholder="本地图片路径或 HTTP(S) URL"><input v-else v-model="entry.item['video'+n+'Path']" placeholder="本地录屏路径或 HTTP(S) URL"></template>
               </template>
             </details>
           </div>

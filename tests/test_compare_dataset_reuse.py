@@ -99,7 +99,8 @@ async def test_file_check_reports_case_and_role_without_calling_model(environmen
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app),base_url="http://test") as client:
         data=(await client.post("/api/dataset-files/validate",json={"files":[
             {"index":0,"role":"query","path":"q.png","label":"提问图片"},
+            {"index":1,"role":"video","path":"https://example.test/video.mp4","label":"产品1录屏"},
             {"index":12,"role":"video","path":"missing.mp4","label":"产品2录屏"}
         ]})).json()
-        assert data["checked"]==2 and len(data["issues"])==1
+        assert data["checked"]==3 and len(data["issues"])==1
         assert data["issues"][0]["index"]==12 and data["issues"][0]["label"]=="产品2录屏"

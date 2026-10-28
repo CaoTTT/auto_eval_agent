@@ -129,6 +129,19 @@ def test_video_download_rejects_replaced_original(tmp_path,monkeypatch):
     assert exc.value.status_code==409
 
 
+def test_remote_compare_video_export_redirects_selected_product(monkeypatch):
+    from auto_eval.web import server
+    data={"items":[{"video1":"https://example.test/one.mp4",
+                    "video2":"https://example.test/two.mp4"}]}
+    monkeypatch.setattr(server,"peek_task",lambda *a,**k:None)
+    monkeypatch.setattr(server,"load_snapshot",lambda *a:data)
+    response=server.api_export_item("test",0,format="video",product_no=2)
+    assert response.status_code==307
+    assert response.headers["location"]=="https://example.test/two.mp4"
+    with pytest.raises(Exception, match="没有原始视频路径"):
+        server.api_export_item("test",0,format="video",product_no=3)
+
+
 def test_real_video_replacement_preserves_old_frames_and_extracts_new_content(tmp_path):
     ffmpeg=shutil.which("ffmpeg")
     if not ffmpeg:

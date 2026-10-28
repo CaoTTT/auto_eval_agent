@@ -470,7 +470,9 @@ async def test_runner_history_and_context_budget(tmp_path, monkeypatch, count, o
     assert len(history._item_visual_streams(restored.items[0])) == count
     assert "base64" not in json.dumps(snapshot)
     for n in range(1,count+1):
-        assert not Path(item[f"screenshot_meta{n}"]["original_path"]).is_absolute()
+        stored = Path(item[f"screenshot_meta{n}"]["original_path"])
+        persisted = stored if stored.is_absolute() else video_prepare.PROJECT_ROOT / stored
+        assert persisted.is_file()
     target = history.write_frames_zip(snapshot, tmp_path / "evidence.zip")
     with zipfile.ZipFile(target) as archive:
         assert sum(name.endswith("screenshot.json") for name in archive.namelist()) == count

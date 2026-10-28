@@ -1,4 +1,4 @@
-import { createApp, ref, computed, onMounted, onUnmounted, nextTick, selectEvidenceMode } from "./compare-data.js?v=20260920_audit";
+import { createApp, ref, computed, onMounted, onUnmounted, nextTick, selectEvidenceMode, isRemoteUrl } from "./compare-data.js?v=20261028_snapshot_preview";
 
 createApp({
   setup() {
@@ -484,7 +484,7 @@ createApp({
     const formatHint = computed(
       () =>
         ({
-          compare: "支持文字题与图文题混合导入：query_images 可选填一张提问图片路径；product_count 为2或3。每题优先使用全产品长截图，否则回退全产品录屏；无法统一证据的题目在导入时拒绝。",
+          compare: "支持文字题与图文题混合导入：query_images 可选填一张提问图片路径或 HTTP(S) URL；product_count 为2或3。每题优先使用全产品长截图，否则回退全产品录屏；无法统一证据的题目在导入时拒绝。",
           rich_content: "可逐题上传，也可导入 JSON / JSONL / CSV：query、context(可选)、video_path、category/answer_text/task_start_time/task_end_time(均可选)；sessionid 等额外字段会保留到 Excel 导出。普通图片不算挂卡，回答区域蓝色文字按 Superlink 统计。",
         }[mode.value])
     );
@@ -987,7 +987,9 @@ createApp({
         const conversation = raw.session_id && Number.isInteger(raw.turn_index) && raw.turn_index >= 1;
         return {...newOpItem(), id:item.id || '', query:item.query || item.question || '',
           context:item.context || '', category:item.category || '',
-          queryImages:[...(item.query_images || [])], queryImageMeta:item.query_image_meta || [],
+          queryImages:[...(item.query_images || [])].map((path, imageIndex) =>
+            item.query_image_meta?.[imageIndex]?.source_url || path),
+          queryImageMeta:item.query_image_meta || [],
           productCount:item.product_count || (item.video3 || item.screenshot3 ? 3 : 2),
           evidenceMode:item.evidence_mode || (item.screenshot1 ? 'long_screenshot' : 'video_frames'),
           ...Object.fromEntries([1,2,3].flatMap(n => [
@@ -2155,11 +2157,31 @@ createApp({
       if (!taskId.value || loadingTaskId.value) return;
       window.open(`/api/eval/${encodeURIComponent(taskId.value)}/export?format=model_input_evidence`);
     }
+    function itemVideoLinks(result) {
+      const index = Number(result && result.index);
+      if (!taskId.value || !Number.isInteger(index) || index < 0) return [];
+      const item = items.value[index] || {};
+      const source = item.source_data || {};
+      if (mode.value === 'compare' && (item.evidence_mode === 'long_screenshot' || item.screenshot1)) return [];
+      const entries = mode.value === 'compare'
+        ? Array.from({length: item.product_count || 2}, (_, offset) => {
+            const productNo = offset + 1;
+            return {label: `产品${productNo}`, videoNo: productNo,
+              path: item[`video${productNo}`] || source[`video${productNo}`] || ''};
+          })
+        : [{label: '原视频', videoNo: null,
+            path: item.video_path || source.video_path || (item.media || [])[0] || ''}];
+      return entries.filter(entry => String(entry.path || '').trim()).map(entry => ({
+        label: entry.label,
+        url: isRemoteUrl(entry.path)
+          ? String(entry.path).trim()
+          : `/api/eval/${taskId.value}/items/${index}/export?format=video${entry.videoNo ? `&product_no=${entry.videoNo}` : ''}`,
+      }));
+    }
     function itemArtifactUrl(result, format) {
+      if (format === 'video') return itemVideoLinks(result)[0]?.url || "";
       const index = Number(result && result.index);
       if (!taskId.value || !Number.isInteger(index) || index < 0) return "";
-      const item = items.value[index] || {};
-      if (format === 'video' && (item.evidence_mode === 'long_screenshot' || item.screenshot1)) return "";
       return `/api/eval/${taskId.value}/items/${index}/export?format=${encodeURIComponent(format)}`;
     }
 
@@ -2228,7 +2250,7 @@ createApp({
       evidenceImages, evidenceImageErrors, evidenceExpanded, setEvidenceExpanded, setPageEvidenceExpanded,
       skillTabs, filteredResults, pagedResults, pageCount, resultTableWidth,
       formatHint, resultCols, opItems, pagedOpItems, opPreparing, canSubmit,
-      switchMode, onOpManifestFile, submit, cell, columnWidth, exportCsv, exportJson, exportXlsx, exportFrames, exportModelInputEvidence, itemArtifactUrl, addOpItem, removeOpItem, onOpVideo, onOpDrop,
+      switchMode, onOpManifestFile, submit, cell, columnWidth, exportCsv, exportJson, exportXlsx, exportFrames, exportModelInputEvidence, itemArtifactUrl, itemVideoLinks, addOpItem, removeOpItem, onOpVideo, onOpDrop,
       loadHistory, loadQueue, cancelQueuedTask, reprioritizeQueuedTask, loadHistoryTask, delHistory, editHistoryNote, cancelHistoryNote, saveHistoryNote, formatTime,
       selectSkill, resetResultPage, changePage,
       changeProgressPage, changeOpPage, changeResultPageSize, paginationPages, setTablePage, jumpTablePage,

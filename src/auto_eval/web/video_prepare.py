@@ -23,6 +23,15 @@ from ..media import (
 from ..config import VisualModeProfile
 from ..paths import PROJECT_ROOT, RUNS_DIR
 from ..preparation import check_preparation
+from ..query_images import _snapshot_bytes
+from ..remote_media import (
+    TEMPORARY_DOWNLOAD_PATHS_FIELD,
+    download_remote_image,
+    download_remote_video,
+    is_remote_url,
+    remote_filename,
+    remove_temporary_downloads,
+)
 
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"}
@@ -69,6 +78,14 @@ def _cache_lock(directory: Path):
 def _safe_name(value: str, fallback: str) -> str:
     safe = re.sub(r"[^0-9a-zA-Z_-]", "_", value.strip())
     return safe or fallback
+
+
+def _path_from_base(path: Path, base_dir: Path) -> str:
+    """Prefer a portable relative path, but keep absolute paths across drives."""
+    try:
+        return Path(os.path.relpath(path, base_dir)).as_posix()
+    except ValueError:
+        return path.resolve().as_posix()
 
 
 def operation_video_roots(base_dir: Path = PROJECT_ROOT) -> list[Path]:
@@ -337,6 +354,7 @@ def prepare_session_visual_compare_item(
     runs_dir = RUNS_DIR,
     probe_fn = probe_duration,
     extract_fn = extract_scene_keyframes,
+    download_fn: Callable[[str, Path], Path] = download_remote_video,
 ) -> dict:
     """按 Web 会话准备双/三产品视觉对比关键帧。"""
     product_count = item.get("product_count")
@@ -362,46 +380,67 @@ def prepare_session_visual_compare_item(
     total_frame_count = 0
     first_video_name = ""
     first_duration = 0.0
+    temporary_downloads: list[Path] = []
 
-    for product_no in range(1, product_count + 1):
-        check_preparation()
-        raw_path = str(item.get(f"video{product_no}") or "").strip()
-        if not raw_path:
-            raise ValueError(f"缺少 video{product_no}")
-        video_path = resolve_operation_video_path(raw_path, base_dir=base_dir)
-        source_identity = _video_identity(video_path)
-        duration = float(probe_fn(video_path))
-        if duration <= 0:
-            raise ValueError(
-                f"无法读取视频{product_no}或视频时长为0：{raw_path}"
+    try:
+        for product_no in range(1, product_count + 1):
+            check_preparation()
+            raw_path = str(item.get(f"video{product_no}") or "").strip()
+            if not raw_path:
+                raise ValueError(f"缺少 video{product_no}")
+            remote = is_remote_url(raw_path)
+            if remote:
+                video_path = download_fn(
+                    raw_path,
+                    runs_dir / "downloads" / safe_session,
+                ).resolve()
+                temporary_downloads.append(video_path)
+            else:
+                video_path = resolve_operation_video_path(raw_path, base_dir=base_dir)
+            source_identity = _video_identity(video_path)
+            if remote:
+                source_identity["path"] = raw_path
+            duration = float(probe_fn(video_path))
+            if duration <= 0:
+                raise ValueError(
+                    f"无法读取视频{product_no}或视频时长为0：{raw_path}"
+                )
+            extract_kwargs, cache_key = _rich_content_timing(
+                item,
+                duration,
+                profile,
+                video_path=raw_path if remote else str(video_path),
             )
-        extract_kwargs, cache_key = _rich_content_timing(
-            item,
-            duration,
-            profile,
-            video_path=str(video_path),
-        )
-        frame_dir = base_frame_dir / f"video{product_no}"
-        frames = _extract_frames(
-            video_path,
-            frame_dir,
-            extract_fn=extract_fn,
-            cache_key=cache_key,
-            extract_kwargs=extract_kwargs,
-            duration=duration,
-            source_identity=source_identity,
-        )
-        if not frames:
-            raise ValueError(f"视频{product_no}抽帧失败：{raw_path}")
+            frame_dir = base_frame_dir / f"video{product_no}"
+            frames = _extract_frames(
+                video_path,
+                frame_dir,
+                extract_fn=extract_fn,
+                cache_key=cache_key,
+                extract_kwargs=extract_kwargs,
+                duration=duration,
+                source_identity=None if remote else source_identity,
+            )
+            if not frames:
+                raise ValueError(f"视频{product_no}抽帧失败：{raw_path}")
 
-        media.append(str(video_path))
-        total_frame_count += len(frames)
-        first_video_name = first_video_name or video_path.name
-        first_duration = first_duration or duration
-        prepared[f"video{product_no}_path"] = str(video_path)
-        prepared[f"video_source{product_no}"] = {**source_identity, "input_path": raw_path}
-        prepared[f"frames{product_no}"] = [str(frame) for frame in frames]
-        prepared[f"duration{product_no}"] = round(duration, 2)
+            public_video = raw_path if remote else str(video_path)
+            media.append(public_video)
+            total_frame_count += len(frames)
+            first_video_name = first_video_name or (
+                remote_filename(raw_path, "remote_video.mp4")
+                if remote
+                else video_path.name
+            )
+            first_duration = first_duration or duration
+            prepared[f"video{product_no}"] = public_video
+            prepared[f"video{product_no}_path"] = str(video_path)
+            prepared[f"video_source{product_no}"] = {**source_identity, "input_path": raw_path}
+            prepared[f"frames{product_no}"] = [str(frame) for frame in frames]
+            prepared[f"duration{product_no}"] = round(duration, 2)
+    except BaseException:
+        remove_temporary_downloads(temporary_downloads, runs_dir)
+        raise
 
     prepared.update({
         "video_name": first_video_name,
@@ -409,6 +448,10 @@ def prepare_session_visual_compare_item(
         "frame_count": total_frame_count,
         "duration": round(first_duration, 2),
     })
+    if temporary_downloads:
+        prepared[TEMPORARY_DOWNLOAD_PATHS_FIELD] = [
+            str(path) for path in temporary_downloads
+        ]
     return prepared
 
 
@@ -421,6 +464,7 @@ def prepare_session_long_screenshot_item(
     total_items: int,
     base_dir: Path = PROJECT_ROOT,
     runs_dir: Path = RUNS_DIR,
+    download_fn: Callable[[str, Path], Path] = download_remote_image,
 ) -> dict:
     """复用现有允许目录和任务命名；不进入视频探测或抽帧。"""
     from ..long_screenshot import prepare_long_screenshot
@@ -436,16 +480,39 @@ def prepare_session_long_screenshot_item(
     prepared.update(product_count=count, evidence_mode=mode, frame_count=0, media=[])
     for product_no in range(1, count + 1):
         check_preparation()
-        path = Path(item[f"screenshot{product_no}"]).expanduser()
-        path = (path if path.is_absolute() else base_dir / path).resolve()
+        raw_path = str(item[f"screenshot{product_no}"] or "").strip()
+        remote = is_remote_url(raw_path)
+        product_root = root / f"product{product_no}"
+        if remote:
+            downloaded = None
+            try:
+                downloaded = download_fn(
+                    raw_path,
+                    runs_dir / "downloads" / _safe_name(session_name, "compare"),
+                ).resolve()
+                content = downloaded.read_bytes()
+                suffix = downloaded.suffix.lower()
+                product_root.mkdir(parents=True, exist_ok=True)
+                path = product_root / (
+                    f"source_{hashlib.sha256(content).hexdigest()}{suffix}"
+                )
+                _snapshot_bytes(path, content)
+            finally:
+                if downloaded is not None:
+                    downloaded.unlink(missing_ok=True)
+        else:
+            path = Path(raw_path).expanduser()
+            path = (path if path.is_absolute() else base_dir / path).resolve()
         if not any(path.is_relative_to(allowed) for allowed in operation_video_roots(base_dir)):
             raise ValueError("截图路径不在允许目录中；外部目录需通过 OPERATION_VIDEO_ROOTS 配置")
-        meta = prepare_long_screenshot(path, root / f"product{product_no}", profile.long_screenshot)
+        meta = prepare_long_screenshot(path, product_root, profile.long_screenshot)
+        if remote:
+            meta["source_url"] = raw_path
         # 运行时和快照均保存相对项目根目录的路径，不依赖启动时工作目录。
         for record, key in [(meta, "original_path"), *[(part, "path") for part in meta["slices"]]]:
-            record[key] = Path(os.path.relpath(record[key], base_dir)).as_posix()
+            record[key] = _path_from_base(Path(record[key]), base_dir)
         prepared[f"screenshot_meta{product_no}"] = meta
-        prepared[f"screenshot{product_no}"] = meta["original_path"]
+        prepared[f"screenshot{product_no}"] = raw_path if remote else meta["original_path"]
         prepared[f"frames{product_no}"] = [part["path"] for part in meta["slices"]]
         prepared["frame_count"] += meta["split_count"]
         prepared["media"].append(meta["original_path"])

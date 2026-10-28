@@ -176,6 +176,43 @@ def test_total_request_budget_checked_without_new_query_images(data):
     assert items[1]["input_diagnostic_status"] == "blocked"
 
 
+def test_remote_multi_turn_images_are_snapshotted_before_temp_cleanup(data, monkeypatch):
+    items, profile, judge = data
+    sources = {
+        "https://example.test/question.png": Path(items[0]["screenshot1"]),
+        "https://example.test/answer.png": Path(items[0]["screenshot2"]),
+    }
+    downloads = []
+
+    def download(url, output_dir):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        target = output_dir / f"download-{len(downloads)}.png"
+        target.write_bytes(sources[url].read_bytes())
+        downloads.append(target)
+        return target
+
+    monkeypatch.setattr(conversation_prepare, "download_remote_image", download)
+    monkeypatch.setattr(query_images, "download_remote_image", download)
+    items[0]["query_images"] = ["https://example.test/question.png"]
+    items[0]["screenshot1"] = "https://example.test/answer.png"
+    parsed, errors = parse_jsonl(json.dumps(items), "compare")
+    assert not errors
+    limits = resolve_image_limits(judge, profile)
+    service = ConversationPreparation(parsed, "remote", profile, limits)
+
+    bundle = service.prepare(parsed[1])
+    turn = bundle["turns"][0]
+    query_meta = turn["query_image_meta"][0]
+    answer_meta = turn["screenshot_meta1"]
+    assert query_meta["source_url"] == "https://example.test/question.png"
+    assert answer_meta["source_url"] == "https://example.test/answer.png"
+    assert turn["screenshot1"] == "https://example.test/answer.png"
+    assert Path(query_meta["original_path"]).is_file()
+    assert Path(answer_meta["original_path"]).is_file()
+    assert len(downloads) == 2
+    assert all(not path.exists() for path in downloads)
+
+
 async def test_runner_failure_does_not_block_later_turn_and_restore_third_only(data, monkeypatch):
     items, profile, judge = data
     parsed, errors = parse_jsonl(json.dumps(items), "compare")

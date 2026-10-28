@@ -1,9 +1,9 @@
 import {createApp as vueCreateApp, ref, computed, watch, onMounted, onUnmounted, nextTick} from "https://unpkg.com/vue@3/dist/vue.esm-browser.js";
-import {CompareCaseList, fromDatasetItem, caseMedia, caseEvidenceMode, selectEvidenceMode} from "./compare-cases.js?v=20260920_audit";
+import {CompareCaseList, fromDatasetItem, caseMedia, caseEvidenceMode, selectEvidenceMode, isRemoteUrl} from "./compare-cases.js?v=20261028_snapshot_preview";
 import {HumanComparePanel} from "./human-compare.js?v=20260916_human_answers";
 import {ScreenshotEvidence} from "./screenshot-evidence.js?v=20260920_audit";
 export {ref, computed, onMounted, onUnmounted, nextTick};
-export {selectEvidenceMode};
+export {selectEvidenceMode, isRemoteUrl};
 
 export const CompareDatasetPanel = {
   components:{CompareCaseList},
@@ -44,7 +44,7 @@ export const CompareDatasetPanel = {
       fileController?.abort();const controller=new AbortController();fileController=controller;
       fileChecking.value=true;fileChecked.value=false;fileIssues.value=[];fileError.value='';
       try {
-        const files=props.items.flatMap((item,index)=>caseMedia(item).map(file=>({path:file.path,role:file.role,index,label:file.label})));
+        const files=props.items.flatMap((item,index)=>caseMedia(item).map(file=>({path:file.inputPath || file.path,role:file.role,index,label:file.label})));
         const r=await fetch('/api/dataset-files/validate',{method:'POST',signal:controller.signal,headers:{'Content-Type':'application/json'},body:JSON.stringify({files})});
         const data=await r.json();if(!r.ok)throw Error(typeof data.detail==='string'?data.detail:'文件检查失败');
         if(fileController!==controller || disposed)return;
@@ -73,7 +73,7 @@ export const CompareDatasetPanel = {
         <button @click="toggleHistory" :aria-expanded="historyOpen" :disabled="busy">{{historyOpen?'收起历史数据':'选择历史数据'}}</button>
         <span v-if="busy" class="hint">正在解析…</span>
       </div>
-      <details class="dataset-format-help"><summary>JSON / JSONL · 查看格式与证据选择规则</summary><p>JSON 支持数组或单个对象，JSONL 每行一个 Case。可同时填写 screenshot1/2 与 video1/2；所有产品长截图齐全时优先使用长截图，否则只有所有产品录屏齐全才回退录屏。无法统一证据层的 Case 拒绝导入，其余 Case 正常载入。可选 query_images 单张提问原图；三产品填写 product_count: 3 及产品3字段。证据选择按路径字段是否完整判断，文件可用性可在下方检查。相对路径以服务器项目目录为基准。自定义字段会保留到 Excel 导出。</p></details>
+      <details class="dataset-format-help"><summary>JSON / JSONL · 查看格式与证据选择规则</summary><p>JSON 支持数组或单个对象，JSONL 每行一个 Case。可同时填写 screenshot1/2 与 video1/2；所有产品长截图齐全时优先使用长截图，否则只有所有产品录屏齐全才回退录屏。screenshotN、videoN 和 query_images 均可填本地路径或 HTTP(S) URL；URL 在评测时由后端下载，评测记录保留原始 URL。三产品填写 product_count: 3 及产品3字段。证据选择按路径字段是否完整判断。相对路径以服务器项目目录为基准。自定义字段会保留到 Excel 导出。</p></details>
       <section v-if="historyOpen" class="dataset-history">
         <div class="dataset-toolbar"><strong>历史测评数据</strong><input v-model="search" placeholder="搜索文件名、备注或任务编号" @keyup.enter="loadDatasets(1)" aria-label="搜索历史数据"><button @click="loadDatasets(1)">搜索 / 刷新</button></div>
         <p class="hint">复用该次任务提交的数据；同名文件的不同任务分别保留，不会覆盖原结果。</p>
