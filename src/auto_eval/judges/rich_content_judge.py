@@ -115,7 +115,7 @@ class RichContentJudge:
         self,
         *,
         question: str,
-        context: str,
+        context: str = "",
         answer_text: str,
         frames: list[str],
         stream_callback=None,
@@ -128,7 +128,6 @@ class RichContentJudge:
         )
         user = self._user_template.render(
             question=question,
-            context=context,
             answer_text=answer_text,
             frame_count=len(frames),
         )

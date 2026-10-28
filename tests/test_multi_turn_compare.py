@@ -39,6 +39,7 @@ def data(tmp_path, monkeypatch):
             if n < 3:
                 item[f"screenshot{n}"] = str(path)
                 item[f"answer{n}"] = f"产品{n}自己的回答{t}"
+                item[f"context{n}"] = f"产品{n}第{t}轮背景"
         items.append(item)
     items[0]["query_images"] = [items[0]["screenshot1"]]
     items[2]["query_images"] = [items[2]["screenshot1"], items[2]["screenshot2"]]
@@ -109,7 +110,7 @@ def test_prefix_order_roles_hashes_and_no_future(data):
 
 def test_three_products_three_turns_and_shared_images_once(data):
     for item in data[0]:
-        item.update(product_count=3, screenshot3=item["screenshot1"].replace("p1-", "p3-"), answer3="第三产品")
+        item.update(product_count=3, screenshot3=item["screenshot1"].replace("p1-", "p3-"), answer3="第三产品", context3="产品3背景")
     items, service = prepare(data)
     _, parts, metadata, _, _ = request(service.prepare(items[2]))
     assert len(metadata) == 12  # 3 shared question images + 9 answers
@@ -265,6 +266,38 @@ async def test_preflight_checks_full_prefix_without_model_calls(data, monkeypatc
     assert [r["request_budget_report"]["actual_image_count"] for r in report["turns"]] == [3, 5, 9]
 
 
+@pytest.mark.parametrize("count", [2, 3])
+async def test_compact_1022_preflight_uses_same_count_template_as_evaluation(data, monkeypatch, count):
+    from auto_eval.judges import conversation_prompt
+    from auto_eval.judges.compare_protocols import V1022_COMPARE_PROTOCOL_ID
+    from auto_eval.judges.visual_compare_prompt_v02_1022 import templates_1022
+
+    items, profile, judge = data
+    for item in items:
+        item["product_count"] = count
+        if count == 3:
+            item["screenshot3"] = str(Path(item["screenshot1"]).with_name(f"p3-t{item['turn_index']}.png"))
+            item["answer3"] = "第三产品回答"
+            item["context3"] = "产品3背景"
+    cfg = AppConfig(judges=[judge], visual_modes={"rich_content": profile})
+    monkeypatch.setattr(server, "cfg", lambda: cfg)
+    rendered = []
+    original = conversation_prompt.assemble_conversation
+
+    def capture(system, *args, **kwargs):
+        rendered.append(system)
+        return original(system, *args, **kwargs)
+
+    monkeypatch.setattr(conversation_prompt, "assemble_conversation", capture)
+    report = await server.api_compare_preflight(server.EvalReq(
+        mode="compare", items=items, evaluation_profile=V1022_COMPARE_PROTOCOL_ID))
+    assert report["blocked_turn_count"] == 0, report
+    expected = templates_1022(count)[0].render(
+        persona=judge.persona, product_count=count, evidence_mode="long_screenshot")
+    assert rendered == [expected] * len(items)
+    assert ("answer3_input_status" in rendered[0]) == (count == 3)
+
+
 def test_direct_api_rejects_video_before_field_cleanup(data):
     items, profile, judge = data
     items[1]["media"] = [{"type": "video", "path": "a"}]
@@ -282,6 +315,7 @@ def test_direct_api_rejects_video_before_field_cleanup(data):
 @pytest.mark.parametrize("evidence", ["video", "screenshot"])
 def test_legacy_metadata_import_and_direct_api_remain_single_turn(metadata, evidence):
     original = {"id": "old", "query": "旧评测问题", "product_count": 2,
+                "context1": "产品1背景", "context2": "产品2背景",
                 f"{evidence}1": "a.mp4" if evidence == "video" else "a.png",
                 f"{evidence}2": "b.mp4" if evidence == "video" else "b.png", **metadata}
     parsed, errors = parse_jsonl(json.dumps([original]), "compare")
@@ -306,7 +340,8 @@ def test_legacy_session_metadata_cannot_bypass_single_turn_image_limit():
 def test_legacy_row_with_same_business_id_survives_invalid_multiturn_group(data):
     items, _, _ = data
     items[1]["turn_index"] = 0
-    legacy = {"id": "legacy", "query": "single", "session_id": "s", "video1": "a.mp4", "video2": "b.mp4"}
+    legacy = {"id": "legacy", "query": "single", "session_id": "s", "video1": "a.mp4", "video2": "b.mp4",
+              "context1": "产品1背景", "context2": "产品2背景"}
     parsed, errors = parse_jsonl(json.dumps([*items, legacy]), "compare")
     assert errors and len(parsed) == 1
     assert parsed[0]["id"] == "legacy" and not is_conversation(parsed[0])

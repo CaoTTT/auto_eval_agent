@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field, StrictBool
@@ -40,9 +40,15 @@ class JudgeConfig(BaseModel):
     api_key_env: str | None = None
     model: str | None = None
     persona: str | None = None  # end_user | ...
-    temperature: float = 0.0
-    top_p: float | None = None  # None=不发送，避免不支持该参数的网关 400
-    seed: int | None = None  # None=不发送；同 seed 可复现但不降跨 seed 方差
+    temperature: float = Field(default=0.0, ge=0, le=2, allow_inf_nan=False)
+    top_p: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    # Optional sampling settings are omitted when None for gateway compatibility.
+    top_k: int | None = Field(default=None, ge=1, strict=True)
+    seed: int | None = Field(default=None, strict=True)  # 固定种子仅尽力稳定，服务端可能不支持
+    frequency_penalty: float | None = Field(default=None, ge=-2, le=2, allow_inf_nan=False)
+    presence_penalty: float | None = Field(default=None, ge=-2, le=2, allow_inf_nan=False)
+    max_tokens: int | None = Field(default=None, gt=0, strict=True)
+    n: int | None = Field(default=None, ge=1, le=1, strict=True)
     concurrency: int = 4
     connect_timeout_s: float = 10.0
     read_timeout_s: float = 90.0
@@ -54,6 +60,8 @@ class JudgeConfig(BaseModel):
     vl_high_resolution_images: bool = False
     enable_thinking: StrictBool | None = None
     rate_limit: RateLimitConfig | None = None
+    # 仅新对比协议显式使用；部署方须先确认模型及网关支持，不能隐式切换思考模式。
+    compare_structured_output: Literal["off", "json_object", "json_schema"] = "off"
 
     def api_key(self) -> str | None:
         return os.environ.get(self.api_key_env) if self.api_key_env else None
@@ -125,10 +133,13 @@ class JudgeModelProfile(BaseModel):
     default_enable_thinking: StrictBool | None = None
     rate_limit: RateLimitConfig | None = None
     total_timeout_s: float | None = Field(default=None, gt=0)
+    base_url: str | None = None
+    api_key_env: str | None = None
 
 
 class AppConfig(BaseModel):
     judges: list[JudgeConfig]
+    models: list[str] = Field(default_factory=list)  # 可选模型名列表（全局设置只能从中选择）
     visual_modes: dict[str, VisualModeProfile] = Field(default_factory=dict)
     judge_model_profiles: list[JudgeModelProfile] = Field(default_factory=list)
     default_judge_model_profile: str | None = None
@@ -157,9 +168,10 @@ def load_config(config_dir: str | Path) -> AppConfig:
     judges_data = _read_yaml(config_dir / "judges.yaml") or {}
 
     judges = [JudgeConfig(**j) for j in (judges_data.get("judges") or [])]
+    models = [str(m) for m in (judges_data.get("models") or [])]
     visual_modes = _load_visual_modes(config_dir)
     config = AppConfig(
-        judges=judges, visual_modes=visual_modes,
+        judges=judges, models=models, visual_modes=visual_modes,
         judge_model_profiles=judges_data.get("judge_model_profiles") or [],
         default_judge_model_profile=judges_data.get("default_judge_model_profile"),
     )

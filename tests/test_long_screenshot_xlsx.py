@@ -394,6 +394,7 @@ def test_imported_video_fallback_exports_available_original_and_missing_file_rea
     path = tmp_path / "available.png"
     raw = make_image(path, color="blue")
     source = {"id": "fallback", "query": "q", "product_count": 3,
+              "context1": "产品1背景", "context2": "产品2背景", "context3": "产品3背景",
               "video1": "a.mp4", "video2": "b.mp4", "video3": "c.mp4",
               "screenshot2": str(path), "screenshot3": str(tmp_path / "missing.png")}
     parsed = server.api_parse(server.ParseReq(mode="compare", jsonl=json.dumps(source)))

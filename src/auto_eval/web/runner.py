@@ -10,26 +10,24 @@ import time
 import traceback
 from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ..paths import RUNS_DIR
 from ..preparation import PreparationLimiter, run_preparation, preparation_limit, preparation_concurrency
 from ..remote_media import cleanup_item_downloads
 from ..timing import StageTimings, collect_timings, timing_span
-from ..task_control import PauseRequested, bind_pause_check, check_pause, pause_aware
-from ..request_throttle import (
-    recommended_concurrency, supports_bailian_pacing,
-    wait_for_active, SECOND_REQUEST_LIMIT,
-)
-from ..config import AppConfig, VisualModeProfile
+from ..task_control import PauseRequested, bind_pause_check, check_pause, pause_aware, wait_for_active
+from .scheduler import MAX_CONCURRENCY, MODEL_LIMITER, PIPELINE_LIMITER, PREP_LIMITER, get_settings
+from ..config import AppConfig, JudgeConfig, VisualModeProfile
+from ..compare_input import normalize_product_contexts
 from ..query_images import prepare_query_images, QueryImageError, PREPARED_FIELDS
 from ..judges import (
     JudgeClient,
     RichContentJudge,
     VisualCompareJudge,
 )
-from ..judges.base import flush_web_trace_records
+from ..judges.base import JudgeOutputEmptyError, flush_web_trace_records
 from ..judges.compare_protocols import resolve_compare_protocol
 from ..conversation import is_conversation
 from .protocol_identity import require_snapshot_protocol
@@ -58,6 +56,7 @@ from .tasks import (
 
 
 logger = logging.getLogger(__name__)
+_EVALUATION_TIMEZONE = timezone(timedelta(hours=8))
 MAX_PROGRESS_EVENTS_PER_ITEM = 100
 COMPARE_DIMENSIONS = (
     "understanding",
@@ -311,7 +310,6 @@ async def run_eval(task: Task, cfg: AppConfig) -> None:
             await _persist_task_and_wait(task)  # 退休前最后一次落盘，磁盘先于内存下线
             retire_task(task)
 
-
 def _runtime_conversation(item: dict) -> bool:
     # Historical CSV bookkeeping used a zero-based turn without session_id.
     # A business session_id alone also does not declare a conversation.
@@ -319,7 +317,6 @@ def _runtime_conversation(item: dict) -> bool:
               and item.get("turn_index") == 0 and not item.get("conversation_mode")
               and item.get("input_schema_version") != "2.0")
     return bool(not legacy and is_conversation(item))
-
 
 def _make_item_evaluator(
     task: Task,
@@ -337,6 +334,12 @@ def _make_item_evaluator(
     内）被 await，负责 append/merge、完成日志、SSE、持久化；缺省为完整跑批的原有行为。
     """
     runtime_options = options if options is not None else task.options
+    # Reuse the persisted task creation time across retries, resumes and updates.
+    # An explicit business timezone keeps the prompt independent of the host.
+    evaluation_time = (
+        datetime.fromtimestamp(task.created_at, tz=_EVALUATION_TIMEZONE)
+        if task.mode == "compare" else None
+    )
     compare_protocol = (
         require_snapshot_protocol(
             {"mode": task.mode, "evaluation_profile": task.evaluation_profile or runtime_options.get("evaluation_profile"),
@@ -358,6 +361,13 @@ def _make_item_evaluator(
                 raise ValueError("冻结裁判配置不可用，请恢复配置或新建任务")
             judges_cfg.append(configured[frozen["name"]].model_copy(update={
                 "enable_thinking": None,
+                # Legacy snapshots omitted these parameters. Do not inherit a
+                # new preset when restoring the original task's judge config.
+                "temperature": 0.0,
+                **{key: None for key in (
+                    "top_p", "top_k", "seed", "frequency_penalty",
+                    "presence_penalty", "max_tokens", "n",
+                )},
                 **{key: value for key, value in frozen.items() if key != "name"}
             }))
     # R3：构造中途失败（如某个 judge 缺 base_url）时，已建客户端的连接池会
@@ -365,6 +375,8 @@ def _make_item_evaluator(
     clients: list[JudgeClient] = []
     try:
         for j in judges_cfg:
+            # 裁判配置（含 API/端点的 base_url+api_key_env）已冻结在 task.judge_runtime，
+            # 由 restore_runtime 原样恢复；这里不再做任何全局覆盖。
             clients.append(JudgeClient(j))
     except BaseException:
         if clients:
@@ -386,17 +398,19 @@ def _make_item_evaluator(
     )
     # 垂域→中文显示名映射（rich_content.yaml 的 category_display）
     category_display = rich_profile.category_display if rich_profile else {}
-    capacity = max(1, min(128, int(runtime_options.get("concurrency", recommended_concurrency(judges_cfg)))))
-    sem = asyncio.Semaphore(capacity)
-    media_capacity = preparation_concurrency()
-    media_sem = PreparationLimiter(media_capacity)
-    if media_sem is not None:
-        from ..request_throttle import pacing_config
-        log_event("请求调度", "配置请求与媒体调度", details={
-            "Case容量": capacity, "媒体并发": media_capacity,
-            "模型调度": [pacing_config(j) for j in judges_cfg if supports_bailian_pacing(j)],
-        })
-    eval_timeout = float(runtime_options.get("eval_timeout_s") or runtime_options.get("eval_timeout") or 900.0)
+    # 模型并发交给全局统一管控：整题准入由 PIPELINE_LIMITER，模型调用由
+    # MODEL_LIMITER（速率令牌桶 + 在途上限）。这里的 per-task semaphore 只是
+    # 保留"取得槽位后启动计时"的结构，容量取全局上限使其绝不成为比全局更紧的
+    # 约束——rich 也没有每任务的并发上限，前端也不再提供每任务"评估并发数"。
+    sem = asyncio.Semaphore(MAX_CONCURRENCY)
+    settings_limit = get_settings().concurrency
+    log_event("请求调度", "配置请求与媒体调度", details={
+        "模型速率(每窗口)": MODEL_LIMITER.stats()["limit"],
+        "模型在途上限": MODEL_LIMITER.stats()["max_in_flight"],
+        "流水线准入": PIPELINE_LIMITER.limit,
+        "设置并发": settings_limit,
+    })
+    eval_timeout = float(runtime_options.get("eval_timeout_s") or runtime_options.get("eval_timeout") or get_settings().eval_timeout_s)
     loop = asyncio.get_running_loop()
 
     async def _default_on_result(idx: int, res: dict, started: float) -> None:
@@ -515,6 +529,13 @@ def _make_item_evaluator(
                 res = None
                 request_evidence = None
                 conversation_input = None
+                if (compare_protocol is not None
+                        and compare_protocol.output_contract == "compare_1022_v2"
+                        and compare_protocol.bundle_revision in {"0.2.4", "0.2.5", "0.2.6"}):
+                    try:
+                        item_dict.update(normalize_product_contexts(item_dict, _compare_product_count(item_dict)))
+                    except ValueError as exc:
+                        last_error = exc
                 item_dict.pop("screenshot_evidence", None)
                 task.items[idx].pop("screenshot_evidence", None)
                 def save_evidence(record):
@@ -525,7 +546,7 @@ def _make_item_evaluator(
                         item_dict["screenshot_evidence"] = request_evidence
                         task.items[idx]["screenshot_evidence"] = request_evidence
                         _persist_task(task)
-                if conversation_preparer is not None and _runtime_conversation(item_dict):
+                if last_error is None and conversation_preparer is not None and _runtime_conversation(item_dict):
                     try:
                         conversation_input = await run_preparation(conversation_preparer.prepare, item_dict,
                             timeout=float(runtime_options.get("video_prepare_timeout_s") or 300))
@@ -550,7 +571,7 @@ def _make_item_evaluator(
                     if task.mode == "compare"
                     else not item_dict.get("frames")
                 )
-                if needs_visual_prepare and not (_runtime_conversation(item_dict) if task.mode == "compare" else item_dict.get("session_id")):
+                if last_error is None and needs_visual_prepare and not (_runtime_conversation(item_dict) if task.mode == "compare" else item_dict.get("session_id")):
                     try:
                         log_event(
                             "视觉证据准备" if is_screenshot else "视频准备",
@@ -649,6 +670,9 @@ def _make_item_evaluator(
                                     progress=15,
                                     progress_message="正在重新执行单题评测",
                                 )
+                            # 令牌收在 llm_stream.send()：每次真实模型请求（含网络重试/
+                            # 降级/JSON 修复）各取一个全局令牌+在途名额，重试不绕过。
+                            # 这里不再整题持令牌；wait_for_active 仍负责单题超时。
                             res = await wait_for_active(
                                 _eval_one(
                                     task.mode, idx, item_dict,
@@ -656,6 +680,7 @@ def _make_item_evaluator(
                                     compare_judges=compare_judges,
                                     evidence_callback=save_evidence,
                                     category_display=category_display,
+                                    **({"evaluation_time": evaluation_time} if evaluation_time is not None else {}),
                                     **({"conversation_input": conversation_input} if conversation_input else {}),
                                 ),
                                 timeout=eval_timeout,
@@ -672,7 +697,9 @@ def _make_item_evaluator(
                             break
                         except Exception as e:
                             last_error = e
-                            retryable = is_retriable_llm_error(e)
+                            retryable = is_retriable_llm_error(e) or (
+                                isinstance(e, JudgeOutputEmptyError) and e.retriable
+                            )
                             will_retry = attempt == 0 and retryable
                             log_event(
                                 "单题评测",
@@ -706,6 +733,13 @@ def _make_item_evaluator(
                             res.update({key: getattr(compare_protocol, key) for key in
                                         ("standard_id", "standard_version", "bundle_revision", "result_schema_version")})
                             res["evaluation_profile"] = compare_protocol.id
+                    output_category = getattr(last_error, "error_category", None)
+                    if output_category:
+                        res.update(
+                            error_type=f"judge_output_{output_category}",
+                            error_category=output_category,
+                            finish_reason=getattr(last_error, "finish_reason", None),
+                        )
                     if isinstance(last_error, (ContextBudgetExceeded, QueryImageError)):
                         res.update(
                             error_type=last_error.code, needs_human_review=True,
@@ -738,6 +772,11 @@ def _make_item_evaluator(
                        ("request_sha256", "judge_model", "evidence_mode", "images")},
                 }
             if task.mode == "compare":
+                if task.evaluation_profile == "timeliness_compare@1.0":
+                    # This is audit metadata, never the product's test date.
+                    res.setdefault("evaluation_run_at", datetime.now().astimezone().isoformat(timespec="seconds"))
+                else:
+                    res["evaluation_datetime"] = evaluation_time.isoformat(timespec="seconds")
                 for field in DIAGNOSTIC_FIELDS:
                     if field in item_dict:
                         res[field] = item_dict[field]
@@ -764,25 +803,32 @@ def _make_item_evaluator(
 
     async def limited_one(idx: int, item_dict: dict) -> dict:
         pending_judge_traces: list[tuple[str, dict]] = []
-        with preparation_limit(media_sem, priority=idx), bind_pause_check(lambda: task.pause_requested):
-            try:
-                return await one(idx, item_dict, pending_judge_traces)
-            except PauseRequested:
-                # Pause is an unfinished item, not an evaluation failure. Keep
-                # any completed/billable call traces without publishing a score
-                # or consuming its pending index; resume will evaluate it again.
-                if pending_judge_traces:
-                    await asyncio.to_thread(flush_web_trace_records, pending_judge_traces, {
-                        "index": idx, "item_id": item_dict.get("id", f"q{idx}"),
-                        "evaluation_status": "paused", "evaluation_pending": True,
-                    })
-                previous = task.item_progress.get(str(idx)) or {}
-                _record_progress(task, idx, {
-                    **previous, "item_index": idx, "status": "paused",
-                    "message": "已暂停，尚未完成的评测将在恢复后继续",
-                    "finished_at": int(time.time() * 1000),
-                })
-                return {"_paused": True}
+        # 整题持有 PIPELINE_LIMITER（预处理 + 等模型槽 + 模型调用同一名额），封顶
+        # 「抽帧中 + 已抽帧等模型」总关键帧内存；模型调用再经 MODEL_LIMITER 速率+在途。
+        # bind_pause_check 是同步 contextmanager，须用 with；PIPELINE_LIMITER.slot 用 async with。
+        async with PIPELINE_LIMITER.slot():
+            with bind_pause_check(lambda: task.pause_requested):
+                # 等待容量约束预处理（抽帧）并发：preparation_limit 绑定一个容量 =
+                # waiting_capacity 的 PREP_LIMITER，run_preparation 抽帧时持有、模型前释放。
+                with preparation_limit(PREP_LIMITER):
+                    try:
+                        return await one(idx, item_dict, pending_judge_traces)
+                    except PauseRequested:
+                        # Pause is an unfinished item, not an evaluation failure. Keep
+                        # any completed/billable call traces without publishing a score
+                        # or consuming its pending index; resume will evaluate it again.
+                        if pending_judge_traces:
+                            await asyncio.to_thread(flush_web_trace_records, pending_judge_traces, {
+                                "index": idx, "item_id": item_dict.get("id", f"q{idx}"),
+                                "evaluation_status": "paused", "evaluation_pending": True,
+                            })
+                        previous = task.item_progress.get(str(idx)) or {}
+                        _record_progress(task, idx, {
+                            **previous, "item_index": idx, "status": "paused",
+                            "message": "已暂停，尚未完成的评测将在恢复后继续",
+                            "finished_at": int(time.time() * 1000),
+                        })
+                        return {"_paused": True}
 
     return limited_one, clients
 
@@ -881,7 +927,7 @@ async def run_resume(task: Task, cfg: AppConfig) -> None:
     clients: list[JudgeClient] = []
     targets = set(attempt["indexes"])
     pending = task.execution_control.setdefault("pending_indexes", sorted(targets))
-    options = {**task.options, "concurrency": attempt["concurrency"], "_retry_id": attempt["id"]}
+    options = {**task.options, "concurrency": attempt.get("concurrency", 4), "_retry_id": attempt["id"]}
     working_items: dict[int, dict] = {}
 
     async def on_result(index: int, result: dict, started: float) -> None:
@@ -954,7 +1000,7 @@ async def run_resume(task: Task, cfg: AppConfig) -> None:
                 break
             await _run_update_batch_body(
                 task, cfg, [(i, task.items[i]) for i in list(batch["remaining"])],
-                options={**batch["options"], "concurrency": attempt["concurrency"], "_retry_id": attempt["id"]},
+                options={**batch["options"], "concurrency": attempt.get("concurrency", 4), "_retry_id": attempt["id"]},
                 batch_id=batch_id,
             )
             if batch.get("remaining") and not task.pause_requested:
@@ -990,8 +1036,8 @@ async def run_resume(task: Task, cfg: AppConfig) -> None:
 async def run_retry(task: Task, cfg: AppConfig, retry_id: str) -> None:
     """执行人工失败补跑；候选成功才写回原任务，失败仅进入 attempt 审计。"""
     retry = task.retry_runs[retry_id]
-    shared_chat_output = (task.evaluation_profile == "qa_chat_compare@1.1" or
-                          task.protocol_manifest.get("result_schema_version") == "qa-chat-result-2")
+    shared_chat_output = (task.evaluation_profile in {"qa_chat_compare@1.1", "timeliness_compare@1.0"} or
+                          task.protocol_manifest.get("result_schema_version") in {"qa-chat-result-2", "timeliness-result-1", "timeliness-result-2", "timeliness-result-3"})
     retry["status"] = "running"
     retry["started_at"] = time.time()
     task.repair_status = "running"
@@ -1340,6 +1386,7 @@ def _structure_error_audit(error: Exception) -> dict:
     fields = ("raw_output", "raw_model_output", "repair_output", "raw_key_pairs", "structural_diagnostics",
               "duplicate_keys", "repair_key_pairs", "original_raw_key_pairs", "locally_repaired_key_pairs",
               "repair_locally_repaired_key_pairs", "normalization_diagnostics",
+              "local_format_recovery_steps",
               "trusted_collection_metadata", "input_manifest_sha256", "judge", "model")
     return {field: getattr(error, field) for field in fields if hasattr(error, field)}
 
@@ -1370,8 +1417,11 @@ def _write_eval_error(
         raw_output = getattr(error, "raw_output", None)
         repair_output = getattr(error, "repair_output", None)
         if raw_output is not None or repair_output is not None:
+            category = getattr(error, "error_category", None)
             record.update({
-                "stage": "judge_json_parse",
+                "stage": f"judge_output_{category}" if category else "judge_json_parse",
+                "error_category": category,
+                "finish_reason": getattr(error, "finish_reason", None),
                 "judge": getattr(error, "judge", None),
                 "model": getattr(error, "model", None),
                 "original_model_output": raw_output,
@@ -1398,8 +1448,15 @@ async def _eval_one(
     conversation_input=None,
     evidence_callback=None,
     trusted_collection_metadata=None,
+    evaluation_time: datetime | None = None,
 ) -> dict:
     t0 = time.perf_counter()
+    if mode == "compare" and compare_judges:
+        protocol = getattr(compare_judges[0], "protocol", None)
+        if (getattr(protocol, "output_contract", None) == "compare_1022_v2"
+                and getattr(protocol, "bundle_revision", None) in {"0.2.4", "0.2.5", "0.2.6"}):
+            item_dict = {**item_dict, **normalize_product_contexts(item_dict, _compare_product_count(item_dict))}
+            item_dict.pop("context", None)
     item = _to_evalitem(item_dict, idx)
     out: dict = {"query": item.question}
     if item.context:
@@ -1418,7 +1475,6 @@ async def _eval_one(
         # 保证 presence/count/items 始终来自同一份自洽观察。
         visual = await rich_judges[0].evaluate(
             question=item.question,
-            context=(item.context or "").strip(),
             answer_text=answer_text,
             frames=frames,
             **({"evidence_callback": evidence_callback} if evidence_callback else {}),
@@ -1473,11 +1529,11 @@ async def _eval_one(
             # columns, copied answers, and successful decoding do not prove it.
             **({"trusted_collection_metadata": trusted_collection_metadata}
                if trusted_collection_metadata is not None and
-               getattr(getattr(compare_judges[0], "protocol", None), "result_schema_version", None) == "qa-chat-result-2" else {}),
+               getattr(getattr(compare_judges[0], "protocol", None), "result_schema_version", None) in {"qa-chat-result-2", "timeliness-result-1", "timeliness-result-2", "timeliness-result-3"} else {}),
             **({"conversation_input": conversation_input} if conversation_input else {}),
+            **({"evaluation_time": evaluation_time} if evaluation_time is not None else {}),
             **({"query_image_meta": item_dict["query_image_meta"]} if item.query_images else {}),
             question=item.question,
-            context=(item.context or "").strip(),
             context1=contexts[1],
             answer1=answers[1],
             frames1=[str(path) for path in frames_by_product[1]],
@@ -1505,11 +1561,16 @@ async def _eval_one(
             "视觉对比完成",
             details={
                 "产品数": product_count,
-                **{f"{result_protocol.dimension_names[dimension]}排名": compare_result.get(f"{dimension}_rank_groups")
-                   for dimension in result_protocol.score_dimensions},
-                "需要复核": compare_result.get("needs_human_review"),
+                **({f"{result_protocol.dimension_names[dimension]}排名": compare_result.get(f"{dimension}_rank_groups")
+                    for dimension in result_protocol.score_dimensions}
+                   if result_protocol.standard_id != "timeliness_compare" else
+                   {f"产品{product_no}{result_protocol.dimension_names[dimension]}分": compare_result.get(f"answer{product_no}_{dimension}_score")
+                    for product_no in range(1, product_count + 1)
+                    for dimension in result_protocol.score_dimensions}),
+                **({"需要复核": compare_result.get("needs_human_review")}
+                   if result_protocol.output_contract != "compare_1022_v2" else {}),
                 **({"内容冲突": compare_result.get("has_conflict")}
-                   if result_protocol.result_schema_version != "qa-chat-result-2" else {}),
+                   if result_protocol.result_schema_version not in {"qa-chat-result-2", "timeliness-result-1", "timeliness-result-2"} else {}),
             },
             progress=90,
             progress_message="垂域视觉对比评测完成",
@@ -1531,6 +1592,9 @@ def _summarize(task: Task, *, include_subsets: bool = True) -> dict:
     from .protocol_identity import recover_protocol_identity
     recovered = recover_protocol_identity({"mode": task.mode, "evaluation_profile": task.evaluation_profile,
         "protocol_manifest": task.protocol_manifest, "results": task.results, "options": task.options})
+    if recovered["evaluation_profile"].startswith("timeliness_compare@") or recovered.get("is_timeliness"):
+        from .timeliness_summary import summarize_timeliness
+        return summarize_timeliness(task, include_subsets=include_subsets)
     if recovered["is_chat"] or recovered["diagnostics"]:
         from .qa_chat_summary import summarize_chat
         return summarize_chat(task, include_subsets=include_subsets)
@@ -1566,6 +1630,10 @@ def _summarize(task: Task, *, include_subsets: bool = True) -> dict:
             bool(row.get("needs_human_review")) for row in valid
         ) + sum(bool(row.get("needs_human_review")) for row in res if row.get("error")),
     }
+    if (task.protocol_manifest.get("output_contract") == "compare_1022_v2"
+            or any(row.get("output_contract") == "compare_1022_v2" for row in ok)):
+        # This contract does not collect a review verdict; zero would imply a judgment.
+        summary.pop("needs_human_review_count", None)
     max_product_count = max(
         (int(row.get("product_count") or 2) for row in valid),
         default=2,

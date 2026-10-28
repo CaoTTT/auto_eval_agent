@@ -30,8 +30,10 @@ def human_protocol(version: str, standard_id: str = "", revision: str | None = N
 def baseline_protocol(baseline: dict):
     protocol = human_protocol(baseline["human_standard_version"], baseline.get("human_standard_id", ""),
                               baseline.get("human_bundle_revision"))
-    if protocol.standard_id == "qa_chat_compare" and not baseline.get("human_bundle_revision"):
-        raise HumanError("问答闲聊人工基准缺少冻结修订号，不能用当前标准补写历史")
+    if protocol.standard_id in ("qa_chat_compare", "timeliness_compare") and not baseline.get("human_bundle_revision"):
+        raise HumanError("人工基准缺少冻结修订号，不能用当前标准补写历史")
+    if protocol.standard_id == "timeliness_compare" and not baseline.get("human_result_schema_version"):
+        raise HumanError("时效性人工基准缺少冻结结果Schema")
     if baseline.get("human_result_schema_version") and baseline["human_result_schema_version"] != protocol.result_schema_version:
         raise HumanError("人工基准结果Schema与冻结标准冲突")
     return protocol
@@ -124,7 +126,8 @@ class ImportMapping(StrictModel):
     inputs: dict[str, str] = Field(default_factory=dict)
     answer_text_origin: Literal["source", "unknown", "judge_transcription"] = "unknown"
     context_origin: Literal["source", "unknown", "judge_transcription"] = "unknown"
-    na_status: Literal["na_unspecified", "not_applicable", "unverifiable", "gate_blocked"] = "na_unspecified"
+    na_status: Literal["na_unspecified", "not_applicable", "unverifiable", "gate_blocked",
+                       "insufficient_evidence", "blocked_gate", "blocked_understanding"] = "na_unspecified"
     human_standard_version: str
     human_standard_id: str = ""
     human_bundle_revision: str = ""
@@ -142,6 +145,11 @@ class ImportMapping(StrictModel):
         if self.human_result_schema_version and self.human_result_schema_version != protocol.result_schema_version:
             raise ValueError("人工结果Schema与标准冲突")
         self.human_result_schema_version = protocol.result_schema_version or ""
+        if protocol.standard_id == "timeliness_compare":
+            if self.na_status in ("unverifiable", "gate_blocked"):
+                raise ValueError("时效性请使用 insufficient_evidence / blocked_gate / blocked_understanding 状态")
+        elif self.na_status in ("insufficient_evidence", "blocked_gate", "blocked_understanding"):
+            raise ValueError("时效性评分状态不能用于其他标准")
         ids = [p.product_id for p in self.products]
         if len(set(ids)) != len(ids):
             raise ValueError("产品身份不能重复")
@@ -165,7 +173,9 @@ class HumanScoreLabel(StrictModel):
     product_id: str
     response_id: str
     dimension_id: str
-    score_status: Literal["scored", "not_applicable", "unverifiable", "gate_blocked", "input_failed", "unlabeled", "na_unspecified"]
+    score_status: Literal["scored", "not_applicable", "unverifiable", "gate_blocked", "input_failed",
+                          "unlabeled", "na_unspecified", "insufficient_evidence", "blocked_gate",
+                          "blocked_understanding"]
     score: int | None = Field(default=None, strict=True)
     applicable: bool | None = Field(default=None, strict=True)
     verification_status: Literal["verified", "partial", "unverifiable", "not_required"] | None = None

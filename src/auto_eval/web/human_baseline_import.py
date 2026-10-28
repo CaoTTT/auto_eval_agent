@@ -46,6 +46,11 @@ def workbooks(path: Path):
 def _check_sheet(ws):
     if ws.sheet_state != "visible":
         raise HumanError("不能导入隐藏工作表", 400)
+    if ws.max_row is None or ws.max_column is None:
+        # Our exported templates and other valid XLSX files can omit the
+        # optional worksheet dimension. Read-only openpyxl then needs a scan
+        # before headers and bounds can be read reliably.
+        ws.calculate_dimension(force=True)
     if (ws.max_row or 0) > MAX_ROWS + 30 or (ws.max_column or 0) > MAX_COLUMNS:
         raise HumanError(f"工作表上限为 {MAX_ROWS} 行、{MAX_COLUMNS} 列", 400)
 
@@ -163,7 +168,8 @@ def _number(value, minimum: int, maximum: int) -> int:
 
 def parse_human_labels(path: Path, mapping: ImportMapping) -> dict:
     protocol = human_protocol(mapping.human_standard_version, mapping.human_standard_id, mapping.human_bundle_revision or None)
-    chat = protocol.standard_id == "qa_chat_compare"
+    timeliness = protocol.standard_id == "timeliness_compare"
+    chat = protocol.standard_id in ("qa_chat_compare", "timeliness_compare")
     catalog = "catalog_" + uuid.uuid4().hex[:16]
     cases, labels, states, issues = [], [], [], []
     all_ids = []
@@ -178,7 +184,8 @@ def parse_human_labels(path: Path, mapping: ImportMapping) -> dict:
         if metadata.get("human_standard_version"):
             recorded_protocol = human_protocol(metadata["human_standard_version"], metadata.get("human_standard_id", ""),
                                                metadata.get("human_bundle_revision") or None)
-            frozen_v2 = "qa-chat-result-2" in (recorded_protocol.result_schema_version, protocol.result_schema_version)
+            frozen_v2 = any(s in ("qa-chat-result-2", "timeliness-result-1", "timeliness-result-2", "timeliness-result-3") for s in
+                            (recorded_protocol.result_schema_version, protocol.result_schema_version))
             if frozen_v2 and (recorded_protocol.id, recorded_protocol.bundle_revision) != (protocol.id, protocol.bundle_revision):
                 raise HumanError("模板或基准的冻结标准与所选标准不同；不能仅改版本复用评分，请生成新标准空白模板重新标注")
             if metadata.get("human_result_schema_version") and metadata["human_result_schema_version"] != protocol.result_schema_version:
@@ -297,12 +304,18 @@ def parse_human_labels(path: Path, mapping: ImportMapping) -> dict:
                     value, chosen = (review, col.review) if use_review else (base, col.score)
                     status = "unlabeled" if _blank(value) else (mapping.na_status if str(value).strip().upper() in ("N/A", "NA") else "scored")
                     if chat and status == "scored" and type(value) is not int:
-                        raise ValueError("问答闲聊人工分须为1—5严格整数，不接受文本或小数")
+                        raise ValueError(f"人工分须为{protocol.score_min}—{protocol.score_max}严格整数，不接受文本或小数")
                     score = _number(value, protocol.score_min, protocol.score_max) if status == "scored" else None
                     if not _blank(explicit):
                         explicit = {"不适用": "not_applicable", "无法核验": "unverifiable", "Gate阻断": "gate_blocked",
                                     "输入失败": "input_failed", "未标注": "unlabeled", "已评分": "scored"}.get(str(explicit).strip(), str(explicit).strip())
-                        if explicit not in ("scored", "not_applicable", "unverifiable", "gate_blocked", "input_failed", "unlabeled", "na_unspecified"):
+                        if timeliness:
+                            explicit = {"gate_blocked": "blocked_gate", "证据不足": "insufficient_evidence",
+                                        "理解阻断": "blocked_understanding"}.get(explicit, explicit)
+                        statuses = (("scored", "not_applicable", "insufficient_evidence", "blocked_gate",
+                                     "blocked_understanding", "input_failed", "unlabeled", "na_unspecified") if timeliness else
+                                    ("scored", "not_applicable", "unverifiable", "gate_blocked", "input_failed", "unlabeled", "na_unspecified"))
+                        if explicit not in statuses:
                             raise ValueError("人工评分状态无效")
                         if (score is not None and explicit != "scored") or (score is None and explicit == "scored"):
                             raise ValueError("数字评分与显式状态冲突")
@@ -324,7 +337,7 @@ def parse_human_labels(path: Path, mapping: ImportMapping) -> dict:
                         raise ValueError("人工状态与产品适用性冲突")
                     if applicable is None:
                         applicable = inferred
-                    if chat and status == "unverifiable" and applicable is False:
+                    if chat and status in ("unverifiable", "insufficient_evidence") and applicable is False:
                         raise ValueError("无法核验状态不能明确不适用")
                     verification_raw = get(col.verification_status)
                     verification = str(verification_raw).strip().lower() if not _blank(verification_raw) else None
@@ -332,8 +345,23 @@ def parse_human_labels(path: Path, mapping: ImportMapping) -> dict:
                         raise ValueError("人工核验状态无效")
                     if chat and ((status == "scored" and verification == "unverifiable") or
                                  (status == "not_applicable" and verification not in (None, "not_required")) or
-                                 (status == "unverifiable" and verification not in (None, "unverifiable"))):
+                                 (status in ("unverifiable", "insufficient_evidence") and verification not in (None, "unverifiable"))):
                         raise ValueError("人工评分状态与核验状态冲突")
+                    if timeliness:
+                        if blocked and status not in ("blocked_gate", "unlabeled", "na_unspecified", "input_failed"):
+                            raise ValueError("Gate失败后应标为 blocked_gate，不继续评分或判不适用")
+                        if col.dimension_id == "understanding" and (status in ("not_applicable", "blocked_understanding") or applicable is False):
+                            raise ValueError("理解需求不允许不适用或理解阻断")
+                        if status == "scored" and verification == "not_required":
+                            raise ValueError("时效性有效评分不能标为无需核验")
+                        if col.dimension_id != "understanding" and verification == "partial" and score != 1:
+                            raise ValueError("权威性/时效性 partial 仅能对应决定性核心1分")
+                        if status in ("blocked_gate", "blocked_understanding") and (applicable is not None or verification is not None):
+                            raise ValueError("前置阻断后适用性与核验状态应留空")
+                        if status == "blocked_gate" and pg and not blocked and all(pg.get(g) in ("pass", "fail", "unclear") for g in ("response", "safety")):
+                            raise ValueError("Gate阻断与已标注Gate不一致")
+                        if status == "blocked_understanding" and blocked:
+                            raise ValueError("Gate失败优先于理解阻断")
                     if score is not None and (applicable is False or blocked or inputs.get(col.product_id) == "failed"):
                         raise ValueError("人工数字分与适用性/Gate 冲突")
                     if not chat and status == "not_applicable" and shared.get(col.dimension_id) is True:
@@ -358,6 +386,20 @@ def parse_human_labels(path: Path, mapping: ImportMapping) -> dict:
                     for r in group:
                         r["resolution"] = "pending_conflict"
                     issue("不同产品的不适用与数字分冲突", dim=dim)
+            if timeliness:
+                for product in mapping.products:
+                    group = [r for r in labels[start:] if r["product_id"] == product.product_id]
+                    understanding = next((r for r in group if r["dimension_id"] == "understanding"), None)
+                    for r in group:
+                        if r["dimension_id"] == "understanding" or not understanding:
+                            continue
+                        u_score = understanding.get("score")
+                        conflict = (u_score == 1 and r["score_status"] not in
+                                    ("blocked_understanding", "unlabeled", "na_unspecified", "input_failed")) or (
+                                    u_score in (2, 3) and r["score_status"] == "blocked_understanding")
+                        if conflict:
+                            r["resolution"] = "pending_conflict"
+                            issue("理解分与后续维度阻断状态冲突", pid=product.product_id, dim=r["dimension_id"])
     duplicate_ids = {key for key, count in Counter(all_ids).items() if count > 1}
     duplicate_keys = {c["case_key"] for c in cases if c["case_id"] in duplicate_ids}
     for key in sorted(duplicate_ids):
@@ -378,9 +420,17 @@ def build_human_template(snapshot: dict, standard: str) -> bytes:
     from .human_report_export import tables_workbook
     from .compare_statistics import StatisticsTable
     protocol = human_protocol(standard)
+    if protocol.standard_id == "timeliness_compare":
+        from .protocol_identity import recover_protocol_identity, require_snapshot_protocol
+        recovered = recover_protocol_identity(snapshot)
+        if recovered["executable"] and recovered["evaluation_profile"] == protocol.id:
+            # A template downloaded from a historical task must still align
+            # with that task's frozen model result contract.
+            protocol = require_snapshot_protocol(snapshot)
     dimensions = human_dimensions(protocol, scores=True)
     names_by_dimension = human_dimension_names(protocol)
-    chat = protocol.standard_id == "qa_chat_compare"
+    timeliness = protocol.standard_id == "timeliness_compare"
+    chat = protocol.standard_id in ("qa_chat_compare", "timeliness_compare")
     items = snapshot.get("items") or []
     count = max((int(i.get("product_count") or (3 if i.get("video3") or i.get("screenshot3") or i.get("answer3") else 2)) for i in items), default=2)
     names = (snapshot.get("options") or {}).get("product_names") or []
@@ -420,8 +470,8 @@ def build_human_template(snapshot: dict, standard: str) -> bytes:
     notes = StatisticsTable("填写说明", ("项目", "说明"), rows=[
         ["模板元信息", json.dumps(meta, ensure_ascii=False)], ["人工标准", protocol.display],
         ["分值范围", f"{protocol.score_min}—{protocol.score_max} 的整数"],
-        ["填写规则", "题号须为文本；留空=未标注；review非空优先（包括N/A）；数字只接受1—5严格整数，N/A默认原因未知。" if protocol.result_schema_version == "qa-chat-result-2" else "题号须为文本；留空=未标注；review 非空优先（包括 0 和 N/A）。N/A 默认原因未知。"],
-        ["状态可选值", "scored / not_applicable / unverifiable / gate_blocked / input_failed / unlabeled / na_unspecified"],
+        ["填写规则", f"题号须为文本；留空=未标注；review非空优先（包括N/A）；数字只接受{protocol.score_min}—{protocol.score_max}严格整数，N/A默认原因未知。" if protocol.result_schema_version in ("qa-chat-result-2", "timeliness-result-1", "timeliness-result-2", "timeliness-result-3") else "题号须为文本；留空=未标注；review 非空优先（包括 0 和 N/A）。N/A 默认原因未知。"],
+        ["状态可选值", "scored / not_applicable / insufficient_evidence / blocked_gate / blocked_understanding / input_failed / unlabeled / na_unspecified" if timeliness else "scored / not_applicable / unverifiable / gate_blocked / input_failed / unlabeled / na_unspecified"],
         ["身份核对", "请核对产品、题号和原始回答；缺失真实题号须先补充。填写说明中的产品 ID 可在导入映射中修正。"],
         ["Gate/适用性", "Gate：pass/fail/unclear；适用性：true/false；留空=未知。"],
         ["标准隔离", "禁止将旧标准人工分或模型分复制为新标准标注；全部评分、理由、Gate与适用性栏初始为空。"],

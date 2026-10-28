@@ -208,7 +208,7 @@ async def test_restored_business_session_uses_single_turn_media_preparation(monk
 
 
 @pytest.mark.asyncio
-async def test_create_chat_task_api_freezes_complete_candidate_manifest(monkeypatch):
+async def test_create_current_chat_task_api_freezes_complete_candidate_manifest(monkeypatch):
     from auto_eval.config import AppConfig, JudgeConfig
     from auto_eval.web import server
     cfg = AppConfig(judges=[JudgeConfig(name="fake")])
@@ -218,9 +218,10 @@ async def test_create_chat_task_api_freezes_complete_candidate_manifest(monkeypa
                     protocol_manifest=kwargs["protocol_manifest"], judge_runtime=kwargs["judge_runtime"])
     monkeypatch.setattr(server, "new_task", create)
     monkeypatch.setattr(server.EVAL_SCHEDULER, "enqueue", lambda *_: 1)
-    response = await server.api_eval(server.EvalReq(mode="compare", evaluation_profile="qa_chat_compare@1.0",
-        items=[{"id": "new", "query": "聊聊天", "screenshot1": "a.png", "screenshot2": "b.png"}]))
+    response = await server.api_eval(server.EvalReq(mode="compare", evaluation_profile="qa_chat_compare@1.1",
+        items=[{"id": "new", "query": "聊聊天", "screenshot1": "a.png", "screenshot2": "b.png",
+                "context1": "产品1背景", "context2": "产品2背景"}]))
     manifest = response["protocol_manifest"]
-    assert manifest["standard_id"] == "qa_chat_compare" and manifest["bundle_revision"] == "1.0.0"
+    assert manifest["standard_id"] == "qa_chat_compare" and manifest["bundle_revision"] == "1.1.0"
     assert manifest["score_range"] == [1, 5]
     assert manifest["score_dimensions"] == list(QA_CHAT_DIMENSIONS)

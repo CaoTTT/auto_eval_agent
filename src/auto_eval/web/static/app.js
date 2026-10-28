@@ -1,4 +1,4 @@
-import { createApp, ref, computed, onMounted, onUnmounted, nextTick, selectEvidenceMode, isRemoteUrl } from "./compare-data.js?v=20261028_snapshot_preview";
+import { createApp, ref, computed, onMounted, onUnmounted, nextTick, selectEvidenceMode, isRemoteUrl, productContextValue, missingProductContexts } from "./compare-data.js?v=20261028_snapshot_product_contexts";
 
 createApp({
   setup() {
@@ -12,9 +12,11 @@ createApp({
     const mode = ref("rich_content");
     const isVideoMode = computed(() => true);
     const datasetName = ref("");
+    const datasetSourceFileId = ref("");
     const datasetSourceTaskId = ref("");
     const datasetRevision = ref(0);
     let datasetBaseline = "", datasetImportVersion = 0;
+    let datasetImportController = null;
     const items = ref([]);
     let opItemSequence = 0;
     const opItems = ref([newOpItem()]);
@@ -36,12 +38,9 @@ createApp({
     const selectedModelProfile = computed(() =>
       judgeModelProfiles.value.find(profile => profile.id === selectedJudgeModelProfile.value) || null
     );
-    function changeJudgeModel({ resetConcurrency = false } = {}) {
+    function changeJudgeModel() {
       const profile = selectedModelProfile.value;
       enableThinking.value = profile?.supports_thinking === true && profile.default_enable_thinking === true;
-      const recommended = Math.max(1, Math.min(128, profile?.recommended_concurrency || 4));
-      concurrency.value = resetConcurrency || !Number.isInteger(concurrency.value) || concurrency.value < 1
-        ? recommended : Math.min(concurrency.value, recommended);
     }
     function thinkingLabel(value) {
       return value === true ? "思考开启" : value === false ? "思考关闭" : "思考未记录";
@@ -64,17 +63,98 @@ createApp({
     const taskProtocolManifest = ref({});
     const taskProtocolDiagnostics = ref([]);
     const taskIsChat = computed(() => (taskEvaluationProfile.value || '').startsWith('qa_chat_compare@'));
+    const taskIsTimeliness = computed(() => (taskEvaluationProfile.value || '').startsWith('timeliness_compare@'));
+    function compact1022(row = {}) {
+      if (row.output_contract) return row.output_contract === 'compare_1022_v2';
+      const profile = row.evaluation_profile || (row.standard_id && row.standard_version
+        ? `${row.standard_id}@${row.standard_version}` : taskEvaluationProfile.value);
+      if (profile !== 'qa_competitor_compare@0.2-simplified-1022') return false;
+      if (row.bundle_revision) return ['0.2.2','0.2.3','0.2.4','0.2.5','0.2.6'].includes(row.bundle_revision);
+      const manifest = taskProtocolManifest.value;
+      return manifest.output_contract ? manifest.output_contract === 'compare_1022_v2' : ['0.2.2','0.2.3','0.2.4','0.2.5','0.2.6'].includes(manifest.bundle_revision);
+    }
+    function isTimelinessRow(row = {}) {
+      if (row.standard_id) return row.standard_id === 'timeliness_compare';
+      if (row.evaluation_profile) return row.evaluation_profile.startsWith('timeliness_compare@');
+      if (row.result_schema_version) return ['timeliness-result-1','timeliness-result-2','timeliness-result-3'].includes(row.result_schema_version);
+      return taskIsTimeliness.value;
+    }
     function chatUsesSharedReasons(row = {}) {
+      if (isTimelinessRow(row)) return true;
       if (row.result_schema_version) return row.result_schema_version === 'qa-chat-result-2';
       const profile = row.evaluation_profile || (row.standard_id === 'qa_chat_compare' && row.standard_version
         ? `qa_chat_compare@${row.standard_version}` : taskEvaluationProfile.value);
       return profile === 'qa_chat_compare@1.1';
     }
-    const compareProfiles = computed(() =>
-      evaluationProfiles.value.filter((profile) => (profile.modes || []).includes("compare"))
-    );
-    const concurrency = ref(4);
+    function timelinessHasConflict(row = {}) {
+      return isTimelinessRow(row)
+        && (row.result_schema_version || taskProtocolManifest.value.result_schema_version) === 'timeliness-result-3';
+    }
+    function timelinessConflictColumn(row, column) {
+      return column.key === 'has_conflict' && isTimelinessRow(row);
+    }
+    function timelinessConflictSummary(data = {}) {
+      return `有冲突 ${data.conflict_yes ?? 0} · 无冲突 ${data.conflict_no ?? 0} · 不确定 ${data.conflict_unclear ?? 0}`
+        + ` · 未采集（旧协议）${data.conflict_not_collected ?? 0} · 结果缺失或异常 ${data.conflict_invalid_state ?? 0}`
+        + ` · 采集失败，待核验 ${data.conflict_input_failed ?? 0}`
+        + ` · 协议异常 ${data.conflict_identity_error ?? 0} · 技术失败 ${data.conflict_technical_failure ?? 0} · 未完成 ${data.conflict_unfinished ?? 0}`
+        + ` · 明确冲突率 ${summaryPercent(data.conflict_rate)}（有冲突 / 明确判断 ${data.conflict_known ?? 0}）`;
+    }
+    const compareProfiles = computed(() => {
+      const profiles = evaluationProfiles.value.filter((profile) => (profile.modes || []).includes("compare"));
+      return [...profiles.filter(profile => profile.selectable !== false),
+        ...profiles.filter(profile => profile.selectable === false)];
+    });
+    const globalConcurrency = ref(5);
+    const maxInFlight = ref(40);
+    const waitingCapacity = ref(10);
     const mediaConcurrency = ref(4);
+    const showGlobalSettings = ref(false);
+    const savingGlobalSettings = ref(false);
+    const globalSaveMsg = ref("");
+    const globalSaveError = ref(false);
+
+    async function loadGlobalSettings() {
+      try {
+        const response = await fetch("/api/settings", { cache: "no-store" });
+        if (!response.ok) return;
+        const data = await response.json();
+        globalConcurrency.value = data.concurrency ?? 5;
+        maxInFlight.value = data.max_in_flight ?? 40;
+        waitingCapacity.value = data.waiting_capacity ?? 10;
+      } catch (_) {}
+    }
+
+    async function saveGlobalSettings() {
+      if (savingGlobalSettings.value) return;
+      savingGlobalSettings.value = true;
+      globalSaveMsg.value = "";
+      globalSaveError.value = false;
+      try {
+        const response = await fetch("/api/settings", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            concurrency: Number(globalConcurrency.value),
+            max_in_flight: Number(maxInFlight.value),
+            waiting_capacity: Number(waitingCapacity.value),
+          }),
+        });
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          globalSaveError.value = true;
+          globalSaveMsg.value = "保存失败：" + (data.detail || "HTTP " + response.status);
+        } else {
+          globalSaveMsg.value = "已保存并生效。";
+        }
+      } catch (error) {
+        globalSaveError.value = true;
+        globalSaveMsg.value = "保存失败：" + (error?.message || "网络错误");
+      } finally {
+        savingGlobalSettings.value = false;
+      }
+    }
+
     const requestPacing = computed(() => {
       if (selectedModelProfile.value) return !!selectedModelProfile.value.request_pacing;
       const selected = judges.value.filter((j) => selectedJudges.value.includes(j.name));
@@ -89,23 +169,7 @@ createApp({
         ? value.toLocaleString("zh-CN", { maximumFractionDigits: digits }) : "—";
     }
 
-    function pacingWaitLabel(reason) {
-      return ({
-        cooldown: "限流冷却", second_window: "连续 1 秒请求额度",
-        request_window: "连续 60 秒请求额度", minute_window: "连续 60 秒请求额度",
-        token_budget: "Token 预算", pacing: "平滑发送间隔", warmup: "逐步升速",
-        inflight: "等待响应槽位", inflight_limit: "等待响应槽位",
-      })[reason] || (reason ? "等待发送额度" : "额度可用");
-    }
-
-    function pacingLimitLabel(kind) {
-      return ({
-        requests: "请求频率", request: "请求频率", tokens: "Token 额度",
-        token: "Token 额度", burst: "增速", overload: "服务拥塞",
-        congestion: "服务拥塞", unknown: "未分类限流",
-      })[kind] || (kind ? "未分类限流" : "无");
-    }
-    const evalTimeout = ref(900);
+    const evalTimeout = ref(3600);
     const submitting = ref(false);
     const running = ref(false);
     const progress = ref(0);
@@ -145,10 +209,16 @@ createApp({
       {key:'emotional_expression',label:'情感表达恰当'}, {key:'style',label:'风格恰当'},
       {key:'scenario_fulfillment',label:'场景化满足'}, {key:'guided_recommendation',label:'引导推荐'},
     ];
+    const timelinessDimensions = [
+      {key:'understanding',label:'理解需求'}, {key:'authority',label:'权威性'}, {key:'timeliness',label:'时效性'},
+    ];
     const taskDimensions = computed(() => {
       const frozen = taskProtocolManifest.value.dimensions;
       const registered = evaluationProfiles.value.find(p => p.id === taskEvaluationProfile.value)?.dimensions;
-      return frozen?.length ? frozen : registered?.length ? registered : taskIsChat.value ? chatDimensions : legacyScoreDimensions.filter(d => !d.gate);
+      if (compact1022()) return (frozen?.length ? frozen : legacyScoreDimensions.filter(d => !d.gate)).filter(d => d.key !== 'accuracy');
+      if (taskEvaluationProfile.value === 'qa_competitor_compare@0.2-simplified-1022'
+          && taskProtocolManifest.value.bundle_revision === '0.2.1') return frozen?.length ? frozen : legacyScoreDimensions.filter(d => !d.gate);
+      return frozen?.length ? frozen : registered?.length ? registered : taskIsTimeliness.value ? timelinessDimensions : taskIsChat.value ? chatDimensions : legacyScoreDimensions.filter(d => !d.gate);
     });
     const scoreDimensions = computed(() => [...legacyScoreDimensions.filter(d => d.gate), ...taskDimensions.value]);
     const summaryDimensions = computed(() => taskDimensions.value.filter(d => d.key !== 'accuracy'));
@@ -206,6 +276,40 @@ createApp({
       ? scoreRules.value.map((rule, i) => scoreRuleError(rule) ? `条件 ${i + 1}：${scoreRuleError(rule)}` : '').filter(Boolean).join('；') : '');
     function scoreValue(row, dimension, product) {
       if (taskProtocolDiagnostics.value.length) return null;
+      if (compact1022(row)) {
+        const value = row[`answer${product}_${dimension}_score`];
+        const count = Number(row.product_count || items.value[row.index]?.product_count || 2);
+        return !row.error && product >= 1 && product <= count && dimension !== 'accuracy'
+          && row[`${dimension}_applicable`] === true
+          && ['complete','partial'].includes(row[`answer${product}_input_status`])
+          && row[`answer${product}_response_gate`] === 'pass' && row[`answer${product}_safety_gate`] === 'pass'
+          && Number.isInteger(value) && value >= 1 && value <= 5 ? value : null;
+      }
+      if (isTimelinessRow(row)) {
+        const prefix = `answer${product}_${dimension}`, value = row[`${prefix}_score`];
+        const verification = row[`${prefix}_verification_status`];
+        const compact = ['timeliness-result-2','timeliness-result-3'].includes(row.result_schema_version || taskProtocolManifest.value.result_schema_version);
+        const evidenceStateValid = compact
+          ? !Object.prototype.hasOwnProperty.call(row,`${prefix}_na_reason`)
+          : verification === 'verified' || (verification === 'partial' && (dimension === 'understanding' || value === 1));
+        const understandingPrefix = `answer${product}_understanding`;
+        const understandingScore = row[`${understandingPrefix}_score`];
+        const understandingStateValid = !compact || dimension === 'understanding'
+          || (row[`${understandingPrefix}_applicable`] === true
+            && !Object.prototype.hasOwnProperty.call(row,`${understandingPrefix}_na_reason`)
+            && (understandingScore === null
+              ? row[`${understandingPrefix}_score_status`] === 'insufficient_evidence'
+              : Number.isInteger(understandingScore) && understandingScore >= 1 && understandingScore <= 3
+                && row[`${understandingPrefix}_score_status`] === 'scored'));
+        const understandingBlocks = dimension !== 'understanding' && understandingScore === 1;
+        return !row.error && understandingStateValid && !understandingBlocks && row[`${prefix}_score_status`] === 'scored'
+          && row[`${prefix}_applicable`] === true
+          && evidenceStateValid
+          && ['pass','unclear'].includes(row[`answer${product}_response_gate`])
+          && ['pass','unclear'].includes(row[`answer${product}_safety_gate`])
+          && (row[`answer${product}_input_status`] == null || ['complete','partial'].includes(row[`answer${product}_input_status`]))
+          && Number.isInteger(value) && value >= 1 && value <= 3 ? value : null;
+      }
       if (taskIsChat.value || row.standard_id === 'qa_chat_compare') {
         const prefix = `answer${product}_${dimension}`;
         const value = row[`${prefix}_score`];
@@ -271,7 +375,10 @@ createApp({
         }
       } else if (column.key.endsWith('_summary')) {
         const dimension = column.key.replace('_summary', '');
-        if (taskIsChat.value || row.standard_id === 'qa_chat_compare') {
+        if (isTimelinessRow(row)) {
+          add('维度共享证据（保留原产品归属）', row[`${dimension}_evidence`]);
+          add('维度共享评分理由', row[`${dimension}_reason`]);
+        } else if (taskIsChat.value || row.standard_id === 'qa_chat_compare') {
           if (chatUsesSharedReasons(row)) {
             add('维度共享评分理由', row[`${dimension}_reason`]);
             add('维度共享证据（保留原产品归属）', row[`${dimension}_evidence`]);
@@ -380,8 +487,15 @@ createApp({
     const historyPageSize = 10;
     const historyPageCount = computed(() => Math.max(1, Math.ceil(historyTotal.value / historyPageSize)));
     const historyError = ref("");
+    const historySearchDraft = ref({ dataset_name: "", evaluation_profile: "", start_time: "", end_time: "" });
+    const historySearchFilters = ref({});
+    const historySearchError = ref("");
+    const historyHasFilters = computed(() => Object.keys(historySearchFilters.value).length > 0);
     const historyNoteDrafts = ref({});
     const historyNoteEditing = ref({});
+    const historyNoteSaving = ref({});
+    const historyNoteUpdates = new Map();
+    let historyNoteVersion = 0;
     const loadingHistory = ref(false);
     const loadingTaskId = ref("");
     const exportingTaskId = ref("");
@@ -405,7 +519,6 @@ createApp({
     const executionControl = ref({});
     const selectedActiveRuns = ref(0);
     const controlSubmitting = ref(false);
-    const resumeConcurrency = ref(4);
     const resumeFailed = ref(false);
     const isPausing = computed(() => executionControl.value.state === "pausing");
     const canPauseTask = computed(() => !!taskId.value && (running.value || selectedActiveRuns.value > 0 || ["queued", "running"].includes(repairStatus.value) || executionControl.value.save_error));
@@ -484,7 +597,7 @@ createApp({
     const formatHint = computed(
       () =>
         ({
-          compare: "支持文字题与图文题混合导入：query_images 可选填一张提问图片路径或 HTTP(S) URL；product_count 为2或3。每题优先使用全产品长截图，否则回退全产品录屏；无法统一证据的题目在导入时拒绝。",
+          compare: "每个产品的 contextN 背景必填；缺少 context1 字段时兼容读取 context 作为产品1背景。支持文字题与图文题混合导入：query_images、截图和录屏路径可填本地文件或 HTTP(S) URL，URL 在评测时下载并保留原始来源；product_count 为2或3。每题优先使用全产品长截图，否则回退全产品录屏；无法统一证据的题目在导入时拒绝。",
           rich_content: "可逐题上传，也可导入 JSON / JSONL / CSV：query、context(可选)、video_path、category/answer_text/task_start_time/task_end_time(均可选)；sessionid 等额外字段会保留到 Excel 导出。普通图片不算挂卡，回答区域蓝色文字按 Superlink 统计。",
         }[mode.value])
     );
@@ -778,9 +891,10 @@ createApp({
           { key: "response_gate_summary", label: "响应体验Gate" },
           { key: "safety_gate_summary", label: "安全稳定Gate" },
           ...taskDimensions.value.map(d => ({key:`${d.key}_summary`, label:d.key === 'accuracy' ? '内容准确（暂不汇总）' : d.label})),
-          ...(chatUsesSharedReasons() ? [] : [{ key: "has_conflict", label: "内容冲突" }]),
-          { key: "needs_human_review", label: "需人工复核" },
-          ...(chatUsesSharedReasons() ? [] : [{ key: "rationale", label: "理由" }]),
+          ...((taskIsTimeliness.value ? timelinessHasConflict() : !chatUsesSharedReasons())
+            ? [{ key: "has_conflict", label: "内容冲突" }] : []),
+          ...(compact1022() ? [] : [{ key: "needs_human_review", label: "需人工复核" }]),
+          ...(compact1022() || chatUsesSharedReasons() ? [] : [{ key: "rationale", label: "理由" }]),
           { key: "latency_s", label: "总耗时" },
         ];
       // rich_content（默认）
@@ -935,9 +1049,18 @@ createApp({
     }
 
     function defaultEvaluationProfile() {
-      return compareProfiles.value.find((profile) => profile.status === "stable")?.id
-        || compareProfiles.value[0]?.id
+      const selectable = compareProfiles.value.filter(profile => profile.selectable !== false);
+      return selectable.find((profile) => profile.status === "stable")?.id
+        || selectable[0]?.id
         || "";
+    }
+
+    function evaluationProfileDisabled(id) {
+      return compareProfiles.value.some(profile => profile.id === id && profile.selectable === false);
+    }
+
+    function newTaskEvaluationProfile(id) {
+      return id && !evaluationProfileDisabled(id) ? id : defaultEvaluationProfile();
     }
 
     function evaluationProfileLabel(id) {
@@ -945,10 +1068,21 @@ createApp({
       return evaluationProfiles.value.find((profile) => profile.id === id)?.display || id;
     }
 
-    function switchMode(k) {
+    function evaluationProfileOptionLabel(profile) {
+      return profile.selectable === false ? profile.display.replace('（可用）', '') : profile.display;
+    }
+
+    function cancelDatasetImport() {
       datasetImportVersion++;
+      datasetImportController?.abort();
+      datasetImportController = null;
+      opPreparing.value = false;
+    }
+
+    function switchMode(k) {
+      cancelDatasetImport();
       importReport.value = null;
-      opPreparing.value=false;
+      datasetSourceFileId.value = "";
       datasetSourceTaskId.value = "";
       datasetBaseline = "";
       cancelHistoryLoad();
@@ -994,7 +1128,7 @@ createApp({
           evidenceMode:item.evidence_mode || (item.screenshot1 ? 'long_screenshot' : 'video_frames'),
           ...Object.fromEntries([1,2,3].flatMap(n => [
             [`video${n}Path`,item[`video${n}`] || ''], [`screenshot${n}Path`,item[`screenshot${n}`] || ''],
-            [`answer${n}`,item[`answer${n}`] || ''], [`context${n}`,item[`context${n}`] || ''],
+            [`answer${n}`,item[`answer${n}`] || ''], [`context${n}`,productContextValue(item, n)],
             [`screenshotMeta${n}`,item[`screenshot_meta${n}`] || {}],
             [`videoSource${n}`,item[`video_source${n}`] || {}],
           ])), taskStartTime:item.task_start_time ?? null, taskEndTime:item.task_end_time ?? null,
@@ -1013,10 +1147,11 @@ createApp({
     }
     function useComparisonDataset(data) {
       if (mode.value !== 'compare' || !confirmDatasetReplacement()) return;
-      datasetImportVersion++;opPreparing.value=false;cancelHistoryLoad();detachResultView();
+      cancelDatasetImport();cancelHistoryLoad();detachResultView();
+      selectedEvaluationProfile.value = newTaskEvaluationProfile(selectedEvaluationProfile.value);
       items.value=JSON.parse(JSON.stringify(data.items));
       opItems.value=comparisonDraftRows(items.value);
-      datasetName.value=data.dataset_name || '历史测评数据';datasetSourceTaskId.value=data.task_id;
+      datasetName.value=data.dataset_name || '历史测评数据';datasetSourceFileId.value='';datasetSourceTaskId.value=data.task_id;
       opPage.value=1;errors.value=[];importReport.value=null;datasetBaseline=draftFingerprint();datasetRevision.value++;
     }
     async function onQueryImage(event, index) {
@@ -1084,33 +1219,40 @@ createApp({
       const file = e.target.files && e.target.files[0];
       e.target.value = "";
       if (!file) return;
-      const importVersion = ++datasetImportVersion;
+      cancelDatasetImport();
+      const importVersion = datasetImportVersion;
       const importMode = mode.value;
+      const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+      datasetImportController = controller;
+      const isCurrentImport = () => importVersion === datasetImportVersion && importMode === mode.value && !disposed;
       opPreparing.value = true;
       errors.value = [];
       importReport.value = null;
       try {
         const content = await file.text();
+        if (!isCurrentImport()) return;
         const isCsv = /\.csv$/i.test(file.name || "");
         console.log("[onOpManifestFile] mode:", mode.value, "csv:", isCsv, "file size:", content.length);
         const parseBody = isCsv
-          ? { mode: mode.value, csv: content }
-          : { mode: mode.value, jsonl: content };
+          ? { mode: importMode, csv: content }
+          : { mode: importMode, jsonl: content };
         const parseResponse = await fetch("/api/parse", {
           method: "POST",
+          ...(controller ? {signal: controller.signal} : {}),
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(parseBody),
         });
         const parsed = await parseResponse.json().catch(() => ({}));
-        if (importVersion !== datasetImportVersion || importMode !== mode.value) return;
+        if (!isCurrentImport()) return;
         console.log("[onOpManifestFile] response ok:", parseResponse.ok, "items:", (parsed.items || []).length, "errors:", (parsed.errors || []).length);
         if (!parseResponse.ok) throw new Error(parsed.detail || (isCsv ? "CSV 解析请求失败" : "JSON / JSONL 解析请求失败"));
         const importErrors = [...(parsed.errors || [])];
         const report = {filename: file.name || '', accepted: (parsed.items || []).length,
+          blocked: importMode === 'compare' && (parsed.blocked === true || importErrors.some(error => String(error).includes('compare_context_missing'))),
           rejected: parsed.rejected_count ?? importErrors.length,
           screenshots: parsed.evidence_counts?.long_screenshot ?? (parsed.items || []).filter(it => it.evidence_mode === 'long_screenshot').length,
           videos: parsed.evidence_counts?.video_frames ?? (parsed.items || []).filter(it => it.evidence_mode === 'video_frames').length};
-        if (!(parsed.items || []).length) {
+        if (report.blocked || !(parsed.items || []).length) {
           importReport.value = report;
           errors.value = importErrors.length ? importErrors : ["文件中没有可导入的数据"];
           console.warn("[onOpManifestFile] no items parsed");
@@ -1118,9 +1260,21 @@ createApp({
         }
 
         if (mode.value === 'compare' && !confirmDatasetReplacement()) return;
+        const sourceForm = new FormData();
+        sourceForm.append("file", file);
+        const uploadResponse = await fetch("/api/upload/dataset-source", {
+          method: "POST", body: sourceForm,
+          ...(controller ? {signal: controller.signal} : {}),
+        });
+        const sourceFile = await uploadResponse.json().catch(() => ({}));
+        if (!isCurrentImport()) return;
+        if (!uploadResponse.ok || !sourceFile.id) {
+          throw new Error(typeof sourceFile.detail === "string" ? sourceFile.detail : "源文件保存失败，请重新导入");
+        }
         importReport.value = report;
         if (mode.value === 'compare') { cancelHistoryLoad();detachResultView(); }
         datasetName.value = file.name || '';
+        datasetSourceFileId.value = sourceFile.id;
         datasetSourceTaskId.value = '';
         errors.value = importErrors;
         const imported = parsed.items || [];
@@ -1165,21 +1319,26 @@ createApp({
         }
       } catch (error) {
         console.error("[onOpManifestFile] error:", error);
-        if (importVersion !== datasetImportVersion) return;
+        if (!isCurrentImport()) return;
         errors.value = ["批量导入失败：" + (error?.message || String(error))];
       } finally {
-        if (importVersion === datasetImportVersion) opPreparing.value = false;
+        if (importVersion === datasetImportVersion) {
+          opPreparing.value = false;
+          datasetImportController = null;
+        }
       }
     }
 
     function opItemReady(it) {
       if (!it.query.trim()) return false;
       if (mode.value !== "compare") return Boolean((it.frames || []).length || it.videoPath);
-      return Boolean(selectEvidenceMode(it));
+      return Boolean(selectEvidenceMode(it)) && missingProductContexts(it).length === 0;
     }
 
     const canSubmit = computed(() =>
       !opPreparing.value && !opItems.value.some(it => it.queryUploading)
+      && !(mode.value === 'compare' && importReport.value?.blocked)
+      && !(mode.value === 'compare' && evaluationProfileDisabled(selectedEvaluationProfile.value))
       && (mode.value === 'compare' ? opItems.value.length > 0 && opItems.value.every(opItemReady) : opItems.value.some(opItemReady))
     );
 
@@ -1188,17 +1347,25 @@ createApp({
       cancelHistoryLoad();
       const submitViewVersion = historyLoadVersion;
       runError.value = "";
+      if (mode.value === 'compare' && evaluationProfileDisabled(selectedEvaluationProfile.value)) {
+        runError.value = '该评测标准暂不可选，请选择其他评测标准。';
+        return;
+      }
+      if (mode.value === 'compare' && importReport.value?.blocked) {
+        runError.value = '导入文件存在缺失或无效的产品背景，请补齐后重新导入，或重新选择历史数据；当前不能开始评估。';
+        return;
+      }
       if (judgeModelProfiles.value.length && !selectedModelProfile.value) {
         runError.value = "请选择可用的裁判模型。";
         return;
       }
-      if (!Number.isInteger(concurrency.value) || concurrency.value < 1 || concurrency.value > 128) {
-        runError.value = "评估并发数必须为 1–128 的整数";
-        return;
-      }
       const valid = mode.value === 'compare' ? opItems.value : opItems.value.filter(opItemReady);
       if (mode.value === 'compare' && valid.some(item => !opItemReady(item))) {
-        runError.value = '存在未填写问题或缺少产品证据的 Case，请展开检查；不会跳过这些条目提交。';
+        const missing = valid.flatMap((item, index) => {
+          const fields = missingProductContexts(item);
+          return fields.length ? [`第${index+1}条（Case ${item.id || index+1}）：${fields.join('、')} 必须填写非空背景`] : [];
+        });
+        runError.value = (missing.length ? missing.slice(0,8).join('；') : '存在未填写问题或缺少产品证据的 Case') + '，请展开检查；不会跳过这些条目提交。';
         return;
       }
       if (!valid.length) {
@@ -1210,7 +1377,6 @@ createApp({
         const item = {
           id: it.id || `${prefix}${idx + 1}`,
           query: it.query.trim(),
-          context: (it.context || "").trim(),
         };
         if (mode.value === "compare") {
           item.query_images = [...(it.queryImages || [])];
@@ -1231,6 +1397,7 @@ createApp({
           }
           item.category = (it.category || "").trim() || "default";
         } else {
+          item.context = (it.context || "").trim();
           item.video_path = it.videoPath;
           item.category = (it.category || "").trim() || "default";
           item.answer_text = (it.answer || "").trim();
@@ -1252,6 +1419,8 @@ createApp({
         mode: mode.value,
         items: submittedItems,
         dataset_name: datasetName.value || "手动录入",
+        ...(datasetSourceFileId.value ? {source_file_id: datasetSourceFileId.value}
+          : datasetSourceTaskId.value ? {source_task_id: datasetSourceTaskId.value} : {}),
         evaluation_profile: mode.value === "compare" ? selectedEvaluationProfile.value : null,
         options: {
           ...(mode.value === 'compare' && datasetSourceTaskId.value ? {dataset_source_task_id:datasetSourceTaskId.value} : {}),
@@ -1260,7 +1429,6 @@ createApp({
             judge_model_profile: selectedModelProfile.value.id,
             ...(selectedModelProfile.value.supports_thinking === true ? { enable_thinking: enableThinking.value } : {}),
           } : {}),
-          concurrency: concurrency.value,
           eval_timeout_s: evalTimeout.value,
         },
       };
@@ -1329,7 +1497,6 @@ createApp({
       taskJudgeSummary.value = {judge_model: d.judge_model, enable_thinking_label: d.enable_thinking_label};
       executionControl.value = {};
       selectedActiveRuns.value = 1;
-      resumeConcurrency.value = concurrency.value;
       selectedTaskTiming.value = receiveTaskTiming(d.task_timing);
       repairStatus.value = "idle";
       activeRetry.value = null;
@@ -1447,16 +1614,12 @@ createApp({
     async function controlTask(action) {
       const id = taskId.value, version = historyLoadVersion;
       if (!id || controlSubmitting.value || loadingTaskId.value) return;
-      if (action === "resume" && (!Number.isInteger(resumeConcurrency.value) || resumeConcurrency.value < 1 || resumeConcurrency.value > 128)) {
-        runError.value = "恢复并发数必须为 1–128 的整数";
-        return;
-      }
       controlSubmitting.value = true;
       runError.value = "";
       try {
         const response = await fetch(`/api/eval/${encodeURIComponent(id)}/${action}`, {
           method: "POST", headers: {"Content-Type": "application/json"},
-          ...(action === "resume" ? {body: JSON.stringify({concurrency: resumeConcurrency.value, include_failed: resumeFailed.value, idempotency_key: `resume-${Date.now()}-${Math.random().toString(16).slice(2)}`})} : {}),
+          ...(action === "resume" ? {body: JSON.stringify({include_failed: resumeFailed.value, idempotency_key: `resume-${Date.now()}-${Math.random().toString(16).slice(2)}`})} : {}),
         });
         const data = await response.json();
         if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : "操作失败，请刷新后重试");
@@ -1673,7 +1836,77 @@ createApp({
       if (taskProtocolDiagnostics.value.length) return '协议待恢复';
       if (row.error) return '评估失败';
       const state = row[`answer${product}_${dimension}_score_status`];
-      return ({scored:'已评分',not_applicable:'不适用',gate_blocked:'门槛未通过',input_failed:'输入失败',unverifiable:'无法核验'})[state] || '待评估';
+      if (isTimelinessRow(row)) {
+        if (row[`answer${product}_input_status`] === 'failed') return '输入失败';
+        if ([row[`answer${product}_response_gate`], row[`answer${product}_safety_gate`]].includes('fail')) return 'NA · Gate阻断';
+        if (dimension !== 'understanding' && row[`answer${product}_understanding_score`] === 1) return 'NA · 理解1分阻断';
+        if (state === 'insufficient_evidence' && row[`answer${product}_${dimension}_na_reason`] === 'applicability_unknown') return 'NA · 适用性待核验';
+        if (state === 'scored' && scoreValue(row,dimension,product) == null) return 'NA · 评分状态待复核';
+      }
+      return ({scored:'已评分',not_applicable:'不适用',gate_blocked:'门槛未通过',input_failed:'输入失败',unverifiable:'无法核验',
+        insufficient_evidence:'NA · 证据不足',blocked_gate:'NA · Gate阻断',blocked_understanding:'NA · 理解1分阻断'})[state] || '待评估';
+    }
+    function timelinessColumn(row, column) {
+      return isTimelinessRow(row) && ['response_gate_summary','safety_gate_summary',
+        ...timelinessDimensions.map(d => `${d.key}_summary`)].includes(column.key);
+    }
+    function timelinessProductScores(row, column) {
+      const dimension = column.key.replace(/_summary$/, '');
+      const gate = dimension.endsWith('_gate');
+      return Array.from({length:Number(row.product_count || items.value[row.index]?.product_count || 2)}, (_,i) => {
+        const product = i + 1, value = gate ? row[`answer${product}_${dimension}`] : scoreValue(row,dimension,product);
+        const label = gate ? ({pass:'通过',fail:'不通过',unclear:'不确定'})[value] || 'N/A'
+          : value == null ? chatScoreStatus(row,dimension,product) : `${value}分`;
+        return {product,label,className:gate ? `gate-${value || 'unknown'}` : value == null ? 'score-na' : `score-${value}`};
+      });
+    }
+    function summaryPercent(value) {
+      return typeof value === 'number' && Number.isFinite(value) ? `${(value * 100).toFixed(1)}%` : 'N/A';
+    }
+    function timelinessSummaryRows(data) {
+      if (!data) return [];
+      return summaryDimensions.value.flatMap(d => Array.from({length:Number(data.product_count || 2)}, (_,i) => {
+        const prefix = `${d.key}_answer${i+1}`, counts = data[`${prefix}_score_status_counts`] || {};
+        const rates = data[`${prefix}_score_status_rates`] || {};
+        return {key:`${d.key}-${i+1}`,dimension:d.label,product:i+1,
+          average:data[`${prefix}_avg`] ?? 'N/A', scored:data[`${prefix}_scored`] ?? 0,
+          eligible:data[`${prefix}_eligible`] ?? 0, coverage:summaryPercent(data[`${prefix}_score_coverage`]),
+          states:['insufficient_evidence','not_applicable','blocked_gate','blocked_understanding','input_failed',
+            'technical_failure','unfinished','invalid_state','identity_error']
+            .map(state => `${({insufficient_evidence:'证据不足',not_applicable:'不适用',blocked_gate:'Gate阻断',
+              blocked_understanding:'理解阻断',input_failed:'输入失败',technical_failure:'技术失败',unfinished:'未完成',
+              invalid_state:'状态冲突',identity_error:'协议异常'})[state]} ${counts[state] || 0}` +
+                (['not_applicable','blocked_gate','blocked_understanding'].includes(state)
+                  ? `（占全部 ${summaryPercent(rates[state])}）` : '')).join(' · '),
+          unknown:data[`${prefix}_applicable_unknown`] ?? 0};
+      }));
+    }
+    function timelinessPairedRows(data) {
+      if (!data) return [];
+      const rows = [], count = Number(data.product_count || 2);
+      for (const d of summaryDimensions.value) {
+        for (let a = 1; a <= count; a++) for (let b = a + 1; b <= count; b++) {
+          const prefix = `${d.key}_answer${a}_answer${b}`;
+          rows.push({key:prefix,dimension:d.label,a,b,count:data[`${prefix}_paired_count`] ?? 0,
+            averageA:data[`${prefix}_paired_answer${a}_avg`] ?? 'N/A',
+            averageB:data[`${prefix}_paired_answer${b}_avg`] ?? 'N/A'});
+        }
+      }
+      return rows;
+    }
+    function compact1022ProductReason(value, product) {
+      const text = String(value || '');
+      // Mask quoted source text without moving offsets into the original reason.
+      const masked = text.replace(/“[^”]*”|‘[^’]*’|「[^」]*」|『[^』]*』|"(?:\\.|[^"\\])*"|`[^`]*`/g,
+        quoted => ' '.repeat(quoted.length));
+      const sections = Array.from(masked.matchAll(/(?:^|[；;])\s*产品([123])[:：]/g));
+      const products = sections.map(section => Number(section[1]));
+      if (products.some((number, index) => index && number <= products[index - 1])) return '';
+      const index = products.indexOf(product);
+      if (index < 0) return '';
+      const section = sections[index];
+      return text.slice(section.index + section[0].length, sections[index + 1]?.index ?? text.length)
+        .trim().replace(/[；;]+$/, '').trim();
     }
     function cell(r, c) {
       const v = r[c.key];
@@ -1692,7 +1925,35 @@ createApp({
       }
       if (c.key.endsWith("_summary") && !["input_status_summary", "response_gate_summary", "safety_gate_summary"].includes(c.key)) {
         const dimension = c.key.slice(0, -"_summary".length);
-        if (taskIsChat.value || r.standard_id === 'qa_chat_compare') {
+        if (compact1022(r)) {
+          return Array.from({length:Number(r.product_count || items.value[r.index]?.product_count || 2)}, (_, i) => {
+            const product = i + 1, score = scoreValue(r, dimension, product);
+            let status = 'N/A';
+            if (r.error) status = '评估失败';
+            else if (taskProtocolDiagnostics.value.length) status = '协议待恢复';
+            else if (r[`answer${product}_input_status`] === 'failed') status = '输入失败';
+            else if (r[`answer${product}_response_gate`] === 'fail') status = '响应Gate阻断';
+            else if (r[`answer${product}_safety_gate`] === 'fail') status = '安全Gate阻断';
+            else if (!['complete','partial'].includes(r[`answer${product}_input_status`])) status = '输入状态缺失';
+            else if (!['pass','fail','unclear'].includes(r[`answer${product}_response_gate`])
+                || !['pass','fail','unclear'].includes(r[`answer${product}_safety_gate`])) status = 'Gate状态缺失';
+            else if (r[`answer${product}_response_gate`] !== 'pass') status = '响应Gate阻断';
+            else if (r[`answer${product}_safety_gate`] !== 'pass') status = '安全Gate阻断';
+            else if (r[`${dimension}_applicable`] === false) status = '不适用';
+            else if (r[`${dimension}_applicable`] !== true) status = '适用性状态缺失';
+            else if (score !== null) status = `${score}分`;
+            else {
+              const reason = compact1022ProductReason(r[`${dimension}_reason`], product);
+              const justified = /^未评分（([^（）]+)）：(.+)$/s.exec(reason);
+              const validReason = justified && justified.slice(1).every(text => /[\p{L}\p{N}_]/u.test(text));
+              status = r[`answer${product}_${dimension}_score`] == null
+                ? validReason ? reason.startsWith('未评分（证据不足）：') ? '证据不足' : '有说明的未评分' : '应评分但缺失'
+                : '分数格式或范围异常';
+            }
+            return `P${product}:${status}`;
+          }).join('；');
+        }
+        if (isTimelinessRow(r) || taskIsChat.value || r.standard_id === 'qa_chat_compare') {
           return Array.from({length:Number(r.product_count || items.value[r.index]?.product_count || 2)}, (_,i) => {
             const score = scoreValue(r,dimension,i+1);
             return `P${i+1}:${score === null ? chatScoreStatus(r,dimension,i+1) : score+'分（已评分）'}`;
@@ -1718,6 +1979,17 @@ createApp({
         return v || "";
       }
       if (c.key === "has_conflict") {
+        if (isTimelinessRow(r)) {
+          if (r.error) return "评估失败";
+          if (!timelinessHasConflict(r)) return "未采集（旧协议）";
+          if (taskProtocolDiagnostics.value.length) return "协议待恢复";
+          const count = Number(r.product_count || items.value[r.index]?.product_count || 2);
+          if (Array.from({length:count}, (_, i) => i + 1).some(n => r[`answer${n}_input_status`] === 'failed')) {
+            const model = ({yes:'有冲突',no:'无冲突',unclear:'不确定'})[v] || '结果缺失或异常';
+            return `采集失败，待核验（模型：${model}）`;
+          }
+          if (!['yes','no','unclear'].includes(v) || !String(r.conflict_reason || '').trim()) return "结果缺失或异常";
+        }
         if (v === "yes") return "有冲突";
         if (v === "no") return "无冲突";
         if (v === "unclear") return "不清楚";
@@ -1785,18 +2057,58 @@ createApp({
       return d.toLocaleString();
     }
 
+    async function applyHistorySearch() {
+      historySearchError.value = "";
+      const draft = historySearchDraft.value;
+      const filters = {};
+      if (draft.dataset_name.trim()) filters.dataset_name = draft.dataset_name.trim();
+      if (draft.evaluation_profile) filters.evaluation_profile = draft.evaluation_profile;
+      for (const [key, label] of [["start_time", "开始时间"], ["end_time", "结束时间"]]) {
+        if (!draft[key]) continue;
+        const timestamp = new Date(draft[key]).getTime() / 1000;
+        if (!Number.isFinite(timestamp)) {
+          historySearchError.value = `${label}无效，请重新选择。`;
+          return;
+        }
+        filters[key] = timestamp;
+      }
+      if (filters.start_time != null && filters.end_time != null && filters.start_time > filters.end_time) {
+        historySearchError.value = "开始时间不能晚于结束时间。";
+        return;
+      }
+      historySearchFilters.value = filters;
+      await loadHistory(1);
+    }
+
+    async function resetHistorySearch() {
+      historySearchDraft.value = { dataset_name: "", evaluation_profile: "", start_time: "", end_time: "" };
+      historySearchFilters.value = {};
+      historySearchError.value = "";
+      await loadHistory(1);
+    }
+
     async function loadHistory(requestedPage = historyRequestedPage) {
       requestedPage = Math.max(1, Math.trunc(Number(requestedPage)) || 1);
       historyRequestedPage = requestedPage;
       const version = ++historyListVersion;
+      const noteVersion = historyNoteVersion;
       loadingHistory.value = true;
       historyError.value = "";
       try {
-        const r = await fetch(`/api/history?page=${requestedPage}`);
+        const query = [`page=${requestedPage}`, ...Object.entries(historySearchFilters.value)
+          .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`)].join("&");
+        const r = await fetch(`/api/history?${query}`);
         if (!r.ok) throw new Error("请稍后重试");
         const d = await r.json();
         if (version !== historyListVersion || disposed) return;
-        historyItems.value = (d.items || []).map(item => ({ ...item, task_timing: receiveTaskTiming(item.task_timing) }));
+        historyItems.value = (d.items || []).map(item => {
+          const update = historyNoteUpdates.get(item.task_id);
+          // A list request started before a successful save can still contain
+          // the old note. Later requests read the persisted server value.
+          const note = update && update.version > noteVersion ? update.note : item.note || "";
+          if (update && update.version <= noteVersion) historyNoteUpdates.delete(item.task_id);
+          return { ...item, note, task_timing: receiveTaskTiming(item.task_timing) };
+        });
         historyTotal.value = d.total ?? historyItems.value.length;
         historyPage.value = d.page || requestedPage;
         historyRequestedPage = historyPage.value;
@@ -1877,11 +2189,22 @@ createApp({
         const activeTask = queueState.value.running;
         const runtime = activeTask ? activeTask.judge_runtime : taskJudgeRuntime.value;
         const model = runtime?.judges?.[0]?.model;
-        const controllers = data.controllers || [];
-        const controller = model && controllers.length
-          ? controllers.find(entry => entry.model === model || (entry.models || []).includes(model))
-          : controllers.length ? (controllers.length === 1 ? controllers[0] : null) : data.controller;
-        pacingStatus.value = data.enabled && data.active ? controller || null : null;
+        const modelLimiter = data.model_limiter || {};
+        const pipelineLimiter = data.pipeline_limiter || {};
+        const settings = data.settings || {};
+        pacingStatus.value = data.enabled && data.active ? {
+          model,
+          model_rate: modelLimiter.limit,
+          rate_window_s: 2,
+          inflight: modelLimiter.running,
+          inflight_limit: modelLimiter.max_in_flight,
+          model_queued: modelLimiter.queued,
+          pipeline_limit: pipelineLimiter.limit,
+          pipeline_running: pipelineLimiter.running,
+          pipeline_queued: pipelineLimiter.queued,
+          waiting_capacity: settings.waiting_capacity,
+          eval_timeout_s: settings.eval_timeout_s,
+        } : null;
         pacingError.value = "";
       } catch (_) {
         if (!disposed && (queueState.value.running || running.value || repairStatus.value === "running")) {
@@ -1932,30 +2255,43 @@ createApp({
     }
 
     function editHistoryNote(item) {
+      if (historyNoteSaving.value[item.task_id]) return;
       historyNoteDrafts.value[item.task_id] = item.note || "";
       historyNoteEditing.value[item.task_id] = true;
     }
 
     function cancelHistoryNote(item) {
+      if (historyNoteSaving.value[item.task_id]) return;
       historyNoteDrafts.value[item.task_id] = item.note || "";
       historyNoteEditing.value[item.task_id] = false;
     }
 
     async function saveHistoryNote(item) {
-      const note = String(historyNoteDrafts.value[item.task_id] || "").trim();
-      const response = await fetch(`/api/history/${item.task_id}/note`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ note }),
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        alert("备注保存失败：" + (data.detail || "未知错误"));
-        return;
+      const id = item.task_id;
+      if (historyNoteSaving.value[id]) return;
+      const note = String(historyNoteDrafts.value[id] || "").trim();
+      historyNoteSaving.value[id] = true;
+      try {
+        const response = await fetch(`/api/history/${encodeURIComponent(id)}/note`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ note }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.detail || "未知错误");
+        if (typeof data.note !== "string") throw new Error("服务器未返回已保存的备注");
+        historyNoteUpdates.set(id, { note: data.note, version: ++historyNoteVersion });
+        // Refreshes replace row objects while the request is in flight, so
+        // update the current row by identity instead of the captured object.
+        const current = historyItems.value.find(row => row.task_id === id);
+        if (current) current.note = data.note;
+        historyNoteDrafts.value[id] = data.note;
+        historyNoteEditing.value[id] = false;
+      } catch (error) {
+        alert("备注保存失败：" + (error?.message || "网络错误") + "，请重试。");
+      } finally {
+        delete historyNoteSaving.value[id];
       }
-      item.note = data.note || "";
-      historyNoteDrafts.value[item.task_id] = item.note;
-      historyNoteEditing.value[item.task_id] = false;
     }
 
     async function delHistory(id) {
@@ -1981,6 +2317,7 @@ createApp({
       comparisonTaskIds.value = comparisonTaskIds.value.filter(value => value !== id);
       delete historyNoteDrafts.value[id];
       delete historyNoteEditing.value[id];
+      historyNoteUpdates.delete(id);
       await loadHistory();
     }
 
@@ -1992,8 +2329,7 @@ createApp({
     }
 
     async function loadHistoryTask(id) {
-      datasetImportVersion++;
-      opPreparing.value=false;
+      cancelDatasetImport();
       cancelHistoryLoad();
       const version = historyLoadVersion;
       let loaded = false;
@@ -2013,6 +2349,8 @@ createApp({
           return;
         }
         loaded = true;
+        importReport.value = null;
+        errors.value = [];
         closeActiveStream();
         taskId.value = d.task_id || id;
         setTaskProtocol(d);
@@ -2022,9 +2360,11 @@ createApp({
         selectedTaskTiming.value = receiveTaskTiming(d.task_timing);
         mode.value = d.mode;
         if (d.mode === "compare") {
-          selectedEvaluationProfile.value = d.evaluation_profile || defaultEvaluationProfile();
+          selectedEvaluationProfile.value = newTaskEvaluationProfile(d.evaluation_profile);
         }
         datasetName.value = d.dataset_name || "";
+        datasetSourceFileId.value = "";
+        datasetSourceTaskId.value = d.task_id || id;
         items.value = d.items || [];
         if (d.mode === "compare") {
           opItems.value = items.value.map(item => ({
@@ -2044,8 +2384,16 @@ createApp({
         }
         if (d.mode === 'compare') {
           opItems.value = comparisonDraftRows(items.value);
-          datasetSourceTaskId.value = d.task_id || id;
           datasetBaseline = draftFingerprint();datasetRevision.value++;
+        } else {
+          opItems.value = items.value.map(item => ({...newOpItem(),
+            id: item.id || "", query: item.query || "", context: item.context || "", category: item.category || "",
+            videoPath: item.video_path || "", videoName: String(item.video_path || "").split(/[\\/]/).pop(),
+            frames: item.frames || [], answer: item.answer_text || "",
+            taskStartTime: item.task_start_time ?? null, taskEndTime: item.task_end_time ?? null,
+            sourceLine: item.source_line ?? null, sourceData: item.source_data || null,
+          }));
+          opPage.value = 1;
         }
         modalityFilter.value = "";
         results.value = d.results || [];
@@ -2057,7 +2405,6 @@ createApp({
         repairStatus.value = d.repair_status || "idle";
         executionControl.value = d.execution_control || {};
         selectedActiveRuns.value = d.active_runs || 0;
-        resumeConcurrency.value = Number(executionControl.value.concurrency || d.options?.concurrency || 4);
         resumeFailed.value = false;
         const retryRuns = Object.values(d.retry_runs || {});
         activeRetry.value = retryRuns.sort(
@@ -2199,9 +2546,8 @@ createApp({
       evaluationProfiles.value = d.evaluation_profiles || [];
       selectedEvaluationProfile.value = defaultEvaluationProfile();
       selectedJudges.value = defaultJudgeSelection();
-      const selectedJudge = judges.value.find((j) => j.name === selectedJudges.value[0]);
-      concurrency.value = selectedJudge?.recommended_concurrency || 4;
-      if (selectedModelProfile.value) changeJudgeModel({ resetConcurrency: true });
+      await loadGlobalSettings();  // 加载全局 并发/在途/等待容量
+      if (selectedModelProfile.value) changeJudgeModel();
       loadHistory();
       loadQueue();
       queueRefreshTimer = window.setInterval(loadQueue, 2000);
@@ -2210,7 +2556,7 @@ createApp({
     onUnmounted(() => {
       disposed = true;
       historyListVersion++;
-      datasetImportVersion++;
+      cancelDatasetImport();
       cancelHistoryLoad();
       if (progressClockTimer != null) window.clearInterval(progressClockTimer);
       if (queueRefreshTimer != null) window.clearInterval(queueRefreshTimer);
@@ -2223,21 +2569,26 @@ createApp({
       scoreDimensions, scoreRules, scoreRuleJoin, filterProducts, scoreOperators, scoreRuleNeedsNumber,
       addScoreRule, changeScoreDimension, removeScoreRule, clearScoreRules, scoreFilterError, resetResultFilters,
       reasonOnlyColumn, cellReasons, reasonsExpanded, toggleCellReasons, allReasonsExpanded, setAllReasonsExpanded,
-      datasetSourceTaskId, datasetRevision, useComparisonDataset,
-      evaluationProfiles, compareProfiles, selectedEvaluationProfile, evaluationProfileLabel,
-      taskEvaluationProfile, taskProtocolManifest, taskProtocolDiagnostics, taskIsChat, summaryDimensions, setTaskProtocol,
+      datasetSourceFileId, datasetSourceTaskId, datasetRevision, useComparisonDataset,
+      evaluationProfiles, compareProfiles, selectedEvaluationProfile, evaluationProfileLabel, evaluationProfileOptionLabel,
+      taskEvaluationProfile, taskProtocolManifest, taskProtocolDiagnostics, taskIsChat, taskIsTimeliness, compact1022, summaryDimensions, setTaskProtocol,
+      isTimelinessRow, timelinessColumn, timelinessProductScores, timelinessSummaryRows, timelinessPairedRows, summaryPercent,
+      timelinessHasConflict, timelinessConflictColumn, timelinessConflictSummary,
       judgeModelProfiles, selectedJudgeModelProfile, selectedModelProfile, enableThinking, changeJudgeModel,
       taskJudgeRuntime, taskJudgeSummary, thinkingLabel, judgeRuntimeLabel,
-      concurrency, mediaConcurrency, requestPacing, evalTimeout, submitting, running, progress, total, results, summary, taskId, runError,
-      pacingStatus, pacingError, pacingNumber, pacingWaitLabel, pacingLimitLabel,
+      mediaConcurrency, requestPacing, evalTimeout, submitting, running, progress, total, results, summary, taskId, runError,
+      pacingStatus, pacingError, pacingNumber,
       queueState, queueEntries, selectedTaskStatus, queueNotice, taskStatusLabel, queueKindLabel,
       selectedTaskTiming, taskElapsedSeconds, formatTaskDuration,
-      executionControl, controlSubmitting, resumeConcurrency, resumeFailed, isPausing, canPauseTask, canResumeTask, controlTask,
+      executionControl, controlSubmitting, resumeFailed, isPausing, canPauseTask, canResumeTask, controlTask,
+      globalConcurrency, maxInFlight, waitingCapacity, saveGlobalSettings,
+      showGlobalSettings, savingGlobalSettings, globalSaveMsg, globalSaveError,
       repairStatus, retryStatusLabel, retrySubmitting, selectedRetryIndexes, activeRetry,
       failedResultIndexes, retryIndexSelected, toggleRetryIndex, retryFailedCases,
       itemProgress, progressEvents, expandedProgressLogs, pagedProgressRows, progressStages,
-      comparisonTaskIds, exportComparisonXlsx, historyItems, historyNoteDrafts, historyNoteEditing, loadingHistory, pageSize,
+      comparisonTaskIds, exportComparisonXlsx, historyItems, historyNoteDrafts, historyNoteEditing, historyNoteSaving, loadingHistory, pageSize,
       historyPage, historyTotal, historyPageSize, historyPageCount, historyError,
+      historySearchDraft, historySearchFilters, historySearchError, historyHasFilters, applyHistorySearch, resetHistorySearch,
       loadingTaskId, exportingTaskId, exportIncludeImages, exportMessage, exportError, exportDownloadUrl,
       opPage, opPageSize, opPageCount, opJumpPage,
       progressPage, progressPageCount, progressJumpPage,

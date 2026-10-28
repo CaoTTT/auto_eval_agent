@@ -30,6 +30,7 @@ def prompts():
     modules = {}
     names = (
         "internal_process_rules",
+        "query_image_prompt",
         "thinking_exposure_rules_v02",
         "visual_compare_prompt_v02_simplified",
         "visual_compare_prompt_v02_thinking_exposure_r023",
@@ -58,7 +59,6 @@ def _inputs(product_count: int, evidence_mode: str) -> dict:
         "evidence_mode": evidence_mode,
         "evaluation_datetime": "2026-01-01T10:00:00+08:00",
         "question": "合成问题",
-        "context": "共享条件",
     }
     for index in (1, 2, 3):
         values.update({
@@ -92,9 +92,15 @@ def test_rendered_gate_audit_and_unchanged_output_contract(prompts, product_coun
     user = current.VISUAL_COMPARE_USER.render(**values)
     old_system = frozen.VISUAL_COMPARE_SYSTEM.render(**values)
     old_user = frozen.VISUAL_COMPARE_USER.render(**values)
+    assert user == current.VISUAL_COMPARE_USER.render(**values, context="禁止注入的公共背景")
+    assert old_user == frozen.VISUAL_COMPARE_USER.render(**values, context="禁止注入的公共背景")
+    assert "禁止注入的公共背景" not in user + old_user
     assert FLOW in system and FLOW in user
     assert FLOW not in old_system and FLOW not in old_user
     assert "合成正反例" in system
+    query_image_rules = prompts["query_image_prompt"].QUERY_IMAGE_INSTRUCTIONS
+    assert "与 Query 共同定义题目" in query_image_rules
+    assert "Context" not in query_image_rules
     assert "{{" not in system + user and "{%" not in system + user
     for index in (1, 2):
         assert f"回答哨兵{index}" in user and f"背景哨兵{index}" in user
@@ -121,15 +127,20 @@ def test_no_new_input_parameters(prompts, variable):
     current = prompts["visual_compare_prompt_v02_thinking_exposure"]
     frozen = prompts["visual_compare_prompt_v02_thinking_exposure_r023"]
     env = Environment()
-    assert meta.find_undeclared_variables(env.parse(_source(current, variable))) == meta.find_undeclared_variables(env.parse(_source(frozen, variable)))
+    current_inputs = meta.find_undeclared_variables(env.parse(_source(current, variable)))
+    frozen_inputs = meta.find_undeclared_variables(env.parse(_source(frozen, variable)))
+    assert current_inputs == frozen_inputs
+    assert "context" not in current_inputs
 
 
 @pytest.mark.parametrize("name,expected_blob_sha", [
-    ("visual_compare_prompt_v02_simplified", "8c7fc2210f1d6ec52c3cf2637c8f24ac2b98ae23"),
+    ("visual_compare_prompt_v02_simplified", "6c1350cca4d0b8e41c70646fdf961addaf6692bc"),
     ("internal_process_rules", "3803c1e17bc0e420222ce8496bfc63b9fecc9b85"),
-    ("visual_compare_prompt_v02_thinking_exposure_r023", "df7450f483d53212b3b51ce52758c2814b6f3c34"),
+    ("query_image_prompt", "a4b58fb57531d3e7f9078e654d4de8299b37c475"),
+    ("visual_compare_prompt_v02_thinking_exposure_r023", "e6c8bccc8fdd8e0b821c6375b54818eef109e4d0"),
 ])
-def test_stable_shared_and_legacy_sources_are_frozen(name, expected_blob_sha):
+def test_stable_and_legacy_sources_match_after_shared_context_removal(name, expected_blob_sha):
+    # Legacy prompts intentionally follow the same product-only context policy.
     # Normalize checkout CRLF to Git's LF representation, including on Windows.
     content = (JUDGES / f"{name}.py").read_text(encoding="utf-8").encode("utf-8")
     assert hashlib.sha1(f"blob {len(content)}\0".encode() + content).hexdigest() == expected_blob_sha

@@ -55,7 +55,7 @@ class ConversationPreparation:
             # Identity is content-based, independent of snapshot paths and future rows.
             identity = []
             for turn in turns:
-                identity.append({k: turn.get(k) for k in ("id", "session_id", "turn_index", "query", "context", "product_count",
+                identity.append({k: turn.get(k) for k in ("id", "session_id", "turn_index", "query", "product_count",
                     *(f"{p}{n}" for p in ("answer", "context", "screenshot_scope") for n in (1, 2, 3)))})
             target["history_prefix_sha256"] = digest([identity, [{k: a[k] for k in
                 ("asset_id", "original_sha256", "source_turn", "image_role", "product_no")} for a in assets]])

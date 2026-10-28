@@ -12,8 +12,6 @@ import httpx
 from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimitError
 
 from .observability import current_context, error_details, log_event
-from .request_throttle import RequestThrottle, estimate_input_tokens, wait_for_active
-from .request_transport import HeaderAdmission, header_admission, paced_http_client
 from .task_control import check_pause, pause_aware
 from .timing import record_model_attempt, timing_span
 
@@ -72,6 +70,7 @@ class AggregatedResponse:
     model: str = ""
     usage: Any = None
     stream_stats: dict[str, Any] | None = None
+    system_fingerprint: str | None = None
 
 
 def build_openai_client(
@@ -81,7 +80,11 @@ def build_openai_client(
     connect_timeout_s: float,
     read_timeout_s: float,
 ):
-    """创建禁用 SDK 内置重试的客户端，由本模块统一控制重试次数。"""
+    """创建禁用 SDK 内置重试的客户端，由本模块统一控制重试次数。
+
+    限流在 web 调度器统一接管后不再注入行为追踪的 paced_http_client；
+    这里用普通的 httpx 连接池，重试/暂停由 llm_stream / runner 配合完成。
+    """
     from openai import AsyncOpenAI
 
     timeout = httpx.Timeout(
@@ -96,9 +99,7 @@ def build_openai_client(
         api_key=api_key,
         timeout=timeout,
         max_retries=0,
-        http_client=paced_http_client(timeout),
     )
-    client._auto_eval_header_pacing = True
     return client
 
 
@@ -207,6 +208,7 @@ async def _collect_stream(client, kwargs: dict, *, include_usage: bool):
     finish_reason = None
     usage = None
     model = kwargs.get("model", "")
+    system_fingerprint = None
     saw_choice = False
     stats = {
         "chunk数": 0,
@@ -223,6 +225,7 @@ async def _collect_stream(client, kwargs: dict, *, include_usage: bool):
             stats["chunk数"] += 1
             usage = getattr(chunk, "usage", None) or usage
             model = getattr(chunk, "model", None) or model
+            system_fingerprint = getattr(chunk, "system_fingerprint", None) or system_fingerprint
             chunk_error = getattr(chunk, "error", None)
             if chunk_error is None:
                 chunk_error = (getattr(chunk, "model_extra", None) or {}).get("error")
@@ -357,7 +360,8 @@ async def _collect_stream(client, kwargs: dict, *, include_usage: bool):
             + f"：finish_reason={finish_reason or '空'}"
             + ("；请检查模型输出预算，或关闭思考模式后新建任务重试" if exhausted_reasoning else ""),
             body={"finish_reason": finish_reason, "content": ""},
-            retriable=not exhausted_reasoning,
+            # 同一输出上限下重试空的 length 响应不会补全判定；其余空响应仍可重试。
+            retriable=normalized_finish_reason != "length",
         )
         setattr(error, "_auto_eval_stream_stats", dict(stats))
         setattr(error, "_auto_eval_usage", usage)
@@ -365,6 +369,7 @@ async def _collect_stream(client, kwargs: dict, *, include_usage: bool):
 
     response = AggregatedResponse(
         model=model,
+        system_fingerprint=system_fingerprint,
         usage=usage,
         stream_stats={**stats, "总耗时": round((time.perf_counter() - started) * 1000)},
         choices=[
@@ -391,85 +396,49 @@ async def stream_chat_completion(
     max_attempts: int = 4,
     retry_base_s: float = 1.0,
     retry_max_s: float = 20.0,
-    throttle: RequestThrottle | None = None,
 ):
     """始终使用流式接口，成功后返回与完整响应等价的聚合对象。
 
     callback 在一次尝试完整成功后才收到分片，防止断流重试造成重复输出。
+
+    限流在此逐实际请求生效：每次真实模型请求（初试 / 网络重试 /
+    stream_options 降级 / JSON 修复复调都会重新走 send）都取一个全局令牌 +
+    在途名额，重试不绕过。等令牌计入 admission_wait，不计外层单题截止。
     """
     if max_attempts < 1:
         raise ValueError("max_attempts 必须大于等于 1")
     check_pause()
-    if throttle is not None and not getattr(client, "_auto_eval_header_pacing", False):
-        from openai import AsyncOpenAI
-
-        if isinstance(client, AsyncOpenAI):
-            raise ValueError("百炼限流调用必须使用 build_openai_client 创建的传输客户端")
-
-    input_tokens = await pause_aware(asyncio.to_thread(estimate_input_tokens, kwargs)) if throttle else 0
-    request_kind = "vision" if any(
-        isinstance(message.get("content"), list) and any(
-            part.get("type") == "image_url" for part in message["content"]
-        ) for message in kwargs.get("messages", [])
-    ) else "text"
 
     async def send(include_usage: bool):
         check_pause()
-        reservation = None
-        admission = None
-        response = None
-        failure = None
-        request = kwargs
-        if throttle is not None:
-            log_event("请求调度", "等待发送额度", progress=30,
-                      progress_message="等待模型请求额度（请求数 / Token / 在途上限）")
-            if getattr(client, "_auto_eval_header_pacing", False):
-                admission = HeaderAdmission(throttle, input_tokens, request_kind)
-            request = {**kwargs, "extra_headers": {
-                "X-DashScope-Wait-Timeout": "30", **(kwargs.get("extra_headers") or {}),
-            }}
 
         async def collect():
-            nonlocal reservation
             check_pause()
-            if not getattr(client, "_auto_eval_header_pacing", False):
-                # Synthetic clients have no HTTP header hook. Keep acquisition
-                # and the call in one coroutine so pausing cannot strand a permit
-                # between an outer admission and a newly scheduled collector.
-                if throttle is not None:
-                    reservation = await throttle.acquire(
-                        throttle.estimate(input_tokens, request_kind),
-                        input_proxy=input_tokens, kind=request_kind,
-                    )
-                record_model_attempt()
-            return await _collect_stream(client, request, include_usage=include_usage)
+            record_model_attempt()
+            return await _collect_stream(client, kwargs, include_usage=include_usage)
 
+        from .web.scheduler import MODEL_LIMITER  # 函数体内惰性导入，避免 import 环
+        from .task_control import admission_wait
+
+        # on_cancel + acquired 双保险：acquire 已完成但本协程被取消时由 on_cancel
+        # 释放；正常路径 finally 释放一次；acquire 未完成时两者都不释放。
+        acquired = False
         try:
-            if admission is not None:
-                with header_admission(admission), timing_span("model"):
-                    response, chunks, stats = await wait_for_active(
-                        collect(),
-                        timeout=total_timeout_s,
-                    )
-            else:
-                with timing_span("model"):
-                    wait = wait_for_active if throttle is not None else asyncio.wait_for
-                    response, chunks, stats = await wait(
-                        collect(),
-                        timeout=total_timeout_s,
-                    )
+            with admission_wait():
+                await pause_aware(
+                    MODEL_LIMITER.acquire(),
+                    on_cancel=lambda _: MODEL_LIMITER.release(),
+                )
+                acquired = True
+            with timing_span("model"):
+                response, chunks, stats = await asyncio.wait_for(
+                    collect(),
+                    timeout=total_timeout_s,
+                )
             return response, chunks, stats
-        except BaseException as exc:
-            failure = exc
-            raise
         finally:
-            # A provider can bill a completed reasoning phase even if it never
-            # produced a usable answer. Settle returned usage on that failure.
-            usage = getattr(response, "usage", None) or getattr(failure, "_auto_eval_usage", None)
-            if reservation is not None:
-                throttle.finish(reservation, usage, failure)
-            if admission is not None:
-                admission.finish(usage, failure)
+            if acquired:
+                MODEL_LIMITER.release()
 
     last_exc: BaseException | None = None
     use_usage = include_usage
@@ -528,6 +497,8 @@ async def stream_chat_completion(
                 "流式调用成功" if attempt == 0 else "重试成功",
                 details={
                     "模型": kwargs.get("model", ""),
+                    "响应模型": getattr(response, "model", None),
+                    "服务端指纹": getattr(response, "system_fingerprint", None),
                     "思考模式": (kwargs.get("extra_body") or {}).get("enable_thinking"),
                     "请求次数": f"{attempt + 1}/{max_attempts}",
                     "结束原因": getattr(choice, "finish_reason", None),

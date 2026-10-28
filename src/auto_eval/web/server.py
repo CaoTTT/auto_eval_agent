@@ -8,6 +8,7 @@ import asyncio
 import copy
 import hashlib
 import json
+import math
 import time
 import uuid
 from pathlib import Path
@@ -23,6 +24,7 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
 from ..config import load_config
+from ..compare_input import CONTEXT_ERROR_CODE
 from ..judge_profiles import (
     model_profiles, default_profile_id, configured_profile,
     resolve_new_runtime, restore_runtime, check_frozen_options, legacy_runtime,
@@ -58,9 +60,16 @@ from .video_prepare import (
 )
 from .runner import run_eval, run_retry, run_resume, finish_pause, run_update_batch, spawn_background, snapshot_item_progress
 from .execution_control import resume_indexes
-from .scheduler import EvalScheduler
+from .scheduler import (
+    EvalScheduler,
+    MAX_CONCURRENCY, MAX_EVAL_TIMEOUT_S, MAX_MAX_IN_FLIGHT, MAX_WAITING_CAPACITY,
+    MIN_CONCURRENCY, MIN_EVAL_TIMEOUT_S, MIN_MAX_IN_FLIGHT, MIN_WAITING_CAPACITY,
+    MODEL_LIMITER, PIPELINE_LIMITER, get_settings,
+    apply_settings, load_persisted_settings, persist_settings,
+)
 from .exports import XlsxExports
 from .dataset_media import DatasetMedia, file_hash
+from .source_files import prepare_task_sources, source_file_path, store_upload
 from .human_baselines import HumanStore
 from .human_compare import HumanComparisons
 from .human_routes import install_human_routes
@@ -85,6 +94,7 @@ load_dotenv(BASE_DIR / ".env", override=True)  # 注入 .env 的 key；以 .env 
 
 app = FastAPI(title="auto_eval 评估台")
 _state: dict = {}
+_source_archive_pending: set[str] = set()
 EVAL_SCHEDULER = EvalScheduler()
 XLSX_EXPORTS = XlsxExports(RUNS_DIR / "exports")
 DATASET_MEDIA = DatasetMedia()
@@ -95,6 +105,7 @@ install_human_routes(app, lambda: HUMAN_COMPARISONS, lambda task_id: peek_task_a
 @app.on_event("startup")
 async def _load():
     _state["cfg"] = load_config(CONFIG_DIR)
+    load_persisted_settings()  # 加载 runs/web_settings.json，绝不让坏文件阻断启动
     await asyncio.to_thread(HUMAN_COMPARISONS.recover)
     EVAL_SCHEDULER.start()
 
@@ -122,6 +133,8 @@ class EvalReq(BaseModel):
     items: list[dict]
     options: dict = {}
     dataset_name: str = ""
+    source_file_id: str = Field(default="", max_length=32)
+    source_task_id: str = Field(default="", max_length=128)
     evaluation_profile: str | None = None
 
 
@@ -133,6 +146,8 @@ class EvalItemsReq(BaseModel):
     items: list[dict]
     options: dict = {}
     dataset_name: str = ""  # 仅新建时生效，更新时忽略
+    source_file_id: str = Field(default="", max_length=32)
+    source_task_id: str = Field(default="", max_length=128)
     evaluation_profile: str | None = None
 
 
@@ -154,7 +169,7 @@ class QueuePositionReq(BaseModel):
 
 
 class ResumeReq(BaseModel):
-    concurrency: int = Field(ge=1, le=128, strict=True)
+    concurrency: int | None = Field(default=None, ge=1, le=128, strict=True)
     include_failed: bool = False
     idempotency_key: str = Field(default="", max_length=128)
 
@@ -164,11 +179,14 @@ class ResumeReq(BaseModel):
 _VIDEO_EXTENSIONS = VIDEO_EXTENSIONS
 
 
-def _compare_protocol_or_422(protocol_id: str | None):
+def _compare_protocol_or_422(protocol_id: str | None, *, require_selectable: bool = False):
     try:
-        return resolve_compare_protocol(protocol_id)
+        protocol = resolve_compare_protocol(protocol_id)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+    if require_selectable and not protocol.selectable:
+        raise HTTPException(422, f"评测标准「{protocol.display}」暂不可用于新建任务，请选择其他版本")
+    return protocol
 
 
 def _protocol_manifest(protocol, app_cfg, options: dict, resolved_judges=None) -> dict:
@@ -188,7 +206,13 @@ def _protocol_manifest(protocol, app_cfg, options: dict, resolved_judges=None) -
             "model": judge.model,
             "temperature": judge.temperature,
             "top_p": judge.top_p,
+            "top_k": judge.top_k,
             "seed": judge.seed,
+            "frequency_penalty": judge.frequency_penalty,
+            "presence_penalty": judge.presence_penalty,
+            "max_tokens": judge.max_tokens,
+            "n": judge.n,
+            "compare_structured_output": judge.compare_structured_output,
             "vl_high_resolution_images": judge.vl_high_resolution_images,
             "enable_thinking": judge.enable_thinking,
         }
@@ -280,7 +304,9 @@ def _validate_eval_request(req: EvalReq, app_cfg, *, previous_items=None) -> Non
             item.clear()
             item.update(normalized)
         except ValueError as exc:
-            invalid.append(f"第{index}条 {exc}")
+            case_id = item.get("id")
+            case_label = f"（Case {case_id.strip()}）" if isinstance(case_id, str) and case_id.strip() else ""
+            invalid.append(f"第{index}条{case_label} {exc}")
     try:
         validate_conversations([*(previous_items or []), *req.items])
     except ValueError as exc:
@@ -329,9 +355,11 @@ def _validate_batch_item_ids(items: list[dict]) -> None:
 
 @app.get("/api/config")
 def api_config():
-    from ..request_throttle import recommended_concurrency, supports_bailian_pacing
     from ..preparation import preparation_concurrency
 
+    # 模型并发改由全局 MODEL_LIMITER 统一管理；所有模型调用都走同一调度器，
+    # 前端据此轮询 /api/request-pacing 展示全局限流状态。
+    global_concurrency = get_settings().concurrency
     c = cfg()
     profiles = model_profiles(c)
     public_profiles = []
@@ -341,21 +369,25 @@ def api_config():
             "id": profile.id, "display": profile.display, "model": profile.model,
             "judge_name": profile.judge_name, "supports_thinking": profile.supports_thinking,
             "default_enable_thinking": profile.default_enable_thinking,
-            "recommended_concurrency": recommended_concurrency([judge]),
-            "request_pacing": supports_bailian_pacing(judge),
+            "recommended_concurrency": global_concurrency,
+            "request_pacing": True,
         })
     return {
         "judge_model_profiles": public_profiles,
         "default_judge_model_profile": default_profile_id(c, profiles),
         "media_concurrency": preparation_concurrency(),
+        "concurrency": global_concurrency,
+        "max_in_flight": MODEL_LIMITER.stats()["max_in_flight"],
+        "waiting_capacity": get_settings().waiting_capacity,
         "judges": [
             {"name": j.name, "display": j.display or j.name,
-             "recommended_concurrency": recommended_concurrency([j]),
-             "request_pacing": supports_bailian_pacing(j)}
+             "recommended_concurrency": global_concurrency,
+             "request_pacing": True}
             for j in c.judges
         ],
         "evaluation_profiles": [
-            profile.public_metadata() for profile in list_compare_protocols()
+            {**profile.public_metadata(), "selectable": profile.selectable}
+            for profile in list_compare_protocols()
         ],
     }
 
@@ -371,6 +403,7 @@ def api_parse(req: ParseReq):
     else:
         raise HTTPException(400, "需提供 text、jsonl 或 csv")
     return {"items": items, "errors": errs, "count": len(items),
+            "blocked": req.mode == "compare" and any(CONTEXT_ERROR_CODE in error for error in errs),
             "rejected_count": len(errs),
             "evidence_counts": {mode: sum(item.get("evidence_mode") == mode for item in items)
                                 for mode in ("long_screenshot", "video_frames")}}
@@ -383,11 +416,11 @@ async def api_compare_preflight(req: EvalReq):
     from .conversation_prepare import ConversationPreparation
     if req.mode != "compare":
         raise HTTPException(422, "多轮预检查仅支持 compare")
+    protocol = _compare_protocol_or_422(req.evaluation_profile, require_selectable=True)
     app_cfg = cfg()
     _validate_eval_request(req, app_cfg)
     _, judges = _new_judge_runtime(app_cfg, req.options)
     profile = app_cfg.visual_modes["rich_content"]
-    protocol = _compare_protocol_or_422(req.evaluation_profile)
     limits = resolve_image_limits(judges[0], profile)
     def inspect():
         prepared = ConversationPreparation(req.items, "preflight-" + uuid.uuid4().hex, profile, limits)
@@ -396,7 +429,8 @@ async def api_compare_preflight(req: EvalReq):
             error = None
             try:
                 bundle = prepared.prepare(item)
-                system = protocol.system_template.render(persona=judges[0].persona,
+                system_template, _ = protocol.prompt_templates(item.get("product_count", 2))
+                system = system_template.render(persona=judges[0].persona,
                     product_count=item.get("product_count", 2), evidence_mode="long_screenshot")
                 assemble_conversation(system, bundle, protocol)
             except Exception as exc:
@@ -415,61 +449,124 @@ async def api_compare_preflight(req: EvalReq):
 
 
 @app.get("/api/request-pacing")
-async def api_request_pacing(model: str | None = None) -> dict:
-    """Read local request pacing without creating a controller or exposing keys."""
-    from ..request_throttle import MODEL, supports_bailian_pacing
+async def api_request_pacing() -> dict:
+    """Read global model-limiter diagnostics without exposing keys.
 
-    controllers = getattr(asyncio.get_running_loop(), "_auto_eval_request_throttles", {})
-    controller = controllers.get(model or MODEL)
-    result = {
-        "enabled": any(supports_bailian_pacing(judge) for judge in cfg().judges),
-        "active": controller is not None,
+    原百炼 RequestThrottle 已移除，这里返回共享令牌桶 MODEL_LIMITER /
+    PIPELINE_LIMITER 的实时统计，供前端“模型调度”展示。
+    """
+    return {
+        "enabled": True,
+        "active": True,
         "scope": "process_event_loop",
-        "controller": controller.snapshot() if controller is not None else None,
+        "model_limiter": MODEL_LIMITER.stats(),
+        "pipeline_limiter": PIPELINE_LIMITER.stats(),
+        "settings": {
+            "concurrency": get_settings().concurrency,
+            "max_in_flight": get_settings().max_in_flight,
+            "waiting_capacity": get_settings().waiting_capacity,
+            "eval_timeout_s": get_settings().eval_timeout_s,
+        },
     }
-    app_cfg = cfg()
-    if hasattr(app_cfg, "judge_model_profiles"):
-        from ..request_throttle import pacing_config
-        policies = []
-        for profile in model_profiles(app_cfg):
-            judge = configured_profile(app_cfg, profile, profile.default_enable_thinking)
-            policy = pacing_config(judge)
-            if policy:
-                policies.append({"profile_id": profile.id, **policy})
-        snapshots = [{"model": key, **value.snapshot()} for key, value in controllers.items()]
-        selected = next((row for row in snapshots if row.get("model") == model or model in row.get("models", [])), None) if model else (snapshots[0] if snapshots else None)
-        result.update(controllers=snapshots, policies=policies,
-                      enabled=any(p["model"] == model for p in policies) if model else bool(policies),
-                      active=selected is not None, controller=selected)
-    return result
+
+
+class SettingsReq(BaseModel):
+    concurrency: int | None = None
+    max_in_flight: int | None = None
+    waiting_capacity: int | None = None
+    eval_timeout_s: float | None = None
+    judges: list[str] | None = None
+
+
+def _settings_payload() -> dict:
+    s = get_settings()
+    configured = [j.name for j in cfg().judges]
+    # 配置变化后持久化的名字可能失效：按当前配置过滤，空则回落第一个
+    judges = [name for name in s.judges if name in configured] or configured[:1]
+    return {
+        "concurrency": s.concurrency,
+        "max_in_flight": s.max_in_flight,
+        "waiting_capacity": s.waiting_capacity,
+        "eval_timeout_s": s.eval_timeout_s,
+        "judges": judges,
+    }
+
+
+@app.get("/api/settings")
+async def api_get_settings() -> dict:
+    """读取全局运行设置（模型速率/在途/预处理并发/单题超时/裁判）。"""
+    return _settings_payload()
+
+
+@app.put("/api/settings")
+async def api_put_settings(req: SettingsReq) -> dict:
+    """热调全局运行设置并持久化到 runs/web_settings.json。越界值 422。"""
+    if req.concurrency is not None and (isinstance(req.concurrency, bool) or not MIN_CONCURRENCY <= req.concurrency <= MAX_CONCURRENCY):
+        raise HTTPException(422, f"concurrency 须为 {MIN_CONCURRENCY}–{MAX_CONCURRENCY}")
+    if req.max_in_flight is not None and (isinstance(req.max_in_flight, bool) or not MIN_MAX_IN_FLIGHT <= req.max_in_flight <= MAX_MAX_IN_FLIGHT):
+        raise HTTPException(422, f"max_in_flight 须为 {MIN_MAX_IN_FLIGHT}–{MAX_MAX_IN_FLIGHT}")
+    if req.waiting_capacity is not None and (isinstance(req.waiting_capacity, bool) or not MIN_WAITING_CAPACITY <= req.waiting_capacity <= MAX_WAITING_CAPACITY):
+        raise HTTPException(422, f"waiting_capacity 须为 {MIN_WAITING_CAPACITY}–{MAX_WAITING_CAPACITY}")
+    if req.eval_timeout_s is not None and (isinstance(req.eval_timeout_s, bool) or not MIN_EVAL_TIMEOUT_S <= req.eval_timeout_s <= MAX_EVAL_TIMEOUT_S):
+        raise HTTPException(422, f"eval_timeout_s 须为 {MIN_EVAL_TIMEOUT_S}–{MAX_EVAL_TIMEOUT_S}")
+    apply_settings(
+        concurrency=req.concurrency,
+        max_in_flight=req.max_in_flight,
+        waiting_capacity=req.waiting_capacity,
+        eval_timeout_s=req.eval_timeout_s,
+        judges=req.judges,
+    )
+    persist_settings()
+    return _settings_payload()
+
+
+async def _request_source_files(req: EvalReq | EvalItemsReq, task_id: str) -> list[dict]:
+    """Archive original uploads independently of mutable evaluation inputs."""
+    source_task = None
+    source_task_id = req.source_task_id or req.options.get("dataset_source_task_id", "")
+    if not req.source_file_id and source_task_id:
+        if not isinstance(source_task_id, str):
+            raise HTTPException(422, "source_task_id 必须是字符串")
+        source_task = await peek_task_async(_validate_param_id(source_task_id, "source_task_id"))
+        if source_task is None:
+            raise HTTPException(404, "来源历史不存在或已删除，请重新上传源文件")
+    if not req.source_file_id and source_task is None:
+        return []
+    try:
+        return await asyncio.to_thread(
+            prepare_task_sources, task_id,
+            source_file_id=req.source_file_id, source_task=source_task,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(500, "源文件归档失败，请稍后重试") from exc
 
 
 @app.post("/api/eval")
 async def api_eval(req: EvalReq):
+    # Older clients may still send per-task capacity; global settings now own it.
+    req.options.pop("concurrency", None)
     if not req.items:
         raise HTTPException(400, "items 为空")
     app_cfg = cfg()
-    judge_runtime, judges = _new_judge_runtime(app_cfg, req.options)
     _validate_eval_request(req, app_cfg)
-    from ..request_throttle import recommended_concurrency
-
-    req.options.setdefault("concurrency", recommended_concurrency(judges))
-    try:
-        capacity = int(req.options["concurrency"])
-    except (ValueError, TypeError):
-        raise HTTPException(422, "并发容量须为 1–128 的整数")
-    if isinstance(req.options["concurrency"], bool) or capacity != req.options["concurrency"] or not 1 <= capacity <= 128:
-        raise HTTPException(422, "并发容量须为 1–128 的整数")
+    judge_runtime, judges = _new_judge_runtime(app_cfg, req.options)
+    # 模型调用并发统一由全局 MODEL_LIMITER 决定，不再从每个任务的 options 单独设置。
     protocol = (
-        _compare_protocol_or_422(req.evaluation_profile)
+        _compare_protocol_or_422(req.evaluation_profile, require_selectable=True)
         if req.mode == "compare"
         else None
     )
+    task_id = uuid.uuid4().hex[:12]
+    source_files = await _request_source_files(req, task_id)
     task = new_task(
         req.mode,
         req.items,
         req.options,
         dataset_name=req.dataset_name.strip(),
+        task_id=task_id,
+        source_files=source_files,
         evaluation_profile=protocol.id if protocol else "",
         protocol_manifest=(
             _protocol_manifest(protocol, app_cfg, req.options, judges) if protocol else {}
@@ -562,12 +659,19 @@ async def api_resume(task_id: str, req: ResumeReq):
     if not indexes:
         raise HTTPException(409, "没有待执行的题目；如需重试失败项，请勾选同时重试失败项")
     app_cfg = cfg()
+    # 前端 resume 不再上报 concurrency（并发已由全局 MODEL_LIMITER 统一管控）；
+    # 缺省时回落到任务既有并发值，与新任务/调度统计口径一致。
+    effective_concurrency = req.concurrency if req.concurrency is not None else (
+        task.execution_control.get("concurrency")
+        or (task.options.get("concurrency") if isinstance(task.options.get("concurrency"), int) else None)
+        or 4
+    )
     attempt = {"id": f"resume_{uuid.uuid4().hex[:10]}", "idempotency_key": idem,
                "status": "queued", "created_at": time.time(), "indexes": indexes,
-               "concurrency": req.concurrency, "include_failed": req.include_failed,
+               "concurrency": effective_concurrency, "include_failed": req.include_failed,
                "completed": 0, "failed": 0}
     attempts.append(attempt)
-    task.execution_control.update(state="queued", concurrency=req.concurrency, pending_indexes=indexes.copy())
+    task.execution_control.update(state="queued", concurrency=effective_concurrency, pending_indexes=indexes.copy())
     _freeze_legacy_judge(task, app_cfg)
     position = EVAL_SCHEDULER.enqueue(task, app_cfg, run_resume)
     await wait_task_save(task, save=save_task)
@@ -577,6 +681,7 @@ async def api_resume(task_id: str, req: ResumeReq):
 @app.post("/api/eval/{task_id}/retries", status_code=202)
 async def api_retry_failed(task_id: str, req: RetryReq):
     """手动创建失败补跑，并作为独立 job 加入全局 FIFO 队列。"""
+    req.options.pop("concurrency", None)
     task_id = _validate_param_id(task_id, "task_id")
     task = await get_task_async(task_id)
     if not task:
@@ -713,10 +818,20 @@ async def api_eval_items(req: EvalItemsReq):
     串行会话在后台评测（批次间并行、后完成者按 index 覆盖）；接口不流式，
     立即返回合并摘要，结果经 GET /api/eval/item/result 轮询获取。
     """
+    req.options.pop("concurrency", None)
     task_id = _validate_param_id(req.task_id, "task_id")
     if not req.items:
         raise HTTPException(400, "items 为空")
     _validate_batch_item_ids(req.items)
+    # Complete file I/O before inspecting mutable task state. From get_task to
+    # the batch pin below, validation/merge must stay atomic on the event loop.
+    if task_id in _source_archive_pending:
+        raise HTTPException(409, "任务正在归档源文件，请稍后再更新")
+    _source_archive_pending.add(task_id)
+    try:
+        source_files = await _request_source_files(req, task_id)
+    finally:
+        _source_archive_pending.discard(task_id)
     app_cfg = cfg()
     task = get_task(task_id)
     created = task is None
@@ -762,7 +877,8 @@ async def api_eval_items(req: EvalItemsReq):
         _check_judge_options(task, req.options)
     protocol = (
         _compare_protocol_or_422(
-            requested_profile if created else task.evaluation_profile
+            requested_profile if created else task.evaluation_profile,
+            require_selectable=created,
         )
         if mode == "compare"
         else None
@@ -792,15 +908,20 @@ async def api_eval_items(req: EvalItemsReq):
             dict(req.options),
             dataset_name=req.dataset_name.strip(),
             task_id=task_id,
+            source_files=source_files,
             evaluation_profile=protocol.id if protocol else "",
             protocol_manifest=(
                 _protocol_manifest(protocol, app_cfg, req.options, judges) if protocol else {}
             ),
             judge_runtime=judge_runtime,
         )
+    elif source_files:
+        existing_ids = {source["id"] for source in task.source_files}
+        task.source_files.extend(source for source in source_files if source["id"] not in existing_ids)
     _freeze_legacy_judge(task, app_cfg)
     batch, replaced_ids, added_ids = merge_items_by_id(task, req.items)
     effective_options = {**task.options, **req.options}
+    effective_options.pop("concurrency", None)
     batch_id = uuid.uuid4().hex[:12]
     task.execution_control.setdefault("update_batches", {})[batch_id] = {
         "remaining": [index for index, _ in batch], "options": effective_options,
@@ -881,6 +1002,18 @@ async def api_item_result(task_id: str, item_id: str):
 
 _MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 模块常量便于测试 monkeypatch
 _UPLOAD_CHUNK = 1024 * 1024
+
+
+@app.post("/api/upload/dataset-source")
+async def api_upload_dataset_source(file: UploadFile = File(...)):
+    try:
+        return await store_upload(file)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(500, "源文件保存失败，请稍后重试") from exc
+    finally:
+        await file.close()
 
 
 @app.post("/api/upload/query-image")
@@ -1089,6 +1222,7 @@ async def api_dataset(task_id: str):
     fields.update(f"{name}{n}" for name in ("video", "screenshot", "answer", "context", "screenshot_meta", "video_source")
                   for n in range(1, 4))
     return {"task_id": task.id, "dataset_name": task.dataset_name, "created_at": task.created_at,
+            "source_files": copy.deepcopy(task.source_files),
             "note": task.note, "items": copy.deepcopy([
                 {key: value for key, value in item.items() if key in fields} for item in task.items
             ])}
@@ -1126,10 +1260,61 @@ def api_dataset_media_file(token: str, download: bool = False):
                         headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
 
 
+def _history_timestamp(value) -> float | None:
+    if not value or isinstance(value, bool):
+        return None
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return timestamp if math.isfinite(timestamp) else None
+
+
+def _history_display_time(row: dict) -> float | None:
+    for value in (row.get("updated_at"), row.get("created_at")):
+        timestamp = _history_timestamp(value)
+        if timestamp is not None:
+            return timestamp
+    return None
+
+
 @app.get("/api/history")
-async def api_history(limit: int = 50, page: int | None = None):
-    # Keep the legacy limit-only API; paginated callers can reach all history.
-    rows = await asyncio.to_thread(list_snapshots, limit=limit if page is None else None)
+async def api_history(
+    limit: int = 50,
+    page: int | None = None,
+    dataset_name: str = "",
+    evaluation_profile: str = "",
+    start_time: float | None = None,
+    end_time: float | None = None,
+):
+    for value in (start_time, end_time):
+        if value is not None and not math.isfinite(value):
+            raise HTTPException(422, "历史记录检索时间必须是有效时间")
+    if start_time is not None and end_time is not None and start_time > end_time:
+        raise HTTPException(422, "开始时间不能晚于结束时间")
+    name = dataset_name.strip().casefold()
+    profile = evaluation_profile.strip()
+    has_filters = bool(name or profile or start_time is not None or end_time is not None)
+    # Filter the full archive before limiting the displayed matches. This keeps
+    # older matching tasks searchable while retaining the panel's 200-row cap.
+    rows = await asyncio.to_thread(
+        list_snapshots, limit=None if has_filters else (limit if page is None else 200),
+    )
+    if has_filters:
+        filtered = []
+        for row in rows:
+            if name and name not in str(row.get("dataset_name") or "").casefold():
+                continue
+            if profile and row.get("evaluation_profile") != profile:
+                continue
+            if start_time is not None or end_time is not None:
+                timestamp = _history_display_time(row)
+                if timestamp is None or (start_time is not None and timestamp < start_time) or (
+                    end_time is not None and timestamp > end_time
+                ):
+                    continue
+            filtered.append(row)
+        rows = filtered[:limit if page is None else 200]
     pagination = {}
     if page is not None:
         total = len(rows)
@@ -1140,6 +1325,11 @@ async def api_history(limit: int = 50, page: int | None = None):
     # 磁盘历史会把 pending/running/queued 视为上次服务中断；当前进程中的活
     # 对象需覆盖回来，避免历史列表把正在排队或运行的任务误显示为 error。
     for row in rows:
+        # Keep the visible fallback consistent with filtering, and never send
+        # non-finite cached timestamps to the JSON response serializer.
+        for field in ("updated_at", "created_at"):
+            if field in row and _history_timestamp(row[field]) is None:
+                row[field] = None
         task = TASKS.get(row.get("task_id"))
         if task is not None:
             row["task_timing"] = task.timing_snapshot()
@@ -1168,8 +1358,28 @@ def api_history_detail(task_id: str):
     return snapshot_payload(snapshot)
 
 
+@app.get("/api/history/{task_id}/source-files/{file_id}")
+def api_history_source_file(task_id: str, file_id: str):
+    task = peek_task(_validate_param_id(task_id, "task_id"), touch=False)
+    if task is None:
+        raise HTTPException(404, "历史数据不存在或已删除")
+    source = next((entry for entry in task.source_files if entry.get("id") == file_id), None)
+    if source is None:
+        raise HTTPException(404, "未保存该源文件")
+    try:
+        path = source_file_path(task.id, file_id)
+    except (ValueError, OSError) as exc:
+        raise HTTPException(404, "源文件不存在或已损坏，请重新上传") from exc
+    return FileResponse(
+        path, media_type="application/octet-stream", filename=source["filename"],
+        headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+    )
+
+
 @app.delete("/api/history/{task_id}")
 async def api_history_delete(task_id: str):
+    if task_id in _source_archive_pending:
+        raise HTTPException(409, "任务正在归档源文件，请稍后再删除")
     if task_save_pending(task_id):
         raise HTTPException(409, "任务正在保存，请稍后再删除")
     # R6：TASKS 增删必须发生在事件循环线程（原同步 def 在线程池执行，与

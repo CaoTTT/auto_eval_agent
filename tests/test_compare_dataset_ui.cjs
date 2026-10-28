@@ -5,14 +5,15 @@ async function tick(){for(let i=0;i<12;i++)await Promise.resolve();}
 async function main(){
   let app,submitted,allowReplace=true,confirmations=0,parsed;
   const raw=Array.from({length:25},(_,i)=>({id:`q${i}`,query:`question ${i}`,product_count:2,
-    screenshot1:'a.png',screenshot2:'b.png',answer1:'answer',query_images:i%2?['q.png']:[]}));
+    screenshot1:'a.png',screenshot2:'b.png',answer1:'answer',context1:'产品1背景',context2:'产品2背景',query_images:i%2?['q.png']:[]}));
   const context={ref:value=>({value}),computed:fn=>({get value(){return fn();}}),
-    onMounted(){},onUnmounted(){},nextTick(){},AbortController,console,
+    onMounted(){},onUnmounted(){},nextTick(){},AbortController,FormData,console,
     confirm(){confirmations++;return allowReplace;},alert(message){throw Error(message);},
     createApp(options){app=options.setup();return {mount(){}};},
     async fetch(url,options){
       if(url==='/api/eval'){submitted=JSON.parse(options.body);return {ok:false,json:async()=>({detail:'test stop'})};}
       if(url==='/api/parse')return {ok:true,json:async()=>parsed};
+      if(url==='/api/upload/dataset-source')return {ok:true,json:async()=>({id:'uploaded-source'})};
       throw Error(url);
     }};
   vm.runInNewContext(strip(read('compare-cases.js')),context);
@@ -39,9 +40,9 @@ async function main(){
   assert.equal(submitted,null);assert.match(app.runError.value,/不会跳过/);
 
   parsed={items:[
-    {id:'shots',query:'s',product_count:2,evidence_mode:'long_screenshot',screenshot1:'a.png',screenshot2:'b.png',
+    {id:'shots',query:'s',product_count:2,context1:'产品1背景',context2:'产品2背景',evidence_mode:'long_screenshot',screenshot1:'a.png',screenshot2:'b.png',
       source_data:{video1:'a.mp4',video2:'b.mp4'}},
-    {id:'video',query:'v',product_count:2,evidence_mode:'video_frames',video1:'a.mp4',video2:'b.mp4',
+    {id:'video',query:'v',product_count:2,context1:'产品1背景',context2:'产品2背景',evidence_mode:'video_frames',video1:'a.mp4',video2:'b.mp4',
       source_data:{screenshot1:'inactive.png'}}],
     errors:['Case rejected: screenshot2 / video1 missing'],rejected_count:1,
     evidence_counts:{long_screenshot:1,video_frames:1}};
@@ -114,7 +115,7 @@ async function main(){
   cases.toggleMedia(remoteQuery,remoteQueryFile);
   assert.equal(caseContext.isRemoteUrl('https://example.test/a.png'),true);
   assert.equal(caseContext.isRemoteUrl('ftp://example.test/a.png'),false);
-  const legacy={id:'legacy',query:'old question',product_count:2,video1:'a.mp4',video2:'b.mp4',
+  const legacy={id:'legacy',query:'old question',product_count:2,context:'旧版产品1背景',context2:'产品2背景',video1:'a.mp4',video2:'b.mp4',
     source_data:{session_id:'business-session',turn_index:3}};
   assert.equal(caseContext.mapper(legacy,0).sessionId,'','source metadata must not activate conversations');
   assert.equal(caseContext.mapper(legacy,0).turnIndex,null);

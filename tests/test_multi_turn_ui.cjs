@@ -6,7 +6,7 @@ const path = require('node:path');
 async function main() {
   let app, submitted, preflight, blocked = false;
   const items = [1,2,3].map(t => ({id:`S-T${t}`,session_id:'S',turn_index:t,screenshot_scope:'current_turn',
-    query:`question ${t}`,query_images:t===3?['q1.png','q2.png']:[],screenshot1:`p1-t${t}.png`,screenshot2:`p2-t${t}.png`,product_count:2}));
+    query:`question ${t}`,context1:'产品1背景',context2:'产品2背景',query_images:t===3?['q1.png','q2.png']:[],screenshot1:`p1-t${t}.png`,screenshot2:`p2-t${t}.png`,product_count:2}));
   const sandbox = {
     ref:value=>({value}),computed:getter=>({get value(){return getter();}}),
     onMounted(){},onUnmounted(){},nextTick:async()=>{},
@@ -14,6 +14,7 @@ async function main() {
     console,AbortController,FormData,setTimeout,clearTimeout,
     async fetch(url,options){
       if(url==='/api/parse')return {ok:true,json:async()=>({items,errors:[]})};
+      if(url==='/api/upload/dataset-source')return {ok:true,json:async()=>({id:'uploaded-source'})};
       if(url==='/api/compare/preflight'){
         preflight=JSON.parse(options.body);
         return {ok:true,json:async()=>({blocked_turn_count:blocked?1:0,turns:[],findings:[]})};

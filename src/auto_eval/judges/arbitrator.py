@@ -15,7 +15,6 @@ from .prompts import (
     ARBITRATOR_USER,
     parse_analysis,
     parse_json_loose,
-    resolve_prompt_context,
 )
 
 _VALID = {"right", "wrong", "partial", "unclear"}
@@ -55,7 +54,6 @@ class Arbitrator:
         ]
         user = ARBITRATOR_USER.render(
             question=item.question,
-            context=resolve_prompt_context(item.context, self.evaluation_time),
             answer=answer,
             judges=judges_summary,
             operation_mode=operation_mode,

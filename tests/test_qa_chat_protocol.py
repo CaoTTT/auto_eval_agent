@@ -324,7 +324,7 @@ async def test_real_conversation_pipeline_preserves_chat_schema_and_raw_prefix(t
     assert "当前用户问题4" not in texts and "原始回答第4轮" not in texts
     for turn in range(1, target_turn + 1):
         assert f"当前用户问题{turn}" in texts
-        assert f"共享条件第{turn}轮" in texts and f"裁判资料第{turn}轮" in texts
+        assert f"共享条件第{turn}轮" not in texts and f"裁判资料第{turn}轮" not in texts
         for product in range(1, count + 1):
             assert f"产品{product}原始回答第{turn}轮" in texts
             assert f"私有条件{product}-T{turn}" in texts

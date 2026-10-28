@@ -1,8 +1,8 @@
 """输入解析：上传 JSON / JSONL / CSV → 标准化题目列表。
 
 每题返回 dict：
-  compare:      {query, context?, product_count?, video1, video2, video3?,
-                 answer1?, answer2?, answer3?, context1?, context2?, context3?,
+  compare:      {query, product_count?, video1, video2, video3?,
+                 answer1?, answer2?, answer3?, context1, context2, context3?,
                  task_start_time?, task_end_time?}
   rich_content: {id?, query, context?, video_path, answer_text?,
                  task_start_time?, task_end_time?, category?}
@@ -16,6 +16,7 @@ import json
 import math
 from numbers import Real
 from typing import Iterator, Literal
+from ..compare_input import ProductContextError, normalize_product_contexts
 from ..query_images import normalize_query_input
 from ..conversation import is_conversation, normalize_turn, validate_conversations
 
@@ -110,8 +111,12 @@ def compare_evidence_mode(obj: dict) -> tuple[int, str]:
 
 def normalize_compare_evidence(obj: dict) -> dict:
     """Keep only selected input paths; unused evidence remains in source_data."""
+    contexts = normalize_product_contexts(obj, _compare_product_count(obj))
     count, mode = compare_evidence_mode(obj)
     normalized = dict(obj)
+    normalized.update(contexts)
+    # Retain legacy shared context for frozen protocols. The current 1022
+    # renderer uses only contextN and never broadcasts this alias.
     selected = "screenshot" if mode == "long_screenshot" else "video"
     for number in range(1, 4):
         for kind in ("screenshot", "video"):
@@ -179,18 +184,37 @@ def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
     errors: list[str] = []
     video_item_ids: set[str] = set()
     records = list(_json_records(content))
+    # A second validation failure must not hide a missing product background.
+    # In particular, import cannot silently drop a malformed case and evaluate
+    # only the remaining rows when that case is missing contextN.
+    context_failures: dict[int, str] = {}
+    if mode == "compare":
+        for ln, location, obj, error in records:
+            if error or not isinstance(obj, dict):
+                continue
+            try:
+                normalize_product_contexts(obj, _compare_product_count(obj))
+            except ProductContextError as exc:
+                case_id = obj.get("id")
+                if isinstance(case_id, str) and case_id.strip():
+                    location += f"（Case {case_id.strip()}）"
+                context_failures[ln] = f"{location} {exc}"
+            except ValueError:
+                # A conflicting/invalid product declaration is reported by
+                # normal item validation; there is no valid product set yet.
+                pass
     multi = mode == "compare" and any(isinstance(obj, dict) and is_conversation(obj) for _, _, obj, _ in records)
     rejected_sessions = set()
     if multi:
         if any(error or not isinstance(obj, dict) for _, _, obj, error in records):
             return [], [error or f"{location}必须是 JSON 对象" for _, location, obj, error in records
-                        if error or not isinstance(obj, dict)] + ["多轮批次存在无法定位归属的记录，未导入任何记录"]
+                        if error or not isinstance(obj, dict)] + list(context_failures.values()) + ["多轮批次存在无法定位归属的记录，未导入任何记录"]
         groups = {}
         for _, _, obj, _ in records:
             if is_conversation(obj):
                 sid = obj.get("session_id")
                 if not isinstance(sid, str) or not sid.strip():
-                    return [], ["conversation_structure_invalid: session_id 必须是非空字符串，无法定位错误记录的会话"]
+                    return [], ["conversation_structure_invalid: session_id 必须是非空字符串，无法定位错误记录的会话", *context_failures.values()]
                 groups.setdefault(sid.strip(), []).append(obj)
         for sid, turns in groups.items():
             try:
@@ -207,6 +231,9 @@ def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
                 rejected_sessions.update(it["session_id"].strip() for it in matches if it.get("session_id"))
                 errors.append(f"conversation_structure_invalid: id 重复 {item_id}，关联会话已拒绝")
     for ln, location, obj, error in records:
+        if ln in context_failures:
+            errors.append(context_failures[ln])
+            continue
         if multi and isinstance(obj, dict) and is_conversation(obj) and str(obj.get("session_id", "")).strip() in rejected_sessions:
             continue
         if error:
@@ -223,16 +250,18 @@ def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
             continue
         item: dict = {"query": q.strip()}
         context = obj.get("context")
-        if context is not None and not isinstance(context, str):
-            errors.append(f"{location} context 必须是字符串")
-            continue
-        if context and context.strip():
+        if mode != "compare":
+            if context is not None and not isinstance(context, str):
+                errors.append(f"{location} context 必须是字符串")
+                continue
+        if isinstance(context, str) and context.strip():
             item["context"] = context.strip()
         if mode == "compare":
             try:
                 item.update(normalize_turn(obj, external=True))
                 item.update(normalize_query_input(obj))
                 product_count, evidence_mode = compare_evidence_mode(obj)
+                item.update(normalize_product_contexts(obj, product_count))
             except ValueError as exc:
                 errors.append(f"{location} {exc}")
                 continue
@@ -255,20 +284,6 @@ def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
                 errors.append(f"{location} {exc}")
                 continue
             item.update(ct)
-            for ctx_field in (
-                f"context{product_no}"
-                for product_no in range(1, product_count + 1)
-            ):
-                val = obj.get(ctx_field)
-                if val is not None:
-                    if not isinstance(val, str):
-                        errors.append(f"{location} {ctx_field} 必须是字符串")
-                        invalid = True
-                        break
-                    if val.strip():
-                        item[ctx_field] = val.strip()
-            if invalid:
-                continue
             for ans_field in (
                 f"answer{product_no}"
                 for product_no in range(1, product_count + 1)

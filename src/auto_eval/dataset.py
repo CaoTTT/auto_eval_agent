@@ -1,6 +1,6 @@
 """评测集加载与 reference 隔离。
 
-关键：`to_prompt()` 只返回 question+context，绝不包含 reference，
+关键：`to_prompt()` 只返回 question，不包含公共 context 或 reference，
 保证 Runner（作答）与 Judge（盲评）在结构上拿不到参考答案。
 """
 from __future__ import annotations
@@ -40,18 +40,11 @@ def load_dataset(path: str | Path, limit: int | None = None) -> list[EvalItem]:
 
 
 def to_prompt(item: EvalItem) -> str:
-    """生成喂给被测模型/裁判的 prompt（严格不含 reference）。
+    """生成喂给被测模型/裁判的问题文本，不传公共 context 或 reference。
 
     在这里集中控制作答格式，保证所有被测模型公平地拿到同样的输入。
     """
-    parts: list[str] = []
-    if item.context:
-        parts.append("可信背景条件（由评测样本提供，请作为回答前提）：")
-        parts.append(item.context.strip())
-        parts.append("")
-        parts.append("用户问题：")
-    parts.append(item.question.strip())
-    return "\n".join(parts).strip()
+    return item.question.strip()
 
 
 def assert_no_reference_leak(prompt: str, item: EvalItem) -> None:

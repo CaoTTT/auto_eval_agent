@@ -207,6 +207,7 @@ def test_encoded_edge_rejection_does_not_assume_monotonic_size(tmp_path, monkeyp
 @pytest.mark.parametrize("count", [2, 3])
 def test_jsonl_and_api_screenshots(count):
     item = {"query": "q", **{f"screenshot{n}": f"{n}.png" for n in range(1, count+1)}}
+    item.update({f"context{n}": f"产品{n}背景" for n in range(1, count+1)})
     items, errors = parse_jsonl(json.dumps(item), "compare")
     assert not errors and items[0]["product_count"] == count
     assert items[0]["evidence_mode"] == "long_screenshot"
@@ -222,7 +223,8 @@ def test_jsonl_and_api_screenshots(count):
     {"screenshot2": 42},
 ])
 def test_jsonl_and_direct_api_reject_conflicts(updates):
-    item = {"query": "q", "screenshot1": "a.png", "screenshot2": "b.png", **updates}
+    item = {"query": "q", "screenshot1": "a.png", "screenshot2": "b.png",
+            "context1": "产品1背景", "context2": "产品2背景", **updates}
     assert parse_jsonl(json.dumps(item), "compare")[1]
     with pytest.raises(HTTPException):
         server._validate_eval_request(server.EvalReq(mode="compare", items=[item]), AppConfig(judges=[JudgeConfig(name="test")]))
@@ -232,6 +234,7 @@ def test_jsonl_and_direct_api_reject_conflicts(updates):
 def test_all_evidence_combinations_use_one_complete_layer(count):
     for present in itertools.product((False, True), repeat=count * 2):
         raw = {"id": "mixed", "query": "q", "product_count": count}
+        raw.update({f"context{n}": f"产品{n}背景" for n in range(1, count+1)})
         for n in range(count):
             for offset, kind in ((0, "screenshot"), (count, "video")):
                 if present[offset + n]:
@@ -271,6 +274,8 @@ def test_mixed_import_reports_rejected_cases_and_layer_counts():
         {"id": "fallback", "query": "q", "screenshot1": "a.png",
          "video1": "a.mp4", "video2": "b.mp4", "evidence_mode": "long_screenshot"},
     ]
+    for row in rows:
+        row.update(context1="产品1背景", context2="产品2背景")
     for content in (json.dumps(rows), "\n".join(map(json.dumps, rows))):
         response = server.api_parse(server.ParseReq(mode="compare", jsonl=content))
         assert response["count"] == 2 and response["rejected_count"] == 1
@@ -282,6 +287,7 @@ def test_mixed_import_reports_rejected_cases_and_layer_counts():
 
 def test_direct_api_drops_prepared_evidence_before_selection():
     raw = {"query": "q", "screenshot1": "a.png", "video1": "a.mp4", "video2": "b.mp4",
+           "context1": "产品1背景", "context2": "产品2背景",
            "evidence_mode": "long_screenshot", "frames1": ["stale.png"],
            "screenshot_meta1": {"original_path": "stale.png"}, "video1_path": "stale.mp4"}
     req = server.EvalReq(mode="compare", items=[raw])
@@ -322,6 +328,8 @@ async def test_mixed_batch_runner_uses_selected_prompt_for_all_products(tmp_path
     videos = {f"video{n}": f"{n}.mp4" for n in range(1, count+1)}
     rows = [{"id": "shots", "query": "q", **shots, **videos},
             {"id": "video", "query": "q", "screenshot1": shots["screenshot1"], **videos}]
+    for row in rows:
+        row.update({f"context{n}": f"产品{n}背景" for n in range(1, count+1)})
     response = server.api_parse(server.ParseReq(mode="compare", jsonl=json.dumps(rows)))
     assert not response["errors"]
     monkeypatch.setenv("OPERATION_VIDEO_ROOTS", str(tmp_path))
@@ -420,7 +428,7 @@ async def test_bailian_request_parameters_repair_and_trace(tmp_path, monkeypatch
     assert requests[0]["extra_body"].get("vl_high_resolution_images") is (True if enabled else None)
     assert requests[0]["extra_body"]["enable_thinking"] is False
     await client.repair_json("invalid")
-    assert "extra_body" not in requests[1]
+    assert requests[1]["extra_body"] == {"enable_thinking": False}
     await client.complete("s", "text only")
     assert "vl_high_resolution_images" not in requests[2].get("extra_body", {})
     trace = Path(client.trace_path).read_text(encoding="utf-8")
@@ -487,7 +495,8 @@ def test_historical_frames_without_evidence_mode_unchanged():
     streams = history._item_visual_streams(item)
     assert len(streams) == 2 and all(s["evidence_mode"] == "video_frames" for s in streams)
     assert runner._compare_frames_ready(item)
-    items, errors = parse_jsonl(json.dumps({"query":"q", "video1":"a.mp4", "video2":"b.mp4"}), "compare")
+    items, errors = parse_jsonl(json.dumps({"query":"q", "video1":"a.mp4", "video2":"b.mp4",
+                                           "context1":"产品1背景", "context2":"产品2背景"}), "compare")
     assert not errors and items[0]["evidence_mode"] == "video_frames"
 
 

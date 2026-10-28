@@ -1,4 +1,4 @@
-"""The per-case judge deadline defaults to 900s and respects task overrides."""
+"""The per-case judge deadline defaults to 3600s and respects task overrides."""
 import pytest
 
 from auto_eval.config import AppConfig, JudgeConfig
@@ -8,7 +8,7 @@ from auto_eval.web.tasks import Task
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("options, expected", [
-    ({}, 900),
+    ({}, 3600),
     ({"eval_timeout_s": 420}, 420),
     ({"eval_timeout": 600}, 600),
     ({"eval_timeout_s": 780, "eval_timeout": 600}, 780),

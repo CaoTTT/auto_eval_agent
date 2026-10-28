@@ -6,10 +6,10 @@ from urllib.parse import urlparse
 from .config import AppConfig, JudgeConfig, JudgeModelProfile, default_bailian_rate_limit
 
 BAILIAN_MODELS = {
-    "qwen3.5-397b-a17b": ("bailian_qwen35_397b", "Qwen3.5-397B-A17B"),
-    "qwen3.8-flash": ("bailian_qwen38_flash", "Qwen3.8-Flash"),
+    "qwen3.5-397b-a17b": ("qwen3.5-397b-a17b", "Qwen3.5-397B-A17B"),
+    "qwen3.8-flash": ("qwen3.8-flash", "Qwen3.8-Flash"),
 }
-FROZEN_OPTIONS = {"judges", "judge_model_profile", "enable_thinking"}
+FROZEN_OPTIONS = {"judges", "judge_model_profile", "enable_thinking", "api_endpoint"}
 
 
 def is_bailian(judge: JudgeConfig) -> bool:
@@ -22,26 +22,41 @@ def is_bailian(judge: JudgeConfig) -> bool:
 def model_profiles(config: AppConfig) -> list[JudgeModelProfile]:
     profiles = list(config.judge_model_profiles)
     if not profiles:
+        # 选项来源改走 judges.yaml 的 models: 选择列表（配置驱动，改列表下拉自动变），
+        # 不再遍历硬编码的 BAILIAN_MODELS。models 列表为空时回落旧行为
+        # （bailian 判官沿用 BAILIAN_MODELS、其他判官只用自身模型），保证没有
+        # models 列表的旧配置文件 / 测试夹具行为不变。
         for judge in config.judges:
-            model = judge.model or judge.name
-            if is_bailian(judge) and model.lower() in BAILIAN_MODELS:
-                for model_id, (profile_id, display) in BAILIAN_MODELS.items():
+            base_model = (judge.model or judge.name).lower()
+            thinking = judge.enable_thinking if judge.enable_thinking is not None else True
+            if config.models:
+                allowed = [str(m) for m in config.models]
+            elif is_bailian(judge) and base_model in BAILIAN_MODELS:
+                allowed = list(BAILIAN_MODELS)
+            else:
+                allowed = [judge.model or judge.name]  # 保留原始大小写（非百炼模型名可能区分大小写）
+            for model in allowed:
+                ml = str(model).lower()
+                if ml in BAILIAN_MODELS:
+                    profile_id, display = BAILIAN_MODELS[ml]
                     # Explicit server defaults take precedence over provider defaults.
-                    thinking = judge.enable_thinking if judge.enable_thinking is not None else True
-                    rate = judge.rate_limit if model_id == model.lower() else None
-                    if model_id == "qwen3.8-flash" and rate is None:
-                        rate = default_bailian_rate_limit(model_id)
+                    rate = judge.rate_limit if ml == base_model else None
+                    if rate is None and ml == "qwen3.8-flash":
+                        rate = default_bailian_rate_limit(ml)
                     profiles.append(JudgeModelProfile(
                         id=profile_id if len(config.judges) == 1 else f"{judge.name}_{profile_id}",
-                        display=display, judge_name=judge.name, model=model_id,
+                        display=display, judge_name=judge.name, model=ml,
                         supports_thinking=True, default_enable_thinking=thinking, rate_limit=rate,
+                        base_url=judge.base_url, api_key_env=judge.api_key_env,
                     ))
-            else:
-                profiles.append(JudgeModelProfile(
-                    id=f"configured_{judge.name}", display=model, judge_name=judge.name, model=model,
-                    supports_thinking=judge.enable_thinking is not None,
-                    default_enable_thinking=judge.enable_thinking, rate_limit=judge.rate_limit,
-                ))
+                else:
+                    profiles.append(JudgeModelProfile(
+                        id=f"configured_{judge.name}_{ml}", display=str(model), judge_name=judge.name,
+                        model=str(model),
+                        supports_thinking=judge.enable_thinking is not None,
+                        default_enable_thinking=judge.enable_thinking, rate_limit=judge.rate_limit,
+                        base_url=judge.base_url, api_key_env=judge.api_key_env,
+                    ))
     names = {j.name for j in config.judges}
     if len({p.id for p in profiles}) != len(profiles):
         raise ValueError("裁判模型配置 ID 不可重复")
@@ -71,6 +86,10 @@ def configured_profile(config: AppConfig, profile: JudgeModelProfile, thinking=N
     base = next(j for j in config.judges if j.name == profile.judge_name)
     data = base.model_dump()
     data.update(model=profile.model, enable_thinking=thinking, rate_limit=profile.rate_limit)
+    if profile.base_url is not None:
+        data["base_url"] = profile.base_url
+    if profile.api_key_env is not None:
+        data["api_key_env"] = profile.api_key_env
     if profile.total_timeout_s is not None:
         data["total_timeout_s"] = profile.total_timeout_s
     return JudgeConfig.model_validate(data)
@@ -105,8 +124,14 @@ def resolve_new_runtime(config: AppConfig, options: dict) -> tuple[dict, list[Ju
     if profile.supports_thinking and thinking is None:
         raise ValueError("支持思考的模型须配置明确的默认开关")
     judge = configured_profile(config, profile, thinking)
+    # API 跟随任务：选中端点（base_url+api_key_env 成对）冻结进裁判配置，随任务持久；
+    # 缺省（空）沿用裁判自身 base_url/api_key_env。运行期不再被任何全局设置改写。
+    if options.get("api_endpoint"):
+        raise ValueError("api_endpoint is merged into judge_model_profile; select the model profile instead")
+
     # Reference the credential slot without writing the secret value.
-    snapshot = {"version": 1, "profile_id": profile.id, "judges": [judge.model_dump()]}
+    snapshot = {"version": 1, "profile_id": profile.id,
+                "judges": [judge.model_dump()]}
     return snapshot, [judge]
 
 
@@ -118,12 +143,19 @@ def restore_runtime(config: AppConfig, runtime: dict) -> list[JudgeConfig]:
     profiles = model_profiles(config)
     for index, judge in enumerate(judges):
         base = next((j for j in config.judges if j.name == judge.name), None)
-        if base is None or (base.base_url, base.api_key_env) != (judge.base_url, judge.api_key_env):
+        if base is None:
             continue
         matches = [p for p in profiles if p.judge_name == judge.name and p.model == judge.model]
         profile = next((p for p in matches if p.id == runtime.get("profile_id")), None)
         if profile is None and len(matches) == 1:
             profile = matches[0]
+        if profile is not None:
+            current_url = profile.base_url if profile.base_url is not None else base.base_url
+            current_key = profile.api_key_env if profile.api_key_env is not None else base.api_key_env
+        else:
+            current_url, current_key = base.base_url, base.api_key_env
+        if (current_url, current_key) != (judge.base_url, judge.api_key_env):
+            continue
         if profile is not None:
             # Quotas are operational settings, not scoring parameters. Refresh
             # only the current quota so an old task cannot pin the shared model
@@ -139,12 +171,15 @@ def check_frozen_options(task, options: dict) -> None:
         # Never reinterpret a historical task using a newly selected model/toggle.
         if "judge_model_profile" in options or "enable_thinking" in options:
             raise ValueError("旧任务未记录完整裁判配置；切换模型或思考模式请新建任务")
+        if "api_endpoint" in options and options["api_endpoint"]:
+            raise ValueError("已有任务的 API/端点不可变；请新建任务")
         if "judges" in options and options["judges"] != task.options.get("judges", []):
             raise ValueError("已有任务的裁判不可变；请新建任务")
         return
     judges = runtime["judges"]
     expected = {"judges": [j["name"] for j in judges], "judge_model_profile": runtime["profile_id"],
-                "enable_thinking": judges[0].get("enable_thinking")}
+                "enable_thinking": judges[0].get("enable_thinking"),
+                "api_endpoint": runtime.get("api_endpoint") or ""}
     for key in FROZEN_OPTIONS & options.keys():
         if key == "enable_thinking" and type(options[key]) is not bool:
             raise ValueError("enable_thinking 必须为 true 或 false")
@@ -175,6 +210,11 @@ def legacy_runtime(config: AppConfig, task) -> dict:
         raise ValueError("旧任务裁判连接配置不可用，请新建任务")
     data = base.model_dump()
     data.update(record, model=model, enable_thinking=record.get("enable_thinking"))
+    # Missing historical sampling fields must not inherit today's defaults.
+    # Older requests omitted these optional settings; keep that wire behavior.
+    for field in ("top_p", "top_k", "seed", "frequency_penalty", "presence_penalty", "max_tokens", "n"):
+        data[field] = record.get(field)
+    data["temperature"] = record.get("temperature", 0.0)
     if model != base.model:
         data["rate_limit"] = None
     judge = JudgeConfig.model_validate(data)

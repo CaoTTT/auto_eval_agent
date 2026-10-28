@@ -74,7 +74,7 @@ HTTP/2 的共享连接写锁位于该事件之后，因此本实现明确使用 
 
 ```powershell
 $env:PYTHONPATH = 'C:\workspace\auto_eval_vqa\src'
-& C:\workspace\venv\Scripts\python.exe -m pytest -q tests/test_request_throttle_core.py tests/test_request_transport.py tests/test_request_throttle.py
+& C:\workspace\venv\Scripts\python.exe -m pytest -q tests/test_scheduler_limiters.py tests/test_llm_stream.py tests/test_runner_media_precedence.py tests/test_request_pacing_api.py tests/test_runner_frozen_runtime.py
 node tests/test_request_pacing_ui.cjs
 ```
 

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <title>auto_eval 评估台</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260923_result_filters">
+  <link rel="stylesheet" href="/static/style.css?v=20261028_history_search">
   <style>
     .op-cards { display:flex; flex-direction:column; gap:12px; }
     .op-card { border:1px solid #e2e8f0; border-radius:8px; padding:12px; background:#fafbfc; }
@@ -36,7 +36,7 @@
     <p class="hint">任务之间按提交顺序串行；任务内部按 Case 容量并行处理，请求按发送额度逐条启动。</p>
     <div class="table-scroll" v-if="queueEntries.length">
       <table class="grid queue-table">
-        <thead><tr><th>数据集</th><th>类型</th><th>模式</th><th>评测标准</th><th>裁判模型 / 思考</th><th>状态</th><th>队列位置</th><th>Case 容量</th><th>进度</th><th>操作</th></tr></thead>
+        <thead><tr><th>数据集</th><th>类型</th><th>模式</th><th>评测标准</th><th>裁判模型 / 思考</th><th>状态</th><th>队列位置</th><th>进度</th><th>操作</th></tr></thead>
         <tbody>
           <tr v-for="entry in queueEntries" :key="entry.job_id || entry.task_id">
             <td>{{ entry.dataset_name || entry.task_id }}</td>
@@ -46,7 +46,6 @@
             <td class="judge-runtime-cell">{{ judgeRuntimeLabel(entry.judge_runtime, entry) }}</td>
             <td><span :class="['queue-status', 'status-' + entry.status]">{{ taskStatusLabel(entry.status) }}</span></td>
             <td>{{ entry.status === 'running' ? '—' : entry.queue_position }}</td>
-            <td>{{ entry.concurrency }}</td>
             <td>{{ entry.done }}/{{ entry.total }}</td>
             <td>
               <button @click="loadHistoryTask(entry.task_id)">查看</button>
@@ -60,26 +59,35 @@
     </div>
     <p v-else class="hint">当前没有运行或排队中的任务。</p>
     <div v-if="pacingStatus" class="request-pacing-panel">
-      <div class="request-pacing-heading"><strong>百炼请求调度<template v-if="pacingStatus.model"> · {{ pacingStatus.model }}</template></strong><span class="hint">当前运行任务 · 本服务进程内共享 · 约每 2 秒更新</span></div>
+      <div class="request-pacing-heading"><strong>模型调度状态<template v-if="pacingStatus.model"> · {{ pacingStatus.model }}</template></strong><span class="hint">当前运行任务 · 全局共享 · 约每 2 秒更新</span></div>
       <dl class="request-pacing-metrics">
-        <div><dt>最近连续 1 秒启动</dt><dd>{{ pacingNumber(pacingStatus.requests_last_second) }} / {{ pacingNumber(pacingStatus.hard_second_limit) }} 次</dd></div>
-        <div><dt>连续 1 秒历史峰值</dt><dd>{{ pacingNumber(pacingStatus.peak_requests_last_second) }} 次</dd></div>
-        <div><dt>最近连续 60 秒启动</dt><dd>{{ pacingNumber(pacingStatus.requests_last_minute) }} / {{ pacingNumber(pacingStatus.request_budget) }} 次</dd></div>
-        <div><dt>等待响应</dt><dd>{{ pacingNumber(pacingStatus.inflight) }} / {{ pacingNumber(pacingStatus.inflight_limit) }} 条</dd></div>
-        <div><dt>发送目标</dt><dd>{{ pacingNumber(pacingStatus.target_rps, 2) }} 次/秒</dd></div>
-        <div><dt>Token 预算使用 / 上限</dt><dd>{{ pacingNumber(pacingStatus.token_estimated_total) }} / {{ pacingNumber(pacingStatus.token_budget) }}</dd></div>
-        <div><dt>其中未结算预留 Token</dt><dd>{{ pacingNumber(pacingStatus.reserved_tokens) }}</dd></div>
-        <div><dt>当前等待</dt><dd>{{ pacingWaitLabel(pacingStatus.wait_reason) }}<template v-if="pacingStatus.cooldown_remaining > 0"> · {{ pacingNumber(pacingStatus.cooldown_remaining, 1) }} 秒</template></dd></div>
+        <div><dt>模型速率 / 窗口</dt><dd>{{ pacingNumber(pacingStatus.model_rate) }} / {{ pacingNumber(pacingStatus.rate_window_s) }} 秒</dd></div>
+        <div><dt>模型在途</dt><dd>{{ pacingNumber(pacingStatus.inflight) }} / {{ pacingNumber(pacingStatus.inflight_limit) }} 条</dd></div>
+        <div><dt>等模型队列</dt><dd>{{ pacingNumber(pacingStatus.model_queued) }} 条</dd></div>
+        <div><dt>流水线运行 / 上限</dt><dd>{{ pacingNumber(pacingStatus.pipeline_running) }} / {{ pacingNumber(pacingStatus.pipeline_limit) }} 条</dd></div>
+        <div><dt>流水线排队</dt><dd>{{ pacingNumber(pacingStatus.pipeline_queued) }} 条</dd></div>
+        <div><dt>等待容量</dt><dd>{{ pacingNumber(pacingStatus.waiting_capacity) }} 条</dd></div>
+        <div><dt>单题超时</dt><dd>{{ pacingNumber(pacingStatus.eval_timeout_s) }} 秒</dd></div>
       </dl>
-      <p class="hint">最近限流类型：{{ pacingLimitLabel(pacingStatus.last_limit_kind) }}。{{ pacingStatus.high_utilization_enabled ? '管理员已允许健康升速。' : '按管理员配置的模型预算发送。' }}实际预算见上方指标；等待时间、请求大小与冷却会降低实际发送速度。</p>
-      <p class="hint">统计范围为当前进程及事件循环的纳管请求；其他服务进程或程序的账号用量不包含在内。Token 为输入估算、输出预留与 usage 结算合计；已确认送达的输入计入 60 秒窗口，输出保留至返回后结算。</p>
+      <p class="hint">模型速率和流水线额度由本服务进程共享，重启后会重置；等待容量用于预处理与等模型槽的合计上限。</p>
     </div>
     <p v-if="pacingError" class="hint" role="status">{{ pacingError }}</p>
   </section>
 
   <details class="history-section">
     <summary>历史记录（{{ historyTotal }}）<button @click.stop="loadHistory()" :disabled="loadingHistory" style="margin-left:8px">刷新</button></summary>
-    <p class="hint">历史结果保存在本地 runs/web_history，服务重启后仍可加载；运行中断时会保留已完成的题目。</p>
+    <form class="history-search" role="search" aria-label="检索历史记录" @submit.prevent="applyHistorySearch">
+      <label>数据集名称<input v-model="historySearchDraft.dataset_name" type="search" placeholder="输入名称关键词" aria-label="历史数据集名称"></label>
+      <label>测评标准<select v-model="historySearchDraft.evaluation_profile" aria-label="历史测评标准">
+        <option value="">全部标准</option>
+        <option v-for="profile in compareProfiles" :key="profile.id" :value="profile.id">{{ profile.display }}</option>
+      </select></label>
+      <label>开始时间<input v-model="historySearchDraft.start_time" type="datetime-local" step="1" aria-label="历史开始时间"></label>
+      <label>结束时间<input v-model="historySearchDraft.end_time" type="datetime-local" step="1" aria-label="历史结束时间"></label>
+      <div class="history-search-actions"><button type="submit" :disabled="loadingHistory">搜索</button><button type="button" @click="resetHistorySearch" :disabled="loadingHistory">重置</button></div>
+    </form>
+    <p v-if="historySearchError" class="err" role="alert">{{ historySearchError }}</p>
+    <p class="hint">从全部历史中检索，展示匹配的最新 200 条，每页 10 条。时间按列表显示的时间和本地时区筛选，未填的一端不限；多个条件同时生效。</p>
     <div class="actions">
       <button @click="exportComparisonXlsx()" :disabled="comparisonTaskIds.length !== 2 || !!exportingTaskId">合并对比导出 Excel（{{ comparisonTaskIds.length }}/2）</button>
       <button @click="comparisonTaskIds = []" :disabled="!comparisonTaskIds.length">清空选择</button>
@@ -108,32 +116,34 @@
             <td style="white-space:nowrap">
               <button @click="loadHistoryTask(h.task_id)">{{ loadingTaskId === h.task_id ? '加载中…' : '加载' }}</button>
               <button @click="exportXlsx(h.task_id)" :disabled="!!exportingTaskId">{{ exportingTaskId === h.task_id ? '正在生成 Excel…' : '导出 Excel' }}</button>
+              <source-file-downloads :task-id="h.task_id" :files="h.source_files"></source-file-downloads>
               <button @click="delHistory(h.task_id)" class="btn-danger">删除</button>
             </td>
             <td class="history-note-cell">
               <div v-if="historyNoteEditing[h.task_id]" class="history-note-editor">
                 <input
                   v-model="historyNoteDrafts[h.task_id]"
+                  :disabled="historyNoteSaving[h.task_id]"
                   maxlength="1000"
                   placeholder="填写批跑备注"
                   @keyup.enter="saveHistoryNote(h)"
                   @keyup.escape="cancelHistoryNote(h)"
                   autofocus
                 >
-                <a href="#" class="history-text-link" @click.prevent="saveHistoryNote(h)">保存</a>
-                <a href="#" class="history-text-link history-cancel-link" @click.prevent="cancelHistoryNote(h)">取消</a>
+                <button type="button" class="history-text-link" :disabled="historyNoteSaving[h.task_id]" @click="saveHistoryNote(h)">{{ historyNoteSaving[h.task_id] ? '保存中…' : '保存' }}</button>
+                <button type="button" class="history-text-link history-cancel-link" :disabled="historyNoteSaving[h.task_id]" @click="cancelHistoryNote(h)">取消</button>
               </div>
               <div v-else class="history-note-display">
                 <span v-if="h.note" class="history-note-text" :title="h.note">{{ h.note }}</span>
                 <span v-else class="history-note-empty">未备注</span>
-                <a href="#" class="history-text-link" @click.prevent="editHistoryNote(h)">编辑</a>
+                <button type="button" class="history-text-link" @click="editHistoryNote(h)">编辑</button>
               </div>
             </td>
           </tr>
         </tbody>
       </table>
     </div>
-    <p v-else-if="!loadingHistory && !historyError" class="hint">暂无历史记录。</p>
+    <p v-else-if="!loadingHistory && !historyError" class="hint">{{ historyHasFilters ? '没有符合检索条件的历史记录，请调整条件后重试。' : '暂无历史记录。' }}</p>
     <nav v-if="historyTotal > 0" class="pagination" aria-label="历史记录分页">
       <span class="page-size page-size-fixed">共 {{ historyTotal }} 条 · 每页 {{ historyPageSize }} 条</span>
       <button @click="loadHistory(historyPage - 1)" :disabled="historyPage <= 1 || loadingHistory">上一页</button>
@@ -172,8 +182,8 @@
           <span v-if="datasetName" class="hint">数据集：{{ datasetName }}</span>
           <span v-if="errors.length" class="err">⚠ {{ errors.length }} 条未导入</span>
         </div>
-        <p v-if="mode==='compare'" class="hint">双产品示例：{"id":"c001","query":"查询天气","product_count":2,"video1":"./video_a.mp4","video2":"https://example.com/video_b.mp4","answer1":"今天多云","answer2":"今天晴"}<br>三产品示例再增加："product_count":3、"video3"、"context3"、"answer3"。</p>
-        <p v-if="mode==='compare'" class="hint">长截图示例：{"id":"c002","query":"查询天气","screenshot1":"./product1.png","screenshot2":"https://example.com/product2.png","answer1":"今天多云","answer2":"今天晴"}；三产品增加 screenshot3。screenshotN、videoN、query_images 支持本地文件或 HTTP(S) URL，同一题不可混用截图与录屏。</p>
+        <p v-if="mode==='compare'" class="hint">双产品示例：{"id":"c001","query":"查询天气","product_count":2,"video1":"./video_a.mp4","video2":"https://example.com/video_b.mp4","context1":"产品1地点北京","context2":"产品2地点北京","answer1":"今天多云","answer2":"今天晴"}<br>三产品示例再增加："product_count":3、"video3"、"context3"、"answer3"。</p>
+        <p v-if="mode==='compare'" class="hint">长截图示例：{"id":"c002","query":"查询天气","screenshot1":"./product1.png","screenshot2":"https://example.com/product2.png","context1":"产品1地点北京","context2":"产品2地点北京","answer1":"今天多云","answer2":"今天晴"}；三产品增加 screenshot3、context3。screenshotN、videoN、query_images 支持本地文件或 HTTP(S) URL，同一题不可混用截图与录屏。</p>
         <p v-else class="hint">示例：{"id":"rich_001","query":"北京明天天气怎么样","context":"当前地点北京","video_path":"data/rich_content/weather.mp4","category":"weather","answer_text":"北京明天晴","task_start_time":0,"task_end_time":18.5}</p>
         <p class="hint">支持 JSON 数组或单个对象，也支持每行一个对象的 JSONL。每条数据可添加 sessionid 等自定义字段，导出 Excel 时自动保留。</p>
         <details v-if="errors.length"><summary>导入错误明细</summary><pre>{{ errors.join('\n') }}</pre></details>
@@ -220,7 +230,7 @@
 
   <section>
     <h2>② 评估配置</h2>
-    <p class="hint">以下选项用于创建新任务。已创建任务的模型和思考设置固定；暂停恢复、失败补跑沿用原配置。</p>
+    <p class="hint">以下选项用于创建新任务。已创建任务的模型、思考设置与 API/端点固定；暂停恢复、失败补跑沿用原配置。</p>
     <div class="row">
       <span class="lbl">裁判视角：</span>
       <span v-for="j in visibleJudges.filter(j => selectedJudges.includes(j.name))" :key="j.name" class="chip">{{ j.display || j.name }}</span>
@@ -243,33 +253,45 @@
     <div v-if="mode==='compare'" class="row">
       <span class="lbl">评测标准：</span>
       <select v-model="selectedEvaluationProfile">
-        <option v-for="profile in compareProfiles" :key="profile.id" :value="profile.id">
-          {{ profile.display }} · {{ profile.score_range[0] }}–{{ profile.score_range[1] }}分
+        <option v-for="profile in compareProfiles" :key="profile.id" :value="profile.id" :disabled="profile.selectable === false">
+          {{ evaluationProfileOptionLabel(profile) }} · {{ profile.score_range[0] }}–{{ profile.score_range[1] }}分{{ profile.selectable === false ? '（暂不可选）' : '' }}
         </option>
       </select>
       <span class="hint">任务创建后版本冻结；失败补跑沿用原版本。</span>
     </div>
     <div class="row">
-      <label class="lbl" for="case-concurrency">评估并发数：</label>
-      <input id="case-concurrency" type="number" min="1" max="128" step="1" v-model.number="concurrency" :disabled="submitting" aria-describedby="case-capacity-help" style="width:70px">
-      <span id="case-capacity-help" class="hint">新任务同时处理 1–128 题；运行中调整请先暂停，再修改“恢复并发数”继续。</span>
-    </div>
-    <details class="hint request-pacing-hint" id="case-capacity-details">
-      <summary>并发与流量控制说明</summary>
-      <p>并发数控制同时处理的题目数量，包含媒体准备、模型调用和等待响应。降低并发可减少同时处理的工作；128 是平台处理容量上限，可按服务器资源和实际吞吐调整。</p>
-      <p v-if="requestPacing">媒体处理指视频抽帧、长截图切片、图片压缩与编码，会占用 CPU、内存和磁盘；当前同时处理上限为 {{ mediaConcurrency }}，由管理员按服务器资源调整。处理完成即可发送模型请求，不占用媒体槽位等待响应。</p>
-      <p v-if="requestPacing">实际发送仍受所选模型的 RPM（每分钟请求数）、TPM（每分钟 Token 数）预算及服务端限流约束。运行中的发送预算显示在任务队列下方。</p>
-      <p v-else>当前模型不适用百炼自动限流，请根据模型服务额度设置评估并发数。</p>
-      <template v-if="requestPacing">
-        <p><strong>模型额度：</strong>不同模型、地域及账号的配额可能不同，由管理员按百炼控制台配置；同一模型的思考开关共用额度。<a href="https://help.aliyun.com/zh/model-studio/rate-limit" target="_blank" rel="noopener noreferrer">查看官方限流说明</a>。</p>
-        <p><strong>本平台设计：</strong>每次发送（含重试）都检查连续 1 秒和 60 秒窗口、Token 预算，平滑放行；同一配额组共享控制器。连接等待和模型响应可并行，遇到限流共享冷却并降速。</p>
-        <p><strong>适用范围：</strong>额度控制仅在同一服务进程内共享；多进程或其他程序同时调用时，须统筹账号用量。</p>
-      </template>
-    </details>
-    <div class="row">
       <span class="lbl">单题超时：</span>
       <input type="number" min="30" max="3600" step="30" v-model.number="evalTimeout" style="width:90px">
-      <span class="hint">秒；默认 900，可按需调整，等待本地发送额度不计入。</span>
+      <span class="hint">秒；默认 3600，可按需调整，等待本地发送额度不计入。</span>
+    </div>
+    <div class="system-global-settings">
+      <p class="global-settings-toggle">
+        <a href="#" @click.prevent="showGlobalSettings = !showGlobalSettings">
+          {{ showGlobalSettings ? '▾' : '▸' }} 系统全局设置{{ showGlobalSettings ? '' : '（并发速率 · 在途 · 等待容量）' }}
+        </a>
+      </p>
+      <div v-if="showGlobalSettings" class="global-settings-panel">
+        <div class="row">
+          <label class="lbl" for="global-concurrency">全局并发（每 2 秒请求数）：</label>
+          <input id="global-concurrency" type="number" min="1" max="64" step="1" v-model.number="globalConcurrency" aria-describedby="global-concurrency-help" style="width:80px">
+          <span id="global-concurrency-help" class="hint">模型调用速率；所有任务共享。</span>
+        </div>
+        <div class="row">
+          <label class="lbl" for="global-inflight">在途数量上限：</label>
+          <input id="global-inflight" type="number" min="1" max="1024" step="1" v-model.number="maxInFlight" aria-describedby="global-inflight-help" style="width:80px">
+          <span id="global-inflight-help" class="hint">同时在进行中的模型请求数上限。</span>
+        </div>
+        <div class="row">
+          <label class="lbl" for="global-waiting">等待容量：</label>
+          <input id="global-waiting" type="number" min="0" max="256" step="1" v-model.number="waitingCapacity" aria-describedby="global-waiting-help" style="width:80px">
+          <span id="global-waiting-help" class="hint">「抽帧中 + 已抽帧等模型」的作业数上限，封顶关键帧内存。</span>
+        </div>
+        <p class="hint">模型并发由以上全局设置统一管控：「全局并发」控制请求速率、「在途数量」控制并发进行中的模型请求、「等待容量」限制媒体准备/抽帧并行度（API/端点与模型已改为按任务选择并冻结）。修改后需点击保存才生效并持久化。</p>
+        <div class="row">
+          <button class="primary" @click="saveGlobalSettings" :disabled="savingGlobalSettings">保存全局设置</button>
+          <span v-if="globalSaveMsg" class="hint" :class="globalSaveError ? 'error' : ''">{{ globalSaveMsg }}</span>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -301,7 +323,6 @@
       </template>
       <template v-if="canResumeTask">
         <div class="task-control-options">
-          <label>恢复并发数 <input type="number" min="1" max="128" step="1" v-model.number="resumeConcurrency" :disabled="controlSubmitting" aria-label="恢复并发数"></label>
           <label><input type="checkbox" v-model="resumeFailed" :disabled="controlSubmitting"> 同时重试失败项</label>
           <button class="primary" @click="controlTask('resume')" :disabled="controlSubmitting || !!loadingTaskId">{{ controlSubmitting ? '提交中…' : '继续执行原任务' }}</button>
         </div>
@@ -419,7 +440,7 @@
     </h2>
     <label class="export-image-option"><input type="checkbox" v-model="exportIncludeImages" :disabled="!!exportingTaskId">单任务 Excel 包含原图（可选，文件较大）</label>
     <p class="hint">默认不嵌入回答截图和提问图片，评分、统计、图片明细及原图查看链接仍保留。</p>
-    <human-compare-panel v-if="mode==='compare' && taskId && !loadingTaskId" :key="taskId" :task-id="taskId"></human-compare-panel>
+    <human-compare-panel v-if="mode==='compare' && taskId && !loadingTaskId" :key="taskId" :task-id="taskId" :evaluation-profile="taskEvaluationProfile"></human-compare-panel>
     <details v-for="group in conversationGroups" :key="group.id" class="query-image-panel">
       <summary>会话 {{group.id}} · {{group.turns.length}} 轮结果</summary>
       <button v-for="turn in group.turns" :key="turn.index" @click="resultQuery=turn.item_id; resetResultPage()">第 {{turn.turn_index}} 轮 · {{turn.error?'失败':'完成'}} · {{turn.image_warning_count || 0}} 项图片诊断</button>
@@ -438,8 +459,24 @@
       <span v-if="summary.solved_nok!=null">NOK {{ summary.solved_nok }} 条</span>
       <span v-if="summary.solved_review!=null">需复查 {{ summary.solved_review }} 条</span>
       <span v-if="summary.solved_ok_rate!=null">OK率 {{ (summary.solved_ok_rate*100).toFixed(0) }}%</span>
-      <span v-if="summary.needs_review_count">需人工复核 {{ summary.needs_review_count }} 条</span>
+      <span v-if="!compact1022() && summary.needs_review_count">需人工复核 {{ summary.needs_review_count }} 条</span>
     </div>
+    <section v-if="taskIsTimeliness && summary" class="timeliness-summary">
+      <h3>时效性评估 · 1–3分</h3>
+      <p class="hint">仅统计有效分数；NA不作0分。覆盖率分母包含证据不足，排除真正不适用和前置阻断。各产品均分应结合覆盖率及同题共同有效样本阅读。</p>
+      <p v-if="summary.conflict_total!=null"><strong>内容冲突</strong> · {{timelinessConflictSummary(summary)}}</p>
+      <p v-if="summary.conflict_total!=null" class="hint">每题跨产品判断一次，不归责产品，不自动扣分。明确冲突率 = yes / (yes + no)；不确定、旧协议未采集、采集失败及评测失败未完成不计入分母。</p>
+      <div class="table-scroll"><table class="grid">
+        <thead><tr><th>维度</th><th>产品</th><th>均分</th><th>有效 / 可评分范围</th><th>覆盖率</th><th>适用性待核验</th><th>未评分原因</th></tr></thead>
+        <tbody><tr v-for="row in timelinessSummaryRows(summary)" :key="row.key"><td>{{row.dimension}}</td><td>产品{{row.product}}</td><td>{{row.average}}</td><td>{{row.scored}} / {{row.eligible}}</td><td>{{row.coverage}}</td><td>{{row.unknown}}</td><td>{{row.states}}</td></tr></tbody>
+      </table></div>
+      <h4>同题同维共同可评分样本</h4>
+      <p class="hint">每一行只比较两个产品均有有效分数的相同题目。共同有效数为0时均分为N/A，不计算胜率或排名。</p>
+      <div class="table-scroll"><table class="grid">
+        <thead><tr><th>维度</th><th>比较产品</th><th>共同有效题数</th><th>A交集均分</th><th>B交集均分</th></tr></thead>
+        <tbody><tr v-for="row in timelinessPairedRows(summary)" :key="row.key"><td>{{row.dimension}}</td><td>A：产品{{row.a}} / B：产品{{row.b}}</td><td>{{row.count}}</td><td>{{row.averageA}}</td><td>{{row.averageB}}</td></tr></tbody>
+      </table></div>
+    </section>
     <div ref="resultBrowser" class="result-browser">
       <div v-if="mode!=='compare'" class="skill-tabs">
         <button v-for="s in skillTabs" :key="s.key" :class="{active:activeSkill===s.key}" @click="selectSkill(s.key)">
@@ -512,11 +549,16 @@
         <details v-if="summary && summary.by_input_modality">
           <summary>按题型查看汇总（沿用任务统一标准）</summary>
           <div v-for="(sub, key) in summary.by_input_modality" :key="key" class="query-image-panel">
-            <strong>{{ key==='text' ? '文字题' : '图文题' }}</strong> · 样本 {{ sub.total }} · 成功 {{ sub.done }} · 失败 {{ sub.failed }} · 可比较 {{ sub.comparable }}
-            <p v-for="dim in summaryDimensions" :key="dim.key">
+            <strong>{{ key==='text' ? '文字题' : '图文题' }}</strong> · 样本 {{ sub.total }} · 成功 {{ sub.done }} · 失败 {{ sub.failed }} <span v-if="!taskIsTimeliness">· 可比较 {{ sub.comparable }}</span>
+            <template v-if="taskIsTimeliness">
+              <p v-if="sub.conflict_total!=null">内容冲突 · {{timelinessConflictSummary(sub)}}</p>
+              <p v-for="row in timelinessSummaryRows(sub)" :key="row.key">{{row.dimension}} · 产品{{row.product}}均分 {{row.average}} · 有效 {{row.scored}} / {{row.eligible}} · 覆盖 {{row.coverage}} · 适用性待核验 {{row.unknown}} · {{row.states}}</p>
+              <p v-for="row in timelinessPairedRows(sub)" :key="row.key">{{row.dimension}} · 产品{{row.a}} / 产品{{row.b}}共同有效 {{row.count}} · 交集均分 {{row.averageA}} / {{row.averageB}}</p>
+            </template>
+            <template v-else><p v-for="dim in summaryDimensions" :key="dim.key">
               {{ dim.label }} · 全产品共同有效 {{ sub[dim.key+'_all_products_scored'] ?? sub[dim.key+'_scored'] }} ·
               <span v-for="n in sub.product_count" :key="n">产品{{ n }}均分 {{ sub[dim.key+'_answer'+n+'_avg'] ?? 'N/A' }} <span v-if="taskIsChat">（适用 {{sub[dim.key+'_answer'+n+'_applicable']}}，有效 {{sub[dim.key+'_answer'+n+'_scored']}}，覆盖 {{sub[dim.key+'_answer'+n+'_score_coverage'] ?? '—'}}）</span> </span>
-            </p>
+            </p></template>
           </div>
         </details>
         <table class="grid results compact-results" :style="{ width: resultTableWidth + 'px' }">
@@ -550,12 +592,27 @@
                   @mouseenter="c.key !== 'latency_s' && !reasonOnlyColumn(c) && showCellTooltip($event, cell(r, c))"
                   @mouseleave="scheduleHideCellTooltip"
                 >
+                  <div v-if="timelinessColumn(r,c)" class="timeliness-result">
+                    <div v-if="cellReasons(r,c).length" class="cell-reasons" :class="{'timeliness-evidence-preview':!reasonsExpanded(r,c)}">
+                      <p v-for="(reason,reasonIndex) in cellReasons(r,c)" :key="reasonIndex"><strong>{{reason.label}}</strong><span>{{reason.text}}</span></p>
+                    </div>
+                    <span v-else class="hint">未记录证据与理由</span>
+                    <button v-if="cellReasons(r,c).length" class="reason-toggle" :aria-expanded="reasonsExpanded(r,c)" @click="toggleCellReasons(r,c)">{{reasonsExpanded(r,c)?'收起依据':'展开全部证据与理由'}}</button>
+                    <div class="timeliness-score-list"><span v-for="entry in timelinessProductScores(r,c)" :key="entry.product" class="timeliness-score" :class="entry.className">P{{entry.product}}：{{entry.label}}</span></div>
+                  </div>
+                  <div v-if="timelinessConflictColumn(r,c)" class="timeliness-result">
+                    <div v-if="cellReasons(r,c).length" class="cell-reasons timeliness-conflict-reason" :class="{'timeliness-evidence-preview':!reasonsExpanded(r,c)}">
+                      <p v-for="(reason,reasonIndex) in cellReasons(r,c)" :key="reasonIndex"><strong>{{reason.label}}</strong><span>{{reason.text}}</span></p>
+                    </div>
+                    <button v-if="cellReasons(r,c).length" class="reason-toggle" :aria-expanded="reasonsExpanded(r,c)" @click="toggleCellReasons(r,c)">{{reasonsExpanded(r,c)?'收起理由':'展开全部理由'}}</button>
+                    <div class="timeliness-conflict-verdict"><strong>{{cell(r,c)}}</strong></div>
+                  </div>
                   <div
-                    v-if="!reasonOnlyColumn(c)"
+                    v-if="!reasonOnlyColumn(c) && !timelinessColumn(r,c) && !timelinessConflictColumn(r,c)"
                     class="cell-clamp"
                     :class="{'cell-center': ['card_presence','superlink_presence','card_count','superlink_count','answer_coverage','needs_review','problem_solved','card_suitability','superlink_suitability','has_conflict','relevance','safety','content_quality','need_closure','personalization','latency_s'].includes(c.key)}"
                   >{{ cell(r, c) }}</div>
-                  <template v-if="cellReasons(r, c).length">
+                  <template v-if="!timelinessColumn(r,c) && !timelinessConflictColumn(r,c) && cellReasons(r, c).length">
                     <button class="reason-toggle" :aria-expanded="reasonsExpanded(r, c)" @click="toggleCellReasons(r, c)">{{ reasonsExpanded(r, c) ? '收起理由' : '展开理由' }}</button>
                     <div v-if="reasonsExpanded(r, c)" class="cell-reasons">
                       <p v-for="(reason, reasonIndex) in cellReasons(r, c)" :key="reasonIndex"><strong>{{ reason.label }}</strong><span>{{ reason.text }}</span></p>
@@ -647,6 +704,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20261028_snapshot_preview"></script>
+  <script type="module" src="/static/app.js?v=20261028_snapshot_product_contexts"></script>
 </body>
 </html>

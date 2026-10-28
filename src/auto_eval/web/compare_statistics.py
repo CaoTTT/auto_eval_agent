@@ -81,12 +81,17 @@ def balanced_chat(protocol: CompareProtocol | None) -> bool:
     return bool(protocol and _chat(protocol) and protocol.result_schema_version == "qa-chat-result-2")
 
 
+def compact_1022(protocol: CompareProtocol | None) -> bool:
+    """Use the frozen contract, never the user-facing standard label alone."""
+    return bool(protocol and protocol.output_contract == "compare_1022_v2")
+
+
 def gate_observable(case: Case, product: int, protocol: CompareProtocol | None) -> bool:
     """Whether the product's gate belongs to the observed-input denominator."""
     if case.status != "done" or product not in range(1, case.product_count + 1):
         return False
     status = case.result.get(f"answer{product}_input_status")
-    return status in (None, "complete", "partial") if balanced_chat(protocol) else status in ("complete", "partial")
+    return status in (None, "complete", "partial") if balanced_chat(protocol) or (protocol and protocol.standard_id == "timeliness_compare") else status in ("complete", "partial")
 
 
 def _score_dimensions(protocol: CompareProtocol) -> tuple[str, ...]:
@@ -106,7 +111,7 @@ def _ratio(numerator: float, denominator: float) -> float | None:
 
 
 def _finite_score(value: Any, protocol: CompareProtocol) -> bool:
-    if _chat(protocol):
+    if _chat(protocol) or protocol.standard_id == "timeliness_compare":
         return type(value) is int and protocol.score_min <= value <= protocol.score_max
     return (
         isinstance(value, (int, float)) and not isinstance(value, bool)
@@ -127,8 +132,8 @@ def _cases(snapshot: dict, aligned_results: list[dict]) -> list[Case]:
     manifest = snapshot.get("protocol_manifest") or {}
     selected = snapshot.get("evaluation_profile") or manifest.get("id") or ""
     records = [snapshot, manifest, snapshot.get("options") or {}, *aligned_results]
-    chat_present = any(record.get("standard_id") == "qa_chat_compare" or
-                       str(record.get("evaluation_profile") or record.get("id") or "").startswith("qa_chat_compare@")
+    chat_present = any(record.get("standard_id") in ("qa_chat_compare", "timeliness_compare") or
+                       str(record.get("evaluation_profile") or record.get("id") or "").startswith(("qa_chat_compare@", "timeliness_compare@"))
                        for record in records)
     recovered = recover_protocol_identity({**snapshot, "results": aligned_results}) if chat_present else None
     if recovered is not None:
@@ -167,7 +172,7 @@ def _cases(snapshot: dict, aligned_results: list[dict]) -> list[Case]:
 
 
 def _policy(standard: str, revision: str, standard_id: str = "qa_competitor_compare") -> CompareProtocol | None:
-    if standard_id == "qa_chat_compare" and revision in ("", "未记录实现版本", None):
+    if (standard_id in ("qa_chat_compare", "timeliness_compare") or standard == "0.2-simplified-1022") and revision in ("", "未记录实现版本", None):
         return None
     try:
         return resolve_compare_standard(
@@ -180,7 +185,7 @@ def _policy(standard: str, revision: str, standard_id: str = "qa_competitor_comp
 
 def product_applicable(case: Case, product: int, dimension: str, protocol: CompareProtocol) -> bool | None:
     """The stored applicability, independent of score availability and gates."""
-    key = f"answer{product}_{dimension}_applicable" if _chat(protocol) else f"{dimension}_applicable"
+    key = f"answer{product}_{dimension}_applicable" if _chat(protocol) or protocol.standard_id == "timeliness_compare" else f"{dimension}_applicable"
     value = case.result.get(key)
     return value if type(value) is bool else None
 
@@ -221,14 +226,54 @@ def _chat_score_state(case: Case, product: int, dimension: str, protocol: Compar
     return "有效评分", float(score)
 
 
+def _compact_1022_score_state(case: Case, product: int, dimension: str, protocol: CompareProtocol) -> tuple[str, float | None]:
+    row = case.result
+    if dimension not in _score_dimensions(protocol):
+        return "未采集维度", None
+    input_status = row.get(f"answer{product}_input_status")
+    if input_status == "failed":
+        return "输入失败", None
+    if input_status not in ("complete", "partial"):
+        return "输入状态缺失", None
+    response, safety = (row.get(f"answer{product}_{gate}_gate") for gate in ("response", "safety"))
+    # A known failure takes precedence even if downstream fields were omitted.
+    if response == "fail" or safety == "fail":
+        return ("响应Gate阻断" if response == "fail" else "安全Gate阻断"), None
+    if response not in GATE_STATES or safety not in GATE_STATES:
+        return "Gate状态缺失", None
+    if response != "pass" or safety != "pass":
+        return ("响应Gate阻断" if response != "pass" else "安全Gate阻断"), None
+    applicable = row.get(f"{dimension}_applicable")
+    if applicable is False:
+        return "维度不适用", None
+    if applicable is not True:
+        return "适用性状态缺失", None
+    score = row.get(f"answer{product}_{dimension}_score")
+    if score is None:
+        from ..judges.compare_1022_contract import is_unscored_reason_1022, product_reason_1022
+        reason = product_reason_1022(row.get(f"{dimension}_reason"), product)
+        if is_unscored_reason_1022(reason):
+            return ("证据不足" if reason.startswith("未评分（证据不足）：") else "有说明的未评分"), None
+        return "应评分但缺失", None
+    if type(score) is not int or not protocol.score_min <= score <= protocol.score_max:
+        return "分数格式或范围异常", None
+    return "有效评分", float(score)
+
+
 def score_state(case: Case, product: int, dimension: str, protocol: CompareProtocol) -> tuple[str, float | None]:
     """Mutually exclusive reasons, following the frozen protocol's actual gates."""
+    if protocol.standard_id == "timeliness_compare":
+        from .timeliness_statistics import STATUS_LABELS, timeliness_score_state
+        state, value = timeliness_score_state(case, product, dimension, protocol)
+        return STATUS_LABELS.get(state, state), value
     if case.status != "done":
         return ("技术失败" if case.status == "failed" else "未完成"), None
     if case.identity_diagnostic:
         return "协议身份异常", None
     if product not in range(1, case.product_count + 1):
         return "非活动产品", None
+    if compact_1022(protocol):
+        return _compact_1022_score_state(case, product, dimension, protocol)
     if _chat(protocol):
         return _chat_score_state(case, product, dimension, protocol)
     row = case.result
@@ -380,12 +425,13 @@ def _overview(cases: list[Case], snapshot: dict, protocol: CompareProtocol | Non
     manifest = snapshot.get("protocol_manifest") or {}
     balanced = (balanced_chat(protocol) if protocol is not None else
                 manifest.get("standard_id") == "qa_chat_compare" and manifest.get("result_schema_version") == "qa-chat-result-2")
-    if not balanced:
+    compact = compact_1022(protocol) if protocol is not None else manifest.get("output_contract") == "compare_1022_v2"
+    if not balanced and not compact:
         for state in ("high", "medium", "low"):
             _count(table, "裁判", {"high": "高置信度", "medium": "中置信度", "low": "低置信度"}[state],
                    sum(c.result.get("confidence") == state for c in completed), len(completed), "模型自报，不能解释为准确率")
         _count(table, "裁判", "置信度缺失", sum(c.result.get("confidence") not in ("high", "medium", "low") for c in completed), len(completed))
-    for label, subset in (("成功结果待复核", completed), ("技术失败待复核", failed)):
+    for label, subset in (() if compact else (("成功结果待复核", completed), ("技术失败待复核", failed))):
         _count(table, "裁判", label, sum(bool(c.result.get("needs_human_review") or c.result.get("needs_review")) for c in subset), len(subset))
     errors = Counter(c.result.get("error_type") or "未分类技术错误" for c in failed)
     for reason, count in sorted(errors.items()):
@@ -419,7 +465,7 @@ def _overview(cases: list[Case], snapshot: dict, protocol: CompareProtocol | Non
 
 
 def _dimension_tables(cases: list[Case], protocol: CompareProtocol, snapshot: dict) -> list[StatisticsTable]:
-    diagnostics = _counts_table("B1．维度适用性、核验与评分覆盖")
+    diagnostics = _counts_table("B1．维度适用性与评分覆盖" if compact_1022(protocol) else "B1．维度适用性、核验与评分覆盖")
     performance = StatisticsTable("B2．各产品维度表现（各自有效样本）",
         ("维度", "产品", "有效题数", "均分", "中位数", "达标题数", "达标率", "低质题数", "低质率", "满档率", "最低档率", "受限证据题数"),
         ("text", "text", "count", "decimal", "decimal", "count", "percent", "count", "percent", "percent", "percent", "count"))
@@ -445,10 +491,18 @@ def _dimension_tables(cases: list[Case], protocol: CompareProtocol, snapshot: di
             _count(diagnostics, label, "共享摘要不一致", inconsistent, len(done), "共享摘要仅诊断；评分和适用分母始终读取产品级权威字段")
         if not _chat(protocol):
             _count(diagnostics, label, "维度适用率", len(applicable), len(known), "适用性仅描述需求分布；不以越高越好评价")
-            _count(diagnostics, label, "适用性状态缺失", len(done) - len(known), len(done))
-            for state in VERIFY_STATES:
-                _count(diagnostics, label, "核验：" + ("部分核验" if state == "partial" else STATE_NAMES[state]), sum(c.result.get(f"{dimension}_verification_status") == state for c in applicable), len(applicable))
-            _count(diagnostics, label, "核验状态缺失", sum(c.result.get(f"{dimension}_verification_status") not in VERIFY_STATES for c in applicable), len(applicable))
+            unknown = [c for c in done if not isinstance(c.result.get(f"{dimension}_applicable"), bool)]
+            if compact_1022(protocol):
+                blocked = [c for c in unknown if all(score_state(c, p, dimension, protocol)[0] in
+                           ("输入失败", "响应Gate阻断", "安全Gate阻断") for p in range(1, c.product_count + 1))]
+                _count(diagnostics, label, "全部产品阻断，适用性未评估", len(blocked), len(done))
+                blocked_indices = {c.index for c in blocked}
+                unknown = [c for c in unknown if c.index not in blocked_indices]
+            _count(diagnostics, label, "适用性状态缺失", len(unknown), len(done))
+            if not compact_1022(protocol):
+                for state in VERIFY_STATES:
+                    _count(diagnostics, label, "核验：" + ("部分核验" if state == "partial" else STATE_NAMES[state]), sum(c.result.get(f"{dimension}_verification_status") == state for c in applicable), len(applicable))
+                _count(diagnostics, label, "核验状态缺失", sum(c.result.get(f"{dimension}_verification_status") not in VERIFY_STATES for c in applicable), len(applicable))
         if dimension not in _score_dimensions(protocol):
             continue
         for p in range(1, count + 1):
@@ -468,7 +522,9 @@ def _dimension_tables(cases: list[Case], protocol: CompareProtocol, snapshot: di
             scores = [s for _, s in valid]
             expected = sum(state in ("有效评分", "应评分但缺失", "分数格式或范围异常") for state, _ in states)
             _count(diagnostics, subject, "有效评分覆盖率", len(valid), len(applicable), "有效分/该产品该维度确认适用数；Gate阻断等原因见评分状态")
-            _count(diagnostics, subject, "应评分输出完整率", len(valid), expected, "有效分/按所选协议应评分数量；NA、无法核验、输入及Gate阻断不视为缺失")
+            completeness_note = ("有效分/按所选协议应评分数量；不适用、有说明的未评分、输入及Gate阻断不视为缺失" if compact_1022(protocol)
+                                 else "有效分/按所选协议应评分数量；NA、无法核验、输入及Gate阻断不视为缺失")
+            _count(diagnostics, subject, "应评分输出完整率", len(valid), expected, completeness_note)
             _count(diagnostics, subject, "有效评分数", len(valid), len(product_cases), "有效分/U；受限证据合法分仍纳入")
             frequencies = Counter(state for state, _ in states)
             reasons = sorted(set(frequencies) | ({"有效评分", "维度不适用", "输入失败", "响应Gate阻断", "安全Gate阻断", "无法核验", "技术失败", "未完成"} if _chat(protocol) else set()))
@@ -614,6 +670,9 @@ def _subgroups(cases: list[Case]) -> list[tuple[str, list[Case]]]:
 
 def build_compare_statistics(snapshot: dict, aligned_results: list[dict]) -> list[StatisticsTable]:
     """One worksheet, several compact tables; never consume cached summary values."""
+    if recover_protocol_identity({**snapshot, "results": aligned_results})["is_timeliness"]:
+        from .timeliness_statistics import timeliness_statistics
+        return timeliness_statistics(snapshot, aligned_results)
     cases = _cases(snapshot, aligned_results)
     info = StatisticsTable("对比评估统计", ("项目", "内容"))
     info.rows = [
@@ -632,7 +691,7 @@ def build_compare_statistics(snapshot: dict, aligned_results: list[dict]) -> lis
         ["解释", "各产品均分使用各自有效样本；比较只用共同有效样本。结合Gate失败和覆盖率判断差距；无现网权重时结论仅适用于本测评集。"],
         ["分差与比例", "均分差单位为当前标准分；达标率差、低质率差、净胜率及其区间均按百分比显示（解读为百分点）。"],
     ]
-    if cases and all(c.standard_id == "qa_chat_compare" for c in cases):
+    if cases and all(c.standard_id == "qa_chat_compare" or compact_1022(_policy(c.standard, c.revision, c.standard_id)) for c in cases):
         info.rows = [row for row in info.rows if row[0] != "准确性"]
     tables = [info]
     if not cases:
@@ -677,6 +736,9 @@ def build_compare_statistics(snapshot: dict, aligned_results: list[dict]) -> lis
 
 
 def conversation_statistics(snapshot: dict, aligned_results: list[dict]) -> list[StatisticsTable]:
+    if recover_protocol_identity({**snapshot, "results": aligned_results})["is_timeliness"]:
+        from .timeliness_statistics import timeliness_conversation_statistics
+        return timeliness_conversation_statistics(snapshot, aligned_results)
     cases = _cases(snapshot, aligned_results)
     if not any(c.statistic_unit.startswith("conversation:") or c.conversation_diagnostic or c.standard_id == "qa_chat_compare" for c in cases):
         return []

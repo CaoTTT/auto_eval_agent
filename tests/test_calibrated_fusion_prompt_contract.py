@@ -51,7 +51,6 @@ def _inputs(count: int, mode: str) -> dict:
     values = dict(
         persona="测试裁判", product_count=count, evidence_mode=mode,
         evaluation_datetime="2026-09-20T09:00:00-04:00", question="合成问题",
-        context="共享条件",
     )
     for index in (1, 2, 3):
         values.update({
@@ -86,6 +85,8 @@ def test_fusion_preserves_contract_and_calibrated_scoring(prompts, count, mode, 
     user = env.from_string(_source(current, "VISUAL_COMPARE_USER")).render(**values)
     assert system == current.VISUAL_COMPARE_SYSTEM.render(**values)
     assert user == current.VISUAL_COMPARE_USER.render(**values)
+    assert user == current.VISUAL_COMPARE_USER.render(**values, context="禁止注入的公共背景")
+    assert "禁止注入的公共背景" not in user
     old_system = frozen.VISUAL_COMPARE_SYSTEM.render(**values)
     old_user = frozen.VISUAL_COMPARE_USER.render(**values)
     assert "{{" not in system + user and "{%" not in system + user
@@ -115,13 +116,18 @@ def test_fusion_preserves_contract_and_calibrated_scoring(prompts, count, mode, 
         request_system = system + suffix  # Same append order as VisualCompareJudge.
         assert "提问图片" in request_system
         assert "不属于任何产品回答" in request_system
+        assert "与 Query 共同定义题目" in suffix
+        assert "Context" not in suffix
         assert request_system.count("【思考暴露（内部过程信息泄露）】") == 1
 
 
 @pytest.mark.parametrize("variable", ["VISUAL_COMPARE_SYSTEM", "VISUAL_COMPARE_USER"])
 def test_no_new_template_input_parameters(prompts, variable):
     env = Environment()
-    assert meta.find_undeclared_variables(env.parse(_source(prompts[CURRENT], variable))) == meta.find_undeclared_variables(env.parse(_source(prompts[FROZEN], variable)))
+    current_inputs = meta.find_undeclared_variables(env.parse(_source(prompts[CURRENT], variable)))
+    frozen_inputs = meta.find_undeclared_variables(env.parse(_source(prompts[FROZEN], variable)))
+    assert current_inputs == frozen_inputs
+    assert "context" not in current_inputs
 
 
 @pytest.mark.parametrize("required", [
@@ -160,10 +166,11 @@ def test_user_instruction_and_conflicting_exemptions(prompts):
 
 
 @pytest.mark.parametrize("name,blob", [
-    (FROZEN, "83633b1db0a1e84555e59dab5b2fb842df66b54d"),
+    (FROZEN, "df16bafd6c11689bf2a96dc262f30fec2c4c9558"),
     ("internal_process_rules", "3803c1e17bc0e420222ce8496bfc63b9fecc9b85"),
-    ("query_image_prompt", "d90c13e16d55d80a20c3dd8c3a435887c39fee55"),
+    ("query_image_prompt", "a4b58fb57531d3e7f9078e654d4de8299b37c475"),
 ])
-def test_frozen_sources_remain_byte_identical(name, blob):
+def test_contract_sources_match_after_shared_context_removal(name, blob):
+    # The legacy prompt also intentionally drops shared context, without a revision bump.
     content = (JUDGES / f"{name}.py").read_text(encoding="utf-8").encode("utf-8")
     assert hashlib.sha1(f"blob {len(content)}\0".encode() + content).hexdigest() == blob

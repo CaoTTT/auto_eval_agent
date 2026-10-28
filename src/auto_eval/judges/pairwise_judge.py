@@ -5,7 +5,7 @@ from datetime import datetime
 
 from ..schema import EvalItem, SinglePair
 from .base import JudgeClient, JudgeOutputParseError
-from .prompts import PAIRWISE_SYSTEM, PAIRWISE_USER, parse_json_loose, resolve_prompt_context
+from .prompts import PAIRWISE_SYSTEM, PAIRWISE_USER, parse_json_loose
 
 _SWAP = {"a": "b", "b": "a", "tie": "tie"}
 
@@ -33,7 +33,6 @@ class PairwiseJudge:
 
         user = PAIRWISE_USER.render(
             question=item.question,
-            context=resolve_prompt_context(item.context, self.evaluation_time),
             answer_a=left_text,
             answer_b=right_text,
         )
