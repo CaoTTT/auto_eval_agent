@@ -92,7 +92,7 @@ createApp({
       if (row.result_schema_version) return row.result_schema_version === 'qa-chat-result-2';
       const profile = row.evaluation_profile || (row.standard_id === 'qa_chat_compare' && row.standard_version
         ? `qa_chat_compare@${row.standard_version}` : taskEvaluationProfile.value);
-      return profile === 'qa_chat_compare@1.1';
+      return ['qa_chat_compare@1.1', 'qa_chat_compare@1.1-demand-calibrated'].includes(profile);
     }
     function timelinessHasConflict(row = {}) {
       return isTimelinessRow(row)

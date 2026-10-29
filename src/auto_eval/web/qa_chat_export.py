@@ -18,7 +18,7 @@ def chat_export_rows(snapshot: dict, results: list[dict]) -> list[dict]:
     # Interpret the frozen contract, including unreadable histories; never guess
     # from a particular score or fill missing product reasons from shared text.
     shared_output = (manifest.get("result_schema_version") == "qa-chat-result-2" or
-                     recovered["evaluation_profile"] == "qa_chat_compare@1.1")
+                     recovered["evaluation_profile"] in {"qa_chat_compare@1.1", "qa_chat_compare@1.1-demand-calibrated"})
     dimensions = manifest.get("dimensions") or [
         {"key": key, "label": label} for key, label in QA_CHAT_DIMENSION_NAMES.items()]
     rows = []

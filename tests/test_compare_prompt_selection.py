@@ -34,7 +34,7 @@ def compare_item():
 def test_config_keeps_disabled_choices_and_does_not_change_frozen_protocol_metadata(monkeypatch):
     monkeypatch.setattr(server, "cfg", lambda: AppConfig(judges=[JudgeConfig(name="judge")]))
     profiles = server.api_config()["evaluation_profiles"]
-    assert len(profiles) == 10
+    assert len(profiles) == 11
     assert {profile["id"] for profile in profiles if not profile["selectable"]} == set(DISABLED_IDS)
     for profile in profiles:
         protocol = resolve_compare_protocol(profile["id"])

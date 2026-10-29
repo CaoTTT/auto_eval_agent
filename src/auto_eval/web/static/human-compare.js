@@ -31,9 +31,13 @@ export const HumanComparePanel = {
     const statsDimension=ref('understanding'),statsScope=ref('own');
     const visibleScores=computed(()=>scoreRows.value.filter(r=>r.dimension_id===statsDimension.value&&r.scope===statsScope.value));
     const visiblePairs=computed(()=>pairRows.value.filter(r=>r.dimension_id===statsDimension.value&&r.scope===statsScope.value));
-    const standards=[['0.2-simplified','V0.2 简化版（1—5）'],['0.2-simplified-plus','V0.2 简化版（稳定plus）（1—5）'],['0.2-simplified-calibrated','V0.2 校准版（1—5）'],['0.2-simplified-thinking-exposure','V0.2 过程泄露实验版（1—5）'],['0.3','V0.3（0—3）'],['qa_chat_compare@1.0','问答闲聊V1（1—5）'],['qa_chat_compare@1.1','问答闲聊V2·1-5分（候选）'],['timeliness_compare@1.0','时效性评估V1·1-3分（候选）'],['knowledge_qa_compare@1.0','知识问答V1·0-2分（候选）']];
+    const standards=[['0.2-simplified','V0.2 简化版（1—5）'],['0.2-simplified-plus','V0.2 简化版（稳定plus）（1—5）'],['0.2-simplified-calibrated','V0.2 校准版（1—5）'],['0.2-simplified-thinking-exposure','V0.2 过程泄露实验版（1—5）'],['0.3','V0.3（0—3）'],['qa_chat_compare@1.0','问答闲聊V1（1—5）'],['qa_chat_compare@1.1','问答闲聊V2·1-5分（候选）'],['qa_chat_compare@1.1-demand-calibrated','问答闲聊V2·需求与分档校准·1-5分（候选）'],['timeliness_compare@1.0','时效性评估V1·1-3分（候选）'],['knowledge_qa_compare@1.0','知识问答V1·0-2分（候选）']];
     const templateStandard=ref(/^(timeliness_compare|knowledge_qa_compare)@/.test(props.evaluationProfile||'')
+      || props.evaluationProfile==='qa_chat_compare@1.1-demand-calibrated'
       ? props.evaluationProfile : '0.2-simplified');
+    if (templateStandard.value==='qa_chat_compare@1.1-demand-calibrated') {
+      selectedDimensions.value=Object.keys(HUMAN_CHAT_DIMENSIONS);
+    }
     if (templateStandard.value.startsWith('timeliness_compare@')) {
       selectedDimensions.value=Object.keys(HUMAN_TIMELINESS_DIMENSIONS);
     }

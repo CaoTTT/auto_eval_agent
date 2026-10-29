@@ -563,7 +563,7 @@ def export_rows(snapshot: dict) -> dict[str, list[dict]]:
                                "提问图片": item.get("query_images", []),
                                "提问图片元数据": item.get("query_image_meta", []),
                                "输入指纹": (aligned_results[index].get("input_manifest_sha256") or item.get("input_manifest_sha256", ""))
-                               if recovery["evaluation_profile"] == "qa_chat_compare@1.1" or recovery["is_timeliness"] or recovery.get("is_knowledge_qa")
+                               if recovery["evaluation_profile"] in ("qa_chat_compare@1.1", "qa_chat_compare@1.1-demand-calibrated") or recovery["is_timeliness"] or recovery.get("is_knowledge_qa")
                                else item.get("input_manifest_sha256", "")})
     if frame_rows:
         has_screenshots = any(item.get("evidence_mode") == "long_screenshot" for item in snapshot.get("items", []))

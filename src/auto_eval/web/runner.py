@@ -1041,7 +1041,7 @@ async def run_resume(task: Task, cfg: AppConfig) -> None:
 async def run_retry(task: Task, cfg: AppConfig, retry_id: str) -> None:
     """执行人工失败补跑；候选成功才写回原任务，失败仅进入 attempt 审计。"""
     retry = task.retry_runs[retry_id]
-    shared_chat_output = (task.evaluation_profile in {"qa_chat_compare@1.1", "timeliness_compare@1.0", "knowledge_qa_compare@1.0"} or
+    shared_chat_output = (task.evaluation_profile in {"qa_chat_compare@1.1", "qa_chat_compare@1.1-demand-calibrated", "timeliness_compare@1.0", "knowledge_qa_compare@1.0"} or
                           task.protocol_manifest.get("result_schema_version") in {"qa-chat-result-2", "timeliness-result-1", "timeliness-result-2", "timeliness-result-3", "knowledge-qa-result-2"})
     retry["status"] = "running"
     retry["started_at"] = time.time()

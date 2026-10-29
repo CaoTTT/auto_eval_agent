@@ -54,6 +54,10 @@ from .visual_compare_prompt_qa_chat_v2 import (
     VISUAL_COMPARE_SYSTEM as QA_CHAT_V2_SYSTEM,
     VISUAL_COMPARE_USER as QA_CHAT_V2_USER,
 )
+from .visual_compare_prompt_qa_chat_v2_calibrated import (
+    VISUAL_COMPARE_SYSTEM as QA_CHAT_V2_CALIBRATED_SYSTEM,
+    VISUAL_COMPARE_USER as QA_CHAT_V2_CALIBRATED_USER,
+)
 from .timeliness_schema import (
     TIMELINESS_STANDARD_ID, TIMELINESS_COMPARE_PROTOCOL_ID, TIMELINESS_RESULT_SCHEMA_VERSION,
     TIMELINESS_DIMENSIONS, TIMELINESS_DIMENSION_NAMES, TimelinessObservation,
@@ -79,6 +83,7 @@ V02_PLUS_COMPARE_PROTOCOL_ID = f"{STANDARD_ID}@0.2-simplified-plus"
 V03_COMPARE_PROTOCOL_ID = f"{STANDARD_ID}@0.3"
 V02_CALIBRATED_COMPARE_PROTOCOL_ID = f"{STANDARD_ID}@0.2-simplified-calibrated"
 V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID = f"{STANDARD_ID}@0.2-simplified-thinking-exposure"
+QA_CHAT_V2_CALIBRATED_COMPARE_PROTOCOL_ID = f"{QA_CHAT_STANDARD_ID}@1.1-demand-calibrated"
 V1022_COMPARE_PROTOCOL_ID = f"{STANDARD_ID}@{STANDARD_VERSION_1022}"
 DIMENSIONS = (
     "understanding",
@@ -345,6 +350,24 @@ _PROTOCOLS = {
         status="experimental",
         system_template=QA_CHAT_V2_SYSTEM,
         user_template=QA_CHAT_V2_USER,
+        observation_model=QAChatV2Observation,
+        require_response_pass=False,
+        score_min=1,
+        score_max=5,
+        dimensions=QA_CHAT_DIMENSIONS,
+        dimension_names=dict(QA_CHAT_DIMENSION_NAMES),
+        score_dimensions=QA_CHAT_DIMENSIONS,
+        result_schema_version=QA_CHAT_V2_RESULT_SCHEMA_VERSION,
+    ),
+    QA_CHAT_V2_CALIBRATED_COMPARE_PROTOCOL_ID: CompareProtocol(
+        id=QA_CHAT_V2_CALIBRATED_COMPARE_PROTOCOL_ID,
+        standard_id=QA_CHAT_STANDARD_ID,
+        standard_version="1.1-demand-calibrated",
+        bundle_revision="1.1.1",
+        display="问答闲聊V2·需求与分档校准·1-5分（候选）",
+        status="experimental",
+        system_template=QA_CHAT_V2_CALIBRATED_SYSTEM,
+        user_template=QA_CHAT_V2_CALIBRATED_USER,
         observation_model=QAChatV2Observation,
         require_response_pass=False,
         score_min=1,
