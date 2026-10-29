@@ -1,8 +1,8 @@
-"""Candidate knowledge QA prompt using the existing compare input variables.
+"""Knowledge QA rubric with merged evidence/reasons and existing input variables.
 
 Based on the 2026-10-29 knowledge QA workbook and its reviewed explanation.
-This is a standalone template and output contract, not an enabled protocol.
-No input parser, media adapter, legacy prompt, or scoring runtime is changed.
+The complete system contract also applies when the existing conversation
+adapter supplies original history instead of the single-turn user template.
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from .knowledge_qa_schema import (
     expected_output_keys,
 )
 
-BUNDLE_REVISION = "1.0.0-candidate"
+BUNDLE_REVISION = "1.0.0"
 STANDARD_SOURCE = "测试部标准-知识问答领域语料.xlsx｜评测标准 B3:E4，B5:F6"
 
 RULES = r"""{{ persona }}
@@ -157,13 +157,20 @@ not_applicable：任务无需媒体增益，未提供需要评价的相关媒体
 低分不能用来表达不确定；null的具体缺口必须逐产品写在该维reason中。
 
 【七、完整输出合同】
-本次product_count={{ product_count }}，仅输出下方模板的全部{{ 8 * product_count + 8 }}个键。
-每维依次为：DIM_evidence、DIM_reason，再按产品顺序输出answerN_DIM_status、answerN_DIM_score。
-evidence是字符串数组，每条带产品号、当前轮/图片区域/切片号或短原话；只记录确有的依据。
-reason是非空中文字符串，按“产品1：……；产品2：……”顺序覆盖所有活动产品，包含实际
-表现、用户影响和对应档位；空分明确写具体原因，不只比较“谁更好”。不要求输出内部分析过程。
-四维evidence/reason共享字段容器，不共享产品结论或适用性；确无可见证据时evidence可为[]，
-reason仍须解释。accuracy分数只可为整数0/1/2、小数1.5或null；其他分数只可为整数0/1/2或null。
+本次product_count={{ product_count }}，仅输出下方模板的全部{{ 8 * product_count + 4 }}个键。
+每维依次为：DIM_reason，再按产品顺序输出answerN_DIM_status、answerN_DIM_score。
+每维将证据和理由合并成一个非空中文reason，不另输出evidence数组，也不重复摘录同一段证据。
+按“产品1：……；产品2：……”顺序覆盖所有活动产品；各产品说明均遵循同一顺序：
+证据位置或短原话 → 实际表现及影响 → 分档依据。
+1. 先给可回查依据，如对应产品、当前轮、截图区域/切片号或必要的短原话；只写实际看见的内容。
+2. 接着说明其满足或违反了什么要求、对当前理解/判断/执行有什么影响；不只写“更好/一般”。
+3. 最后连接本维分档条件，说明为什么是这个档位；理由与score保持一致，不列内部思考过程。
+每产品通常1—3句，可用连贯短句完成上述顺序，不要求输出箭头或固定空话。
+缺证时说明具体缺少什么、哪些判断因此不能确定，并匹配insufficient_evidence或unverifiable；
+不能补造截图位置、原话、来源、点击/播放或外部核验结果。不能用“未发现错误”代替满分依据。
+富媒体不适用时结合Query说明无此需要且没有需要评价的媒体影响，不凭空引用不存在的媒体。
+共享的只是reason字段容器，不共享各产品的分数、结论或适用性；各产品缺口应分别说明。
+accuracy分数只可为整数0/1/2、小数1.5或null；其他分数只可为整数0/1/2或null。
 不能输出布尔、字符串数字、0.0/1.0/2.0、NaN/Infinity、空字符串或"NA"作为分数。
 不新增Gate、适用性布尔、核验状态、指标分项分数、总分、平均分、winner/rank、内容冲突、
 产品数/题号/产品名/标准版本/置信度/复核标记。采集状态和任务身份属于程序，不由模型生成。
@@ -180,12 +187,9 @@ def output_example(product_count: int) -> str:
     example: dict[str, object] = {}
     for dimension in KNOWLEDGE_QA_DIMENSIONS:
         name = KNOWLEDGE_QA_DIMENSION_NAMES[dimension]
-        example[dimension + "_evidence"] = [
-            f"产品{product} T当前轮 截图区域/切片号：可见短原话或事实"
-            for product in range(1, product_count + 1)
-        ]
         example[dimension + "_reason"] = "；".join(
-            f"产品{product}：{name}的具体依据、实际影响及分档理由，或具体空分缺口"
+            f"产品{product}：当前轮截图区域/切片号或短原话，{name}的实际表现及影响，"
+            "满足的分档条件与对应分数；若缺证则说明缺少什么及受影响的判断"
             for product in range(1, product_count + 1)
         )
         for product in range(1, product_count + 1):
@@ -243,7 +247,7 @@ answerN是纯文本语义辅助，视觉和引用判断以原图/切片为准。
 {% endif %}
 
 待评数据结束。共享用户题图和原始多轮上下文如有，由实际消息标签区分产品、角色与轮次。
-只按系统模板输出当前目标轮四维的证据、理由及各产品status/score，不输出Gate、总分或胜负。
+只按系统模板输出当前目标轮四维合并证据的理由及各产品status/score，不输出Gate、总分或胜负。
 """
 VISUAL_COMPARE_USER = Template(USER_TEMPLATE_SOURCE)
 
@@ -251,7 +255,7 @@ VISUAL_COMPARE_USER = Template(USER_TEMPLATE_SOURCE)
 def render_system_prompt(
     *, product_count: int = 2, evidence_mode: str = "long_screenshot", persona: str = "",
 ) -> str:
-    """Render the complete candidate system message for review or export."""
+    """Render the complete system message for review or export."""
     expected_output_keys(product_count)
     if evidence_mode not in ("long_screenshot", "video_frames"):
         raise ValueError("unknown evidence_mode")

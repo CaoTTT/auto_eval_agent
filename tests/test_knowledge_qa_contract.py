@@ -1,22 +1,24 @@
 """Candidate knowledge QA contract boundaries, with no model or network calls."""
 import json
 from copy import deepcopy
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
 
 from auto_eval.judges.knowledge_qa_schema import (
     KNOWLEDGE_QA_ALLOWED_SCORES, KNOWLEDGE_QA_DIMENSIONS,
-    KnowledgeQAObservation, expected_output_keys, parse_output, validate_output,
+    KNOWLEDGE_QA_COMPARE_PROTOCOL_ID, KNOWLEDGE_QA_RESULT_SCHEMA_VERSION,
+    KnowledgeQAObservation, expected_output_keys, finalize_knowledge_qa_observation,
+    parse_output, validate_output,
 )
 
 
 def payload(count=2):
     data = {}
     for dimension in KNOWLEDGE_QA_DIMENSIONS:
-        data[dimension + "_evidence"] = ["产品1：当前轮截图中的可见内容。"]
         data[dimension + "_reason"] = "；".join(
-            f"产品{product}：按当前任务要求独立评分。"
+            f"产品{product}：当前轮截图正文清楚展示回答；完整满足任务要求，符合2分条件。"
             for product in range(1, count + 1)
         )
         for product in range(1, count + 1):
@@ -26,7 +28,7 @@ def payload(count=2):
     return data
 
 
-@pytest.mark.parametrize("count,key_count", [(2, 24), (3, 32)])
+@pytest.mark.parametrize("count,key_count", [(2, 20), (3, 28)])
 def test_exact_active_product_contract_round_trips(count, key_count):
     data = payload(count)
     original = deepcopy(data)
@@ -173,20 +175,121 @@ def test_reasons_are_required_nonblank_strings(reason):
         validate_output(data, 2)
 
 
-@pytest.mark.parametrize("evidence", [None, "产品1：文本", [1], [True], [None], {}])
-def test_evidence_requires_a_list_of_strict_strings(evidence):
+@pytest.mark.parametrize("dimension", KNOWLEDGE_QA_DIMENSIONS)
+def test_separate_evidence_fields_are_rejected_after_reason_merge(dimension):
     data = payload()
-    data["accuracy_evidence"] = evidence
-    with pytest.raises(ValidationError):
+    data[dimension + "_evidence"] = ["产品1：已合并在reason中，不应另开字段。"]
+    with pytest.raises(ValidationError, match="多余字段"):
         validate_output(data, 2)
 
 
-def test_absent_visible_evidence_can_remain_an_empty_list_with_explanation():
+def test_absent_visible_evidence_is_explained_in_reason_without_fabricated_fields():
     data = payload()
-    data.update(accuracy_evidence=[], accuracy_reason="产品1：缺少必要截图；产品2：无法核验外部事实。",
+    data.update(accuracy_reason="产品1：缺少必要截图，无法确定答案内容；产品2：无法核验外部事实，暂不能定档。",
                 answer1_accuracy_status="insufficient_evidence", answer1_accuracy_score=None,
                 answer2_accuracy_status="unverifiable", answer2_accuracy_score=None)
     assert validate_output(data, 2).model_dump() == data
+
+
+def protocol():
+    return SimpleNamespace(
+        standard_id="knowledge_qa_compare", standard_version="1.0",
+        id=KNOWLEDGE_QA_COMPARE_PROTOCOL_ID, bundle_revision="1.0.0",
+        result_schema_version=KNOWLEDGE_QA_RESULT_SCHEMA_VERSION,
+    )
+
+
+def test_finalization_preserves_zero_and_half_mark_without_inventing_verification():
+    data = payload()
+    data.update(answer1_accuracy_score=1.5, answer2_accuracy_score=0)
+    observation = validate_output(data, 2)
+    result = finalize_knowledge_qa_observation(observation, protocol())
+    assert observation.model_dump() == data
+    assert result["answer1_accuracy_score"] == 1.5
+    assert result["answer2_accuracy_score"] == 0
+    assert result["answer1_accuracy_status"] == result["answer1_accuracy_score_status"] == "scored"
+    assert result["answer1_accuracy_verification_status"] is None
+    assert result["answer1_accuracy_verification_status_source"] == "not_collected"
+    assert result["result_schema_version"] == "knowledge-qa-result-2"
+    assert result["product_count"] == 2
+    assert not any(key.endswith(("_gate", "_winner", "_rank_groups")) for key in result)
+
+
+def test_trusted_failure_only_clears_that_product_and_preserves_raw_reason_and_observation():
+    data = payload(3)
+    data.update(answer2_accuracy_score=1.5)
+    observation = validate_output(data, 3)
+    trusted = {"answer2": {"input_status": "failed", "source": "collection-log"}}
+    result = finalize_knowledge_qa_observation(
+        observation, protocol(), trusted_collection_metadata=trusted,
+    )
+    assert observation.model_dump() == data
+    assert result["answer2_input_status"] == "failed"
+    assert result["answer2_execution_status"] == "input_failed"
+    assert result["needs_human_review"] and result["needs_review_label"] == "T"
+    assert result["normalization_diagnostics"]
+    for dimension in KNOWLEDGE_QA_DIMENSIONS:
+        assert result[dimension + "_reason"].startswith("程序记录：产品2可信采集失败，最终空分")
+        assert result[dimension + "_reason"].endswith(data[dimension + "_reason"])
+        assert "不影响其他产品的有效评分。原模型逐产品理由：" in result[dimension + "_reason"]
+        assert result[f"answer2_{dimension}_score"] is None
+        assert result[f"answer2_{dimension}_status"] == "insufficient_evidence"
+        assert result[f"answer2_{dimension}_score_status"] == "insufficient_evidence"
+        assert result[f"answer1_{dimension}_score"] == result[f"answer3_{dimension}_score"] == 2
+
+
+def test_multiple_trusted_failures_add_one_program_note_and_keep_all_raw_reasons():
+    data = payload(3)
+    observation = validate_output(data, 3)
+    result = finalize_knowledge_qa_observation(
+        observation, protocol(), trusted_collection_metadata={
+            "answer1": {"input_status": "failed", "source": "collector"},
+            "answer3": {"input_status": "failed", "source": "collector"},
+        },
+    )
+    assert observation.model_dump() == data
+    for dimension in KNOWLEDGE_QA_DIMENSIONS:
+        reason = result[dimension + "_reason"]
+        assert reason.count("程序记录：") == 1
+        assert reason.startswith("程序记录：产品1、产品3可信采集失败")
+        assert reason.endswith(data[dimension + "_reason"])
+        assert result[f"answer2_{dimension}_score"] == 2
+
+
+def test_partial_collection_preserves_sufficient_scores_and_records_review():
+    observation = KnowledgeQAObservation.model_validate(
+        payload(), context={"product_count": 2, "trusted_collection_metadata": {
+            "answer1": {"input_status": "partial", "source": "collector"},
+        }},
+    )
+    result = finalize_knowledge_qa_observation(observation, protocol())
+    assert result["answer1_input_status"] == "partial"
+    assert result["answer1_accuracy_score"] == 2
+    assert result["needs_review"]
+
+
+@pytest.mark.parametrize("trusted", [
+    {"answer3": {"input_status": "failed", "source": "collector"}},
+    {"answer1": {"input_status": "failed", "source": ""}},
+    {"answer1": {"input_status": "fake", "source": "collector"}},
+])
+def test_finalization_rejects_untrusted_or_inactive_collection_records(trusted):
+    with pytest.raises(ValueError):
+        finalize_knowledge_qa_observation(
+            validate_output(payload(), 2), protocol(), trusted_collection_metadata=trusted,
+        )
+
+
+def test_finalization_retains_all_empty_score_reasons_and_no_third_product():
+    data = payload()
+    data.update(answer1_accuracy_score=None, answer1_accuracy_status="unverifiable",
+                answer2_multimedia_value_score=None, answer2_multimedia_value_status="not_applicable")
+    result = finalize_knowledge_qa_observation(validate_output(data, 2), protocol())
+    assert result["answer1_accuracy_score_status"] == "unverifiable"
+    assert result["answer2_multimedia_value_applicable"] is False
+    assert result["answer2_multimedia_value_score_status"] == "not_applicable"
+    assert result["accuracy_reason"] == data["accuracy_reason"]
+    assert not any(key.startswith("answer3_") for key in result)
 
 
 def test_accuracy_zero_does_not_apply_a_hidden_gate_to_other_scores():

@@ -1,6 +1,5 @@
 """Exercise candidate rendering with the current compare input contract."""
 import json
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -8,13 +7,14 @@ from jinja2 import Environment, StrictUndefined, meta
 
 from auto_eval.judges.knowledge_qa_schema import (
     KNOWLEDGE_QA_DIMENSIONS, KNOWLEDGE_QA_DIMENSION_NAMES,
+    KNOWLEDGE_QA_COMPARE_PROTOCOL_ID, KNOWLEDGE_QA_RESULT_SCHEMA_VERSION,
     KnowledgeQAObservation, expected_output_keys, validate_output,
 )
 from auto_eval.judges.visual_compare_prompt_knowledge_qa import (
     USER_TEMPLATE_SOURCE, VISUAL_COMPARE_SYSTEM, VISUAL_COMPARE_USER,
     output_example, render_system_prompt,
 )
-from auto_eval.judges.compare_protocols import list_compare_protocols, resolve_compare_protocol
+from auto_eval.judges.compare_protocols import resolve_compare_protocol
 from auto_eval.judges.conversation_prompt import assemble_conversation
 from auto_eval.web.parse_input import parse_jsonl
 from test_multi_turn_compare import data as conversation_data, prepare as prepare_conversation
@@ -58,10 +58,11 @@ def test_complete_system_contains_exact_valid_active_product_shape(count):
     assert "PERSONA_SENTINEL" in rendered
     assert rendered.rstrip().endswith(output_example(count))
     assert tuple(validate_output(example, count).model_dump()) == expected_output_keys(count)
-    assert len(example) == 8 * count + 8
+    assert len(example) == 8 * count + 4
     assert "1.5分" in rendered and "准确性0分不自动清空其他维度" in rendered
     for dimension in KNOWLEDGE_QA_DIMENSIONS:
-        assert dimension + "_evidence" in rendered and dimension + "_reason" in rendered
+        assert dimension + "_reason" in rendered
+        assert dimension + "_evidence" not in example
     assert not any(key.endswith(("_gate", "_winner")) for key in example)
     if count == 2:
         assert not any(key.startswith("answer3_") for key in example)
@@ -73,6 +74,9 @@ def test_all_scoring_and_state_rules_live_in_system_for_multiturn_replacement():
                  "不证明产品实际测试日期", "不能代替测试时间", "0也是有效分",
                  "insufficient_evidence", "unverifiable", "not_applicable", "完整输出合同"):
         assert rule in system
+    assert "证据位置或短原话 → 实际表现及影响 → 分档依据" in system
+    assert "缺证时说明具体缺少什么" in system
+    assert "不能补造截图位置、原话、来源" in system
 
 
 @pytest.mark.parametrize("count", [True, 1, 4, "2"])
@@ -86,22 +90,19 @@ def test_unsupported_evidence_mode_fails_before_rendering():
         render_system_prompt(evidence_mode="mixed")
 
 
-def test_candidate_cannot_be_selected_through_unchanged_runtime():
-    assert all(protocol.standard_id != "knowledge_qa_compare" for protocol in list_compare_protocols())
+def test_knowledge_standard_is_selectable_with_its_independent_contract():
+    protocol = resolve_compare_protocol(KNOWLEDGE_QA_COMPARE_PROTOCOL_ID)
+    assert protocol.selectable
+    assert protocol.observation_model is KnowledgeQAObservation
+    assert protocol.dimensions == KNOWLEDGE_QA_DIMENSIONS
+    assert protocol.dimension_names == KNOWLEDGE_QA_DIMENSION_NAMES
+    assert protocol.result_schema_version == KNOWLEDGE_QA_RESULT_SCHEMA_VERSION
+    assert protocol.score_min == 0 and protocol.score_max == 2
+    assert not protocol.require_response_pass
 
 
 def test_existing_conversation_adapter_keeps_original_history_and_target(conversation_data):
-    # A local test descriptor exercises the existing adapter, without registering
-    # this candidate or sending its output through the unsupported legacy judge.
-    protocol = replace(
-        resolve_compare_protocol(None), id="knowledge_qa_compare@1.0-candidate",
-        standard_id="knowledge_qa_compare", standard_version="1.0", bundle_revision="1.0.0",
-        system_template=VISUAL_COMPARE_SYSTEM, user_template=VISUAL_COMPARE_USER,
-        observation_model=KnowledgeQAObservation, require_response_pass=False,
-        score_min=0, score_max=2, dimensions=KNOWLEDGE_QA_DIMENSIONS,
-        dimension_names=dict(KNOWLEDGE_QA_DIMENSION_NAMES),
-        score_dimensions=KNOWLEDGE_QA_DIMENSIONS, result_schema_version="knowledge-qa-result-1",
-    )
+    protocol = resolve_compare_protocol(KNOWLEDGE_QA_COMPARE_PROTOCOL_ID)
     items, preparation = prepare_conversation(conversation_data)
     bundle = preparation.prepare(items[1])
     system, parts, metadata, refs, _ = assemble_conversation(

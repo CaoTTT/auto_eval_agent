@@ -18,6 +18,11 @@ def average(values):
     return mean(values) if values else None
 
 
+def _numeric_token(value):
+    """Keep exact half marks in distributions while retaining legacy int keys."""
+    return str(int(value)) if value == int(value) else str(value)
+
+
 def _single(rows, eligible):
     human = [r for r in rows if r["human_score"] is not None]
     paired = [r for r in human if r["comparable"] and r["case_key"] in eligible]
@@ -31,10 +36,10 @@ def _single(rows, eligible):
                 higher=ratio(sum(d > 0 for d in differences), n), lower=ratio(sum(d < 0 for d in differences), n),
                 severe=ratio(sum(abs(d) >= 2 for d in differences), n),
                 human_mean=average([r["human_score"] for r in paired]), model_mean=average([r["model_score"] for r in paired]),
-                difference_counts=dict(Counter(str(int(d)) for d in differences)),
-                human_distribution=dict(Counter(str(int(r["human_score"])) for r in paired)),
-                model_distribution=dict(Counter(str(int(r["model_score"])) for r in paired)),
-                confusion=dict(Counter(f'{int(r["human_score"])},{int(r["model_score"])}' for r in paired)),
+                difference_counts=dict(Counter(_numeric_token(d) for d in differences)),
+                human_distribution=dict(Counter(_numeric_token(r["human_score"]) for r in paired)),
+                model_distribution=dict(Counter(_numeric_token(r["model_score"]) for r in paired)),
+                confusion=dict(Counter(f'{_numeric_token(r["human_score"])},{_numeric_token(r["model_score"])}' for r in paired)),
                 sample_ids=[r["match_id"] for r in paired],
                 excluded=dict(Counter(r["exclusion"] or "未进入共同样本" for r in human if r["match_id"] not in paired_ids)),
                 score_states=dict(Counter(("人工数字" if r["human_score"] is not None else "人工无数字") + "/" +
@@ -67,6 +72,8 @@ def build_human_statistics(rows: list[dict], task_ids: list[str], products: list
     dimensions = list(dimensions or SCORE_DIMENSIONS)
     timeliness = any(row.get("human_standard_id") == "timeliness_compare" or row.get("model_standard_id") == "timeliness_compare" or
                      row.get("model_result_schema_version") in ("timeliness-result-1", "timeliness-result-2", "timeliness-result-3") for row in rows)
+    knowledge = any(row.get("human_standard_id") == "knowledge_qa_compare" or
+                    row.get("model_standard_id") == "knowledge_qa_compare" for row in rows)
     grouped = defaultdict(list)
     for row in rows:
         grouped[row["task_id"], row["product_id"], row["dimension_id"]].append(row)
@@ -121,11 +128,13 @@ def build_human_statistics(rows: list[dict], task_ids: list[str], products: list
                 if timeliness:
                     formal = {"scored", "not_applicable", "insufficient_evidence", "blocked_gate",
                               "blocked_understanding", "input_failed"}
+                elif knowledge:
+                    formal = {"scored", "not_applicable", "insufficient_evidence", "unverifiable", "input_failed"}
                 values = [r for r in group if r["identity_accepted"] and r.get("compatible", True) and
                           r.get("human_status") in formal and r.get("model_score_status") in formal]
                 states.append(dict(task_id=task, dimension_id=dim, kind="score_status", product_id=product, n=len(values),
                                    agreement=ratio(sum(r["human_status"]==r["model_score_status"] for r in values),len(values))))
-        for product in products:
+        for product in (() if knowledge else products):
             for gate in ("response", "safety"):
                 group = {r["case_key"]: r for r in rows if r["task_id"]==task and r["product_id"]==product and
                          r["identity_accepted"] and r.get("compatible", True) and r.get("human_gates",{}).get(gate) in ("pass","fail","unclear") and
@@ -156,4 +165,13 @@ def build_human_statistics(rows: list[dict], task_ids: list[str], products: list
                               case_match_rate=ratio(len(matched),len(cases)),
                               matches=dict(Counter(r["match_status"] for r in group)),
                               bindings=dict(Counter(r["result_input_binding"] for r in group)))
-    return dict(metric_version=METRIC_VERSION, scores=scores, pairs=pairs, ranks=ranks, states=states,overview=overview)
+    result = dict(metric_version=METRIC_VERSION, scores=scores, pairs=pairs, ranks=ranks, states=states,overview=overview)
+    if knowledge:
+        result["metric_version"] = "human-statistics-knowledge-qa-1.0"
+        result["score_policy"] = {
+            "score_range": [0, 2], "accuracy_scores": [0, 1, 1.5, 2], "quality_scores": [0, 1, 2],
+            "within_one_threshold": 1, "severe_difference_min": 2,
+            "high_score_min": 2, "low_score_max": 1,
+            "null_policy": "空分按独立状态排除，0为有效分，1.5不得取整",
+        }
+    return result

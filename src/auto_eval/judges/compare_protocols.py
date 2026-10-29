@@ -62,6 +62,15 @@ from .visual_compare_prompt_timeliness import (
     VISUAL_COMPARE_SYSTEM as TIMELINESS_SYSTEM,
     VISUAL_COMPARE_USER as TIMELINESS_USER,
 )
+from .knowledge_qa_schema import (
+    KNOWLEDGE_QA_STANDARD_ID, KNOWLEDGE_QA_COMPARE_PROTOCOL_ID,
+    KNOWLEDGE_QA_RESULT_SCHEMA_VERSION, KNOWLEDGE_QA_DIMENSIONS,
+    KNOWLEDGE_QA_DIMENSION_NAMES, KNOWLEDGE_QA_ALLOWED_SCORES, KnowledgeQAObservation,
+)
+from .visual_compare_prompt_knowledge_qa import (
+    VISUAL_COMPARE_SYSTEM as KNOWLEDGE_QA_SYSTEM,
+    VISUAL_COMPARE_USER as KNOWLEDGE_QA_USER,
+)
 
 
 STANDARD_ID = "qa_competitor_compare"
@@ -83,8 +92,9 @@ DIMENSIONS = (
 DIMENSION_NAMES = dict(zip(DIMENSIONS, (
     "理解需求", "内容准确性", "服务闭环", "场景化满足", "直观高效", "有理有据", "引导推荐",
 )))
-ALL_DIMENSIONS = tuple(dict.fromkeys((*DIMENSIONS, *QA_CHAT_DIMENSIONS, *TIMELINESS_DIMENSIONS)))
-DIMENSION_LABELS = {**DIMENSION_NAMES, **QA_CHAT_DIMENSION_NAMES, **TIMELINESS_DIMENSION_NAMES}
+ALL_DIMENSIONS = tuple(dict.fromkeys((*DIMENSIONS, *QA_CHAT_DIMENSIONS, *TIMELINESS_DIMENSIONS, *KNOWLEDGE_QA_DIMENSIONS)))
+DIMENSION_LABELS = {**KNOWLEDGE_QA_DIMENSION_NAMES, **DIMENSION_NAMES,
+                    **QA_CHAT_DIMENSION_NAMES, **TIMELINESS_DIMENSION_NAMES}
 
 V02QualityScore: TypeAlias = Literal[1, 2, 3, 4, 5]
 
@@ -209,6 +219,11 @@ class CompareProtocol:
         }
         if self.output_contract != "legacy":
             metadata["output_contract"] = self.output_contract
+        if self.standard_id == KNOWLEDGE_QA_STANDARD_ID:
+            metadata["allowed_scores_by_dimension"] = {
+                key: list(KNOWLEDGE_QA_ALLOWED_SCORES[key]) for key in self.score_dimensions
+            }
+            metadata["has_gates"] = False
         return metadata
 
     def request_metadata(self) -> dict:
@@ -356,6 +371,24 @@ _PROTOCOLS = {
         dimension_names=dict(TIMELINESS_DIMENSION_NAMES),
         score_dimensions=TIMELINESS_DIMENSIONS,
         result_schema_version=TIMELINESS_RESULT_SCHEMA_VERSION,
+    ),
+    KNOWLEDGE_QA_COMPARE_PROTOCOL_ID: CompareProtocol(
+        id=KNOWLEDGE_QA_COMPARE_PROTOCOL_ID,
+        standard_id=KNOWLEDGE_QA_STANDARD_ID,
+        standard_version="1.0",
+        bundle_revision="1.0.0",
+        display="知识问答V1·0-2分（候选）",
+        status="experimental",
+        system_template=KNOWLEDGE_QA_SYSTEM,
+        user_template=KNOWLEDGE_QA_USER,
+        observation_model=KnowledgeQAObservation,
+        require_response_pass=False,
+        score_min=0,
+        score_max=2,
+        dimensions=KNOWLEDGE_QA_DIMENSIONS,
+        dimension_names=dict(KNOWLEDGE_QA_DIMENSION_NAMES),
+        score_dimensions=KNOWLEDGE_QA_DIMENSIONS,
+        result_schema_version=KNOWLEDGE_QA_RESULT_SCHEMA_VERSION,
     ),
     V1022_COMPARE_PROTOCOL_ID: CompareProtocol(
         id=V1022_COMPARE_PROTOCOL_ID,

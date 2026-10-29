@@ -3,7 +3,9 @@ import {ref, computed, onUnmounted} from "https://unpkg.com/vue@3/dist/vue.esm-b
 export const HUMAN_DIMENSIONS = {understanding:'理解需求', service_closure:'服务闭环', scenario_fulfillment:'场景化满足', intuitive_efficiency:'直观高效', evidence_quality:'有理有据', guided_recommendation:'引导推荐', accuracy:'内容准确性（仅留档）'};
 export const HUMAN_CHAT_DIMENSIONS = {understanding:'理解需求',personalization:'个性化适配',emotional_expression:'情感表达恰当',style:'风格恰当',scenario_fulfillment:'场景化满足',guided_recommendation:'引导推荐'};
 export const HUMAN_TIMELINESS_DIMENSIONS = {understanding:'理解需求',authority:'权威性',timeliness:'时效性'};
+export const HUMAN_KNOWLEDGE_QA_DIMENSIONS = {accuracy:'准确性',clarity_and_structure:'清晰易懂与结构化',content_quality:'丰富、简洁与专业性',multimedia_value:'富媒体增益'};
 function dimensionsForStandard(standard) {
+  if ((standard || '').split('@')[0] === 'knowledge_qa_compare') return HUMAN_KNOWLEDGE_QA_DIMENSIONS;
   if ((standard || '').split('@')[0] === 'timeliness_compare') return HUMAN_TIMELINESS_DIMENSIONS;
   return (standard || '').split('@')[0] === 'qa_chat_compare' ? HUMAN_CHAT_DIMENSIONS : HUMAN_DIMENSIONS;
 }
@@ -17,21 +19,27 @@ export const HumanComparePanel = {
     const rows=ref([]),rowTotal=ref(0),rowPage=ref(1),rowFilters=ref({product_id:'',dimension_id:'',task_id:'',category:'',direction:'',input_modality:'',evidence_mode:'',min_difference:0,state_mismatch:false});
     const evidence=ref({}),scopeText=ref(''),selectedDimensions=ref(Object.keys(HUMAN_DIMENSIONS).filter(k=>k!=='accuracy'));
     const baseline=computed(()=>baselines.value.find(b=>`${b.baseline_id}:${b.version}`===baselineKey.value));
-    const dimensions=computed(()=>({...HUMAN_DIMENSIONS,...HUMAN_CHAT_DIMENSIONS,...HUMAN_TIMELINESS_DIMENSIONS,...(report.value?.baseline_dimension_names||{})}));
+    const dimensions=computed(()=>({...HUMAN_KNOWLEDGE_QA_DIMENSIONS,...HUMAN_DIMENSIONS,...HUMAN_CHAT_DIMENSIONS,...HUMAN_TIMELINESS_DIMENSIONS,...(report.value?.human_protocol?.human_standard_id==='knowledge_qa_compare'?HUMAN_KNOWLEDGE_QA_DIMENSIONS:{}),...(report.value?.baseline_dimension_names||{})}));
     const baselineDimensions=computed(()=>baseline.value?.dimension_names||dimensionsForStandard(baseline.value?baseline.value.human_standard_id:templateStandard.value));
     const mappingDimensions=computed(()=>dimensionsForStandard(mapping.value?.human_standard_id || mapping.value?.human_standard_version));
     const reportIsTimeliness=computed(()=>report.value?.human_protocol?.human_standard_id==='timeliness_compare');
-    const visibleRanks=computed(()=>reportIsTimeliness.value?[]:report.value?.metrics?.ranks||[]);
+    const reportIsKnowledgeQA=computed(()=>report.value?.human_protocol?.human_standard_id==='knowledge_qa_compare');
+    const visibleRanks=computed(()=>reportIsTimeliness.value||reportIsKnowledgeQA.value?[]:report.value?.metrics?.ranks||[]);
+    const selectableBaselineDimensions=computed(()=>Object.fromEntries(Object.entries(baselineDimensions.value).filter(([key])=>key!=='accuracy'||(baseline.value?.human_standard_id||templateStandard.value).startsWith('knowledge_qa_compare'))));
     const baselineDownloadUrl=computed(()=>baseline.value?`/api/human-baselines/${encodeURIComponent(baseline.value.baseline_id)}/versions/${baseline.value.version}/download`:'');
     const scoreRows=computed(()=>report.value?.metrics?.scores||[]),pairRows=computed(()=>report.value?.metrics?.pairs||[]);
     const statsDimension=ref('understanding'),statsScope=ref('own');
     const visibleScores=computed(()=>scoreRows.value.filter(r=>r.dimension_id===statsDimension.value&&r.scope===statsScope.value));
     const visiblePairs=computed(()=>pairRows.value.filter(r=>r.dimension_id===statsDimension.value&&r.scope===statsScope.value));
-    const standards=[['0.2-simplified','V0.2 简化版（1—5）'],['0.2-simplified-plus','V0.2 简化版（稳定plus）（1—5）'],['0.2-simplified-calibrated','V0.2 校准版（1—5）'],['0.2-simplified-thinking-exposure','V0.2 过程泄露实验版（1—5）'],['0.3','V0.3（0—3）'],['qa_chat_compare@1.0','问答闲聊V1（1—5）'],['qa_chat_compare@1.1','问答闲聊V2·1-5分（候选）'],['timeliness_compare@1.0','时效性评估V1·1-3分（候选）']];
-    const templateStandard=ref((props.evaluationProfile||'').startsWith('timeliness_compare@')
+    const standards=[['0.2-simplified','V0.2 简化版（1—5）'],['0.2-simplified-plus','V0.2 简化版（稳定plus）（1—5）'],['0.2-simplified-calibrated','V0.2 校准版（1—5）'],['0.2-simplified-thinking-exposure','V0.2 过程泄露实验版（1—5）'],['0.3','V0.3（0—3）'],['qa_chat_compare@1.0','问答闲聊V1（1—5）'],['qa_chat_compare@1.1','问答闲聊V2·1-5分（候选）'],['timeliness_compare@1.0','时效性评估V1·1-3分（候选）'],['knowledge_qa_compare@1.0','知识问答V1·0-2分（候选）']];
+    const templateStandard=ref(/^(timeliness_compare|knowledge_qa_compare)@/.test(props.evaluationProfile||'')
       ? props.evaluationProfile : '0.2-simplified');
     if (templateStandard.value.startsWith('timeliness_compare@')) {
       selectedDimensions.value=Object.keys(HUMAN_TIMELINESS_DIMENSIONS);
+    }
+    if (templateStandard.value.startsWith('knowledge_qa_compare@')) {
+      selectedDimensions.value=Object.keys(HUMAN_KNOWLEDGE_QA_DIMENSIONS);
+      statsDimension.value='accuracy';
     }
     let generation=0,controllers=new Set(),timer=null,disposed=false,rowGeneration=0,pollGeneration=0;
     async function api(url,options={}) {
@@ -58,7 +66,7 @@ export const HumanComparePanel = {
     async function addTask(id){
       if(!id||tasks.value.some(t=>t.task_id===id))return;
       const data=await api(`/api/datasets/${encodeURIComponent(id)}`);
-      if(id===props.taskId&&!tasks.value.length&&/^(qa_chat_compare|timeliness_compare)@/.test(data.evaluation_profile||''))templateStandard.value=data.evaluation_profile;
+      if(id===props.taskId&&!tasks.value.length&&/^(qa_chat_compare|timeliness_compare|knowledge_qa_compare)@/.test(data.evaluation_profile||''))templateStandard.value=data.evaluation_profile;
       const items=data.items||[],first=items[0]||{},source=first.source_data||{};
       const fields=[...new Set(items.flatMap(i=>Object.keys(i).filter(k=>!['source_data'].includes(k)&&typeof i[k]!=='object')))];
       fields.push(...Object.keys(source).map(k=>'source_data.'+k));
@@ -67,7 +75,7 @@ export const HumanComparePanel = {
       assignProducts();invalidate();
     }
     function assignProducts(){for(const t of tasks.value)for(let n=1;n<=t.count;n++)if(!t.product_map['answer'+n])t.product_map['answer'+n]=baseline.value?.products[n-1]?.product_id||'';}
-    function baselineChanged(){for(const t of tasks.value)t.product_map={};selectedDimensions.value=baseline.value?.score_dimensions||Object.keys(baselineDimensions.value).filter(k=>k!=='accuracy');assignProducts();invalidate();}
+    function baselineChanged(){for(const t of tasks.value)t.product_map={};selectedDimensions.value=baseline.value?.score_dimensions||Object.keys(selectableBaselineDimensions.value);assignProducts();invalidate();}
     function invalidate(){preview.value=null;confirmIdentity.value=false;confirmBinding.value=false;confirmReason.value='';}
     async function upload(event){const file=event.target.files?.[0];event.target.value='';if(!file)return;
       await run(async()=>{const body=new FormData();body.append('file',file);imports.value=await api('/api/human-baselines/imports',{method:'POST',body});mapping.value=imports.value.suggested_mapping;mappingJson.value=JSON.stringify(mapping.value,null,2);name.value=file.name.replace(/\.xlsx$/i,'');importPreview.value=null;});}
@@ -76,8 +84,8 @@ export const HumanComparePanel = {
     function reuseMapping(){if(!baseline.value?.mapping)return;mapping.value=JSON.parse(JSON.stringify(baseline.value.mapping));mappingChanged();}
     function applyJson(){try{mapping.value=JSON.parse(mappingJson.value);importPreview.value=null;error.value='';}catch(e){error.value='映射 JSON 格式错误：'+e.message;}}
     function changeMappingStandard(value){const full=value.includes('@')?value.split('@'):['qa_competitor_compare',value];mapping.value.human_standard_id=full[0];mapping.value.human_standard_version=full[1];mapping.value.human_bundle_revision='';mapping.value.human_result_schema_version='';mappingChanged();}
-    function mappingStandard(){return ['qa_chat_compare','timeliness_compare'].includes(mapping.value?.human_standard_id)?mapping.value.human_standard_id+'@'+mapping.value.human_standard_version:mapping.value?.human_standard_version;}
-    function addLabel(){mapping.value.labels.push({product_id:mapping.value.products[0].product_id,dimension_id:'understanding',score:'',review:'',status:'',reason:'',applicable:'',verification_status:''});mappingChanged();}
+    function mappingStandard(){return ['qa_chat_compare','timeliness_compare','knowledge_qa_compare'].includes(mapping.value?.human_standard_id)?mapping.value.human_standard_id+'@'+mapping.value.human_standard_version:mapping.value?.human_standard_version;}
+    function addLabel(){mapping.value.labels.push({product_id:mapping.value.products[0].product_id,dimension_id:Object.keys(mappingDimensions.value)[0],score:'',review:'',status:'',reason:'',applicable:'',verification_status:''});mappingChanged();}
     async function parse(){await run(async()=>{importPreview.value=await post(`/api/human-baselines/imports/${imports.value.import_id}/preview`,mapping.value);});}
     async function publish(){await run(async()=>{const selected=baseline.value;
       const d=await post('/api/human-baselines',{import_id:imports.value.import_id,preview_sha256:importPreview.value.preview_sha256,name:name.value,valid_only:validOnly.value,
@@ -125,7 +133,7 @@ export const HumanComparePanel = {
     const countsText=v=>Object.entries(v||{}).map(([k,n])=>statusLabel(k)+' '+n).join(' · ');
     return {open,busy,error,baselines,baselineKey,baseline,baselineDownloadUrl,baselineSearch,baselinePage,baselineTotal,imports,mapping,importPreview,name,validOnly,upgrade,mappingJson,
       tasks,availableTasks,taskSearch,selectedTask,compatibility,preview,previewPage,confirmIdentity,confirmBinding,confirmReason,report,reports,rows,rowTotal,rowPage,rowFilters,evidence,
-      standards,templateStandard,selectedDimensions,scopeText,dimensions,baselineDimensions,mappingDimensions,changeMappingStandard,mappingStandard,visibleScores,visiblePairs,reportIsTimeliness,visibleRanks,statsDimension,statsScope,
+      standards,templateStandard,selectedDimensions,scopeText,dimensions,baselineDimensions,selectableBaselineDimensions,mappingDimensions,changeMappingStandard,mappingStandard,visibleScores,visiblePairs,reportIsTimeliness,reportIsKnowledgeQA,visibleRanks,statsDimension,statsScope,
       show,close,run,loadBaselines,searchTasks,addTask,baselineChanged,invalidate,upload,inspect,mappingChanged,reuseMapping,applyJson,addLabel,parse,publish,match,previewRows,generate,viewReport,retry,loadRows,showEvidence,pname,number,percent,time,statusLabel,countsText};
   },
   template:`
@@ -161,7 +169,7 @@ export const HumanComparePanel = {
       <fieldset :disabled="busy || !baseline"><legend>2. 匹配任务与原始回答</legend>
         <div class="human-toolbar"><input v-model="taskSearch" placeholder="搜索其他历史任务"><button @click="searchTasks">查找任务</button><select v-model="selectedTask"><option value="">可选：其他 Prompt / 模型任务</option><option v-for="t in availableTasks" :value="t.task_id">{{t.dataset_name||t.task_id}} · {{t.task_id}}</option></select><button @click="run(()=>addTask(selectedTask))">加入对比</button></div>
         <div class="human-task" v-for="(t,i) in tasks" :key="t.task_id"><strong>{{i===0?'入口任务 · ':''}}{{t.name}}</strong><small>{{t.task_id}}</small><div class="human-toolbar"><label>真实题号字段 <select v-model="t.id_field" @change="invalidate"><option v-for="f in t.fields">{{f}}</option></select></label><label v-for="n in t.count">answer{{n}} 对应 <select v-model="t.product_map['answer'+n]" @change="invalidate"><option value="">请选择</option><option v-for="p in baseline?.products||[]" :value="p.product_id">{{p.display_name}}</option></select></label><button v-if="i" @click="tasks.splice(i,1);invalidate()">移除</button></div><details><summary>显式题号映射（可选）</summary><p class="hint">JSON：任务源题号 → 人工题号；不填写时精确匹配，不按行号或模糊问题匹配。</p><textarea v-model="t.caseMapText" @input="invalidate" rows="3"></textarea></details></div>
-        <div class="human-toolbar"><label v-for="(label,key) in baselineDimensions" v-show="key!=='accuracy'"><input type="checkbox" :value="key" v-model="selectedDimensions" @change="invalidate">{{label}}</label></div>
+        <div class="human-toolbar"><label v-for="(label,key) in baselineDimensions" v-show="key!=='accuracy' || selectableBaselineDimensions.accuracy"><input type="checkbox" :value="key" v-model="selectedDimensions" @change="invalidate">{{label}}</label></div>
         <details><summary>限定本次题目范围（可选）</summary><p class="hint">填写入口任务中的人工题号，一行一个；留空使用入口任务全部题目。</p><textarea v-model="scopeText" @input="invalidate" rows="3" aria-label="本次题号范围"></textarea></details>
         <label>比较口径 <select v-model="compatibility" @change="invalidate"><option value="same_standard">相同人工标准</option><option value="regression">相对既有人工基准的回归比较</option></select></label><button @click="match">生成匹配预览</button>
       </fieldset>

@@ -2,7 +2,7 @@
 
 基于 `competitive_assessment` 的 `6ecac36208d3146c89013d02fd72239fe22e0192` 新增独立候选模板，保持现有测评数据格式、输入内容和图片分组不变。依据《测试部标准-知识问答领域语料.xlsx》的“评测标准”B3:E4，并参考垂域、教育办公补充要求。
 
-本次交付是**完整Prompt模板及独立输出校验**。没有注册新的可运行协议，没有修改页面选择、旧协议、输入解析、裁判参数、统计或导出。不能把本候选输出直接交给旧结果模型：旧流程含Gate阻断及整数分处理，会错误清空0分或截断1.5分。候选口径确认后再做运行接入。
+平台新增可选标签**知识问答V1·0-2分（候选）**，协议为`knowledge_qa_compare@1.0`，实现版本为`1.0.0`，结果Schema为`knowledge-qa-result-2`。它使用独立结果模型及统计、展示和导出路径，不套用旧Gate或整数分逻辑，保留0和准确性的1.5分。默认标准和已有协议保持原有行为。
 
 ## 当前仓库的输入和输出
 
@@ -57,7 +57,11 @@
 
 ## 状态与字段合同
 
-每维只有共享`DIM_evidence`字符串数组、非空`DIM_reason`，以及逐产品`answerN_DIM_status`和`answerN_DIM_score`。共享的是字段容器，理由必须逐段覆盖所有活动产品，各产品独立定分。双产品24键，三产品32键，没有条件性增减键。
+每维只有共享的非空`DIM_reason`，以及逐产品`answerN_DIM_status`和`answerN_DIM_score`。不再单独输出`DIM_evidence`数组。共享的是字段容器，各产品独立定分；双产品20键，三产品28键，没有条件性增减键。
+
+每个产品的理由统一包含**证据位置或短原话 → 实际表现及影响 → 分档依据**，按“产品1：……；产品2：……”顺序写在同一维reason中，避免先摘录证据、再在理由里重复一次。不要求在结果中使用箭头，要求三部分逻辑衔接且可以回查。通常每个产品1至3句即可，不能只写“产品1更好”或“整体一般”。
+
+缺证时写明具体缺少的截图区域、必要上文、测试时点、背景或核验依据，以及因此不能确定的判断；不能补造图块号、原话、来源、点击播放或外部核验结果。不适用时说明Query为何没有该需求及实际答复为何没有相关评价对象。
 
 | status | score | 含义 |
 | --- | --- | --- |
@@ -75,26 +79,22 @@
 <!-- output-example -->
 ```json
 {
-  "accuracy_evidence": ["产品1 当前轮正文：60分钟。", "产品2 当前轮正文：1小时等于60分钟。"],
-  "accuracy_reason": "产品1：数值与单位正确，完整回答核心问题，给2分；产品2：时间换算正确且表达完整，给2分。",
+  "accuracy_reason": "产品1：当前轮正文写“60分钟”，数值与单位正确，完整回答核心问题，符合2分条件；产品2：正文写“1小时等于60分钟”，时间换算正确且完整，符合2分条件。",
   "answer1_accuracy_status": "scored",
   "answer1_accuracy_score": 2,
   "answer2_accuracy_status": "scored",
   "answer2_accuracy_score": 2,
-  "clarity_and_structure_evidence": ["产品1 当前轮正文仅一句答案。", "产品2 当前轮用一句话表达等式关系。"],
-  "clarity_and_structure_reason": "产品1：答案简短易找，无需额外标题，给2分；产品2：结论明确且便于理解，给2分。",
+  "clarity_and_structure_reason": "产品1：当前轮正文仅一句“60分钟”，答案简短易找，无需额外标题即可理解，符合2分条件；产品2：正文用一句话表达等式关系，结论明确且便于理解，符合2分条件。",
   "answer1_clarity_and_structure_status": "scored",
   "answer1_clarity_and_structure_score": 2,
   "answer2_clarity_and_structure_status": "scored",
   "answer2_clarity_and_structure_score": 2,
-  "content_quality_evidence": ["产品1 直接给出所问时长。", "产品2 直接说明小时与分钟的换算。"],
-  "content_quality_reason": "产品1：完整简洁，无必要扩展，给2分；产品2：内容范围适当，无冗余，给2分。",
+  "content_quality_reason": "产品1：正文直接给出所问时长，没有无关扩展，完整简洁地满足需求，符合2分条件；产品2：正文直接说明小时与分钟换算，内容范围适当且无冗余，符合2分条件。",
   "answer1_content_quality_status": "scored",
   "answer1_content_quality_score": 2,
   "answer2_content_quality_status": "scored",
   "answer2_content_quality_score": 2,
-  "multimedia_value_evidence": [],
-  "multimedia_value_reason": "产品1：简单时间换算无需富媒体，且未提供需要评价的媒体，不适用；产品2：纯文字已充分完成任务，无媒体评价对象，不适用。",
+  "multimedia_value_reason": "产品1：Query只要求简单时间换算，截图没有需要评价的媒体，纯文字已足够，故不适用；产品2：同一任务无需媒体增益，完整截图也没有相关媒体评价对象，故不适用。",
   "answer1_multimedia_value_status": "not_applicable",
   "answer1_multimedia_value_score": null,
   "answer2_multimedia_value_status": "not_applicable",
@@ -102,7 +102,7 @@
 }
 ```
 
-三产品只在每维追加`answer3_DIM_status`与`answer3_DIM_score`，共享理由和证据同时覆盖产品3；没有其他结构变化。
+三产品只在每维追加`answer3_DIM_status`与`answer3_DIM_score`，合并理由同时覆盖产品3；没有其他结构变化。
 
 ## 候选中采用的执行口径
 
@@ -135,4 +135,16 @@ observation = parse_output(raw_model_json, product_count=2)
 result = observation.model_dump()
 ```
 
-这段示例演示模板与契约的独立使用，不表示平台已经有该协议的运行入口。后续接入需适配协议注册和版本、严格解析/结果分流、0与1.5分统计、历史导出、UI及人工基准校验；须维持新旧协议结果隔离。结构测试不能证明裁判评分效果，需另用经过审核的标杆样本验证。
+上例用于独立检查原始模型输出。平台正常使用时，从compare模式选择新标签后走既有输入流程；程序校验输出，再附加协议身份、可信采集状态及逐维存储状态，模型不生成这些元数据。最终结果中的`answerN_DIM_score_status`表示实际纳入统计的状态，`verification_status`保持空值，不能把评分状态当成已经执行外部核验的证明。
+
+若可信采集日志明确某产品采集失败，程序只清空该产品最终分数，把`status`及`score_status`标为`insufficient_evidence`；其他产品和维度不受牵连。最终reason会在原文前添加清楚区分的程序说明，指明哪些产品因采集失败最终空分，其原判断只供审计，其他产品的有效评分保持不变。原始模型Observation及原始模型输出不改动，最终reason仍保留完整原模型逐产品理由，诊断记录原状态和分数。部分采集只做复核提示，已有充分证据支持的分数不自动清除。
+
+原始`DIM_evidence`字段已取消，独立JSON解析会拒绝该旧字段，不静默迁移或补写理由。统计和展示将数值0与空分区分，准确性1.5保持小数，分维报告有效样本和空分缺口；新旧协议及版本隔离。结构和回归测试不代表裁判评分一致性效果，仍需用经过审核的标杆样本验证。
+
+## 平台接入与验证
+
+选择compare模式下的“知识问答V1·0-2分（候选）”，按原有数据导入、模型选择和启动方式运行。结果页显示四维合并理由及各产品分数/空分状态，不显示旧Gate；摘要与Excel按单维输出分布、有效样本、覆盖缺口和同题配对交集。人工空白模板、基准导入、人机对齐及报告也支持此标准，准确性1.5不得转成整数。
+
+验证覆盖双/三产品、长截图/录屏、VQA题图、多轮原始上下文、可信采集失败、失败补跑相关审计、冻结协议恢复、严格JSON及实际XLSX数值回读。2561项Python非外部服务回归测试通过，29个Node前端测试文件通过；未调用真实裁判。旧Prompt、原默认协议、裁判配置和输入导入格式保持原样。
+
+浏览器视觉检查未完成：本执行环境没有可用Chrome，官方headless下载未成功，独立浏览器也无法访问本地开发端口。前端交互与显示逻辑已通过Node测试；本记录不代表已经取得真实页面截图。
