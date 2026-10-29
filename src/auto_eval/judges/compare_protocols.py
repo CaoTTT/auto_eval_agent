@@ -363,7 +363,7 @@ _PROTOCOLS = {
         id=QA_CHAT_V2_CALIBRATED_COMPARE_PROTOCOL_ID,
         standard_id=QA_CHAT_STANDARD_ID,
         standard_version="1.1-demand-calibrated",
-        bundle_revision="1.1.1",
+        bundle_revision="1.1.2",
         display="问答闲聊V2·需求与分档校准·1-5分（候选）",
         status="experimental",
         system_template=QA_CHAT_V2_CALIBRATED_SYSTEM,
@@ -443,6 +443,16 @@ def resolve_compare_protocol(protocol_id: str | None, bundle_revision: str | Non
     try:
         protocol = _PROTOCOLS[selected]
         if bundle_revision and bundle_revision != protocol.bundle_revision:
+            if selected == QA_CHAT_V2_CALIBRATED_COMPARE_PROTOCOL_ID and bundle_revision == "1.1.1":
+                # Existing calibrated tasks retain their original evidence rules.
+                from .visual_compare_prompt_qa_chat_v2_calibrated_r111 import (
+                    VISUAL_COMPARE_SYSTEM as legacy_system,
+                    VISUAL_COMPARE_USER as legacy_user,
+                )
+                return replace(
+                    protocol, bundle_revision=bundle_revision,
+                    system_template=legacy_system, user_template=legacy_user,
+                )
             if selected == V1022_COMPARE_PROTOCOL_ID and bundle_revision == "0.2.5":
                 from .visual_compare_prompt_v02_1022_r025 import (
                     VISUAL_COMPARE_SYSTEM as legacy_system,

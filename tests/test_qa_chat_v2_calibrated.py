@@ -13,6 +13,7 @@ import pytest
 from auto_eval.config import AppConfig, JudgeConfig, VisualExtractionConfig, VisualModeProfile
 from auto_eval.judges import visual_compare_prompt_qa_chat_v2 as original
 from auto_eval.judges import visual_compare_prompt_qa_chat_v2_calibrated as calibrated
+from auto_eval.judges import visual_compare_prompt_qa_chat_v2_calibrated_r111 as frozen_calibrated
 from auto_eval.judges.compare_protocols import (
     DEFAULT_COMPARE_PROTOCOL_ID,
     QA_CHAT_DIMENSIONS,
@@ -64,7 +65,7 @@ def test_calibrated_protocol_is_separate_selectable_and_preserves_old_identity()
     assert protocol.id == "qa_chat_compare@1.1-demand-calibrated"
     assert protocol.standard_id == "qa_chat_compare"
     assert protocol.standard_version == "1.1-demand-calibrated"
-    assert protocol.bundle_revision == "1.1.1"
+    assert protocol.bundle_revision == "1.1.2"
     assert protocol.result_schema_version == "qa-chat-result-2"
     assert protocol.observation_model is old.observation_model is QAChatV2Observation
     assert protocol.score_dimensions == old.score_dimensions == QA_CHAT_DIMENSIONS
@@ -77,9 +78,9 @@ def test_calibrated_protocol_is_separate_selectable_and_preserves_old_identity()
     assert old.standard_version == "1.1" and old.bundle_revision == "1.1.0"
     assert old.system_template is original.VISUAL_COMPARE_SYSTEM
     assert resolve_compare_protocol(None).id == DEFAULT_COMPARE_PROTOCOL_ID
-    assert resolve_compare_standard("qa_chat_compare", "1.1-demand-calibrated", "1.1.1") is protocol
-    assert resolve_compare_standard(None, protocol.id, "1.1.1") is protocol
-    assert resolve_compare_standard(protocol.id, None, "1.1.1") is protocol
+    assert resolve_compare_standard("qa_chat_compare", "1.1-demand-calibrated", "1.1.2") is protocol
+    assert resolve_compare_standard(None, protocol.id, "1.1.2") is protocol
+    assert resolve_compare_standard(protocol.id, None, "1.1.2") is protocol
     for profile_id, wrong_revision in ((old.id, "1.1.1"), (protocol.id, "1.1.0")):
         with pytest.raises(ValueError, match="无法恢复"):
             resolve_compare_protocol(profile_id, wrong_revision)
@@ -118,16 +119,36 @@ def test_additive_calibration_preserves_complete_old_text_inputs_and_exact_outpu
     assert QAChatV2Observation.model_validate(example, context={"product_count": count}).model_dump() == example
 
 
+@pytest.mark.parametrize("count", [2, 3])
+@pytest.mark.parametrize("mode", ["long_screenshot", "video_frames"])
+def test_frozen_calibrated_revision_keeps_its_original_prompt_and_wire_contract(count, mode):
+    frozen_source = Path(frozen_calibrated.__file__).read_bytes().replace(b"\r\n", b"\n")
+    assert hashlib.sha256(frozen_source).hexdigest() == (
+        "e02179aa541bbfd50e0467c2396665e2612d51acd5e0e203500fb93e04e562d1")
+    protocol = resolve_compare_protocol(QA_CHAT_V2_CALIBRATED_COMPARE_PROTOCOL_ID, "1.1.1")
+    system, user = protocol.prompt_templates(count)
+    values = dict(product_count=count, evidence_mode=mode, persona="frozen-contract")
+    assert system.render(**values) == frozen_calibrated.render_system_prompt(**values)
+    assert system.render(**values) != calibrated.render_system_prompt(**values)
+    assert user is calibrated.VISUAL_COMPARE_USER is original.VISUAL_COMPARE_USER
+    assert frozen_calibrated.output_example(count) == calibrated.output_example(count)
+    assert protocol.bundle_revision == "1.1.1"
+    assert protocol.observation_model is QAChatV2Observation
+
+
 @pytest.mark.parametrize("profile_id,revision", [
     (QA_CHAT_V2_COMPARE_PROTOCOL_ID, "1.1.0"),
     (QA_CHAT_V2_CALIBRATED_COMPARE_PROTOCOL_ID, "1.1.1"),
+    (QA_CHAT_V2_CALIBRATED_COMPARE_PROTOCOL_ID, "1.1.2"),
 ])
 def test_frozen_snapshot_roundtrip_never_upgrades_or_downgrades_chat(profile_id, revision):
     protocol = resolve_compare_protocol(profile_id, revision)
     task = Task("frozen-chat", "compare", [], {}, evaluation_profile=protocol.id,
                 protocol_manifest=protocol.public_metadata())
     snapshot = snapshot_payload(task_to_snapshot(task))
-    assert require_snapshot_protocol(snapshot) is protocol
+    recovered = require_snapshot_protocol(snapshot)
+    assert recovered.public_metadata() == protocol.public_metadata()
+    assert recovered.system_template is protocol.system_template
     restored = _task_from_snapshot(snapshot, task.id)
     assert restored.evaluation_profile == profile_id
     assert restored.protocol_manifest["standard_version"] == protocol.standard_version
@@ -136,14 +157,16 @@ def test_frozen_snapshot_roundtrip_never_upgrades_or_downgrades_chat(profile_id,
     assert resolve_compare_protocol(restored.evaluation_profile, revision).system_template is protocol.system_template
 
 
-@pytest.mark.parametrize("invalid", ["missing_revision", "mixed_version"])
+@pytest.mark.parametrize("invalid", ["missing_revision", "mixed_version", "mixed_revision"])
 def test_invalid_calibrated_identity_cannot_silently_export_formal_scores(invalid):
     source = _snapshot()
     if invalid == "missing_revision":
         del source["protocol_manifest"]["bundle_revision"]
         del source["results"][0]["bundle_revision"]
-    else:
+    elif invalid == "mixed_version":
         source["results"][0]["standard_version"] = "1.1"
+    else:
+        source["results"][0]["bundle_revision"] = "1.1.1"
     before = deepcopy(source)
     assert not recover_protocol_identity(source)["executable"]
     with pytest.raises(ValueError):
@@ -160,7 +183,7 @@ def test_config_api_exposes_calibrated_selection(monkeypatch):
     options = server.api_config()["evaluation_profiles"]
     selected = next(item for item in options if item["id"] == QA_CHAT_V2_CALIBRATED_COMPARE_PROTOCOL_ID)
     assert selected["selectable"] is True
-    assert selected["bundle_revision"] == "1.1.1"
+    assert selected["bundle_revision"] == "1.1.2"
     assert selected["result_schema_version"] == "qa-chat-result-2"
     assert selected["score_dimensions"] == list(QA_CHAT_DIMENSIONS)
     assert server._compare_protocol_or_422(selected["id"], require_selectable=True).id == selected["id"]
@@ -186,7 +209,8 @@ class _FakeClient:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("count", [2, 3])
 @pytest.mark.parametrize("mode", ["long_screenshot", "video_frames"])
-async def test_runtime_calls_new_system_with_unchanged_media_and_v2_result(tmp_path, count, mode):
+@pytest.mark.parametrize("revision", ["1.1.1", "1.1.2"])
+async def test_runtime_calls_frozen_system_with_unchanged_media_and_v2_result(tmp_path, count, mode, revision):
     profile = VisualModeProfile(extraction=VisualExtractionConfig(algorithm_version="test"))
     client = _FakeClient(_payload(count))
     arguments = dict(question="今天累了，想聊聊天", product_count=count, evidence_mode=mode)
@@ -204,10 +228,16 @@ async def test_runtime_calls_new_system_with_unchanged_media_and_v2_result(tmp_p
             arguments[f"frames{product}"] = [str(path)]
     if mode == "long_screenshot":
         arguments["screenshot_metas"] = metas
-    result = await VisualCompareJudge(client, profile, QA_CHAT_V2_CALIBRATED_COMPARE_PROTOCOL_ID).evaluate(**arguments)
+    protocol = resolve_compare_protocol(QA_CHAT_V2_CALIBRATED_COMPARE_PROTOCOL_ID, revision)
+    snapshot = _snapshot(count)
+    snapshot["protocol_manifest"] = protocol.public_metadata()
+    snapshot["results"][0]["bundle_revision"] = revision
+    restored_protocol = require_snapshot_protocol(snapshot)
+    result = await VisualCompareJudge(client, profile, restored_protocol).evaluate(**arguments)
     assert len(client.calls) == 1
     system, user, options = client.calls[0]
-    assert system == calibrated.render_system_prompt(product_count=count, evidence_mode=mode, persona=client.persona)
+    template_module = frozen_calibrated if revision == "1.1.1" else calibrated
+    assert system == template_module.render_system_prompt(product_count=count, evidence_mode=mode, persona=client.persona)
     assert system != original.render_system_prompt(product_count=count, evidence_mode=mode, persona=client.persona)
     assert len(options["user_image_refs"]) == count
     if mode == "long_screenshot":
@@ -219,9 +249,10 @@ async def test_runtime_calls_new_system_with_unchanged_media_and_v2_result(tmp_p
     assert all(f"背景{product}" in user for product in range(1, count + 1))
     assert result["evaluation_profile"] == QA_CHAT_V2_CALIBRATED_COMPARE_PROTOCOL_ID
     assert result["standard_version"] == "1.1-demand-calibrated"
-    assert result["bundle_revision"] == "1.1.1"
+    assert result["bundle_revision"] == revision
     assert result["result_schema_version"] == "qa-chat-result-2"
     assert result["prompt_sha256"] and result["input_manifest_sha256"]
+    assert result["prompt_sha256"] == hashlib.sha256(f"{system}\0{user}".encode("utf-8")).hexdigest()
     for product in range(1, count + 1):
         for dimension in QA_CHAT_DIMENSIONS:
             assert result[f"answer{product}_{dimension}_score"] == 6 - product
