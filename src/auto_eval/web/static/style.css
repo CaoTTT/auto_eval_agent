@@ -263,6 +263,10 @@ pre { background: #fef2f2; padding: 10px; border-radius: 6px; font-size: 12px; w
 .timeliness-score.score-2, .timeliness-score.gate-unclear { color: #854d0e; background: #fef9c3; border-color: #fde047; }
 .timeliness-score.score-1, .timeliness-score.gate-fail { color: #991b1b; background: #fee2e2; border-color: #fca5a5; }
 .timeliness-score.score-na, .timeliness-score.gate-unknown { color: #475569; background: #f1f5f9; border-color: #cbd5e1; }
+.knowledge-qa-result .knowledge-full { color: #166534; background: #dcfce7; border-color: #86efac; }
+.knowledge-qa-result .knowledge-partial { color: #854d0e; background: #fef9c3; border-color: #fde047; }
+.knowledge-qa-result .knowledge-zero { color: #991b1b; background: #fee2e2; border-color: #fca5a5; }
+.knowledge-qa-result .knowledge-na { color: #475569; background: #f1f5f9; border-color: #cbd5e1; }
 .result-table-wrap { width: 100%; overflow-x: auto; border: 1px solid #e5e7eb; border-radius: 8px; }
 .result-table-wrap table.grid { margin-top: 0; }
 .result-table-wrap th { position: sticky; top: 0; z-index: 1; white-space: nowrap; }

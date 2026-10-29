@@ -31,6 +31,7 @@ def assemble_conversation(system: str, bundle: dict, protocol, evaluation_dateti
     target, turns = bundle["target_turn"], bundle["turns"]
     profile, limits = bundle["profile"], bundle["limits"]
     is_timeliness = protocol.standard_id == "timeliness_compare"
+    is_knowledge_qa = protocol.standard_id == "knowledge_qa_compare"
     product_contexts_only = (
         protocol.output_contract == OUTPUT_CONTRACT_1022
         and protocol.bundle_revision in {"0.2.4", "0.2.5", "0.2.6"}
@@ -42,6 +43,9 @@ def assemble_conversation(system: str, bundle: dict, protocol, evaluation_dateti
             for turn in turns
         ]
     instructions = INSTRUCTIONS
+    if is_knowledge_qa:
+        instructions = instructions.replace("“回答”“展示”“证据”“Gate”及评分", "“回答”“展示”“证据”及评分").replace(
+            "不继承前轮评分、Gate、胜负或总结", "不继承前轮评分、胜负或总结")
     if protocol.output_contract == OUTPUT_CONTRACT_1022 and protocol.bundle_revision == "0.2.5":
         instructions = instructions.replace(
             "先分别绝对评分，再比较。",
@@ -69,6 +73,9 @@ def assemble_conversation(system: str, bundle: dict, protocol, evaluation_dateti
     if is_timeliness:
         text("时间依据：仅采用各产品各轮材料中的明确测试条件和用户目标时间。"
              "未提供测试时间时保留未知；任务创建时间和审核时间不是产品测试时间。")
+    elif is_knowledge_qa:
+        text("本次评估调用时间 evaluation_datetime：" + (evaluation_datetime or datetime.now().astimezone().isoformat(timespec="seconds")))
+        text("该时间不是产品实际测试时间；只采用原始材料中明确的测试条件，缺少决定性时点时保留未知。")
     elif not product_contexts_only:
         text("评测基准时间 evaluation_datetime：" + (evaluation_datetime or datetime.now().astimezone().isoformat(timespec="seconds")))
     for turn in turns:
@@ -97,7 +104,10 @@ def assemble_conversation(system: str, bundle: dict, protocol, evaluation_dateti
                        "image_role": "product_answer", "request_role": role, "ref_path": part["path"]})
                 text(f"{asset_id} 结束")
         text(f"产品{n}轨迹结束")
-    text(f"只输出 target_turn={target} 的评分；使用上述协议的原有 Schema、适用性、Gate 与分数范围。")
+    if is_knowledge_qa:
+        text(f"只输出 target_turn={target} 的四维评分；使用上述协议的合并理由、逐产品status/score及允许分值，不输出Gate。")
+    else:
+        text(f"只输出 target_turn={target} 的评分；使用上述协议的原有 Schema、适用性、Gate 与分数范围。")
     report = request_budget(system, parts, metadata, limits, profile)
     bundle["diagnostics"]["request_budget_report"] = report
     if report["blocked"]:
