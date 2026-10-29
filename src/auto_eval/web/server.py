@@ -18,7 +18,7 @@ from urllib.parse import quote
 from dotenv import load_dotenv
 from PIL import Image
 from fastapi import Request, FastAPI, HTTPException, UploadFile, File
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
@@ -36,6 +36,7 @@ from ..judges.compare_protocols import (
 from ..media import probe_duration
 from ..paths import RUNS_DIR
 from ..query_images import normalize_query_input, PREPARED_FIELDS, prepare_query_images, QueryImageError
+from ..remote_media import TEMPORARY_DOWNLOAD_PATHS_FIELD, is_remote_url
 from ..conversation import normalize_turn, validate_conversations, is_conversation, DIAGNOSTIC_FIELDS
 from ..preparation import run_preparation
 from .parse_input import Mode, normalize_compare_evidence, parse_csv, parse_jsonl, parse_text
@@ -264,6 +265,10 @@ def _resolve_operation_video_path(raw_path: str) -> Path:
 
 def _validate_eval_request(req: EvalReq, app_cfg, *, previous_items=None) -> None:
     """提交前校验：compare 模式支持完整的2或3产品同类视觉证据。"""
+    # Cleanup ownership is assigned by media preparation, never by a client.
+    # Apply this before the mode-specific return: both modes share teardown.
+    for item in req.items:
+        item.pop(TEMPORARY_DOWNLOAD_PATHS_FIELD, None)
     selected = req.options.get("judges") or (
         [app_cfg.judges[0].name] if app_cfg.judges else []
     )
@@ -1231,6 +1236,8 @@ async def api_dataset(task_id: str):
 def api_validate_dataset_files(req: DatasetValidateReq):
     issues = []
     for entry in req.files:
+        if is_remote_url(entry.path):
+            continue
         try:
             DATASET_MEDIA.resolve(entry.path, entry.role, cfg().visual_modes["rich_content"].query_images, BASE_DIR)
         except (ValueError, OSError) as exc:
@@ -1510,7 +1517,7 @@ def _download_stem(value: str, fallback: str) -> str:
 
 
 @app.get("/api/eval/{task_id}/items/{item_index}/export")
-def api_export_item(task_id: str, item_index: int, format: str):
+def api_export_item(task_id: str, item_index: int, format: str, product_no: int = 1):
     """导出单条结果关联的原视频、关键帧或裁判调用 JSON。"""
     task = peek_task(task_id, touch=False)  # 导出只读视图不驻留内存；touch=False：线程池端点不变异 TASKS
     data = task_to_snapshot(task) if task else load_snapshot(task_id)
@@ -1529,17 +1536,44 @@ def api_export_item(task_id: str, item_index: int, format: str):
     )
 
     if format == "video":
-        raw_path = str(item.get("video_path") or "").strip()
-        if not raw_path:
+        if product_no not in (1, 2, 3):
+            raise HTTPException(404, "产品不存在")
+        source = item.get("source_data") or {}
+        raw_path = str(
+            item.get(f"video{product_no}")
+            or source.get(f"video{product_no}")
+            or (
+                (item.get("video_path") or source.get("video_path"))
+                if product_no == 1
+                else ""
+            )
+            or ""
+        ).strip()
+        if not raw_path and product_no == 1:
             media = item.get("media") or []
             raw_path = str(media[0]).strip() if media else ""
         if not raw_path:
             raise HTTPException(404, "该条结果没有原始视频路径")
-        try:
-            video_path = _resolve_operation_video_path(raw_path)
-        except ValueError as exc:
-            raise HTTPException(404, str(exc)) from exc
-        source_identity = item.get("video_source") or item.get("video_source1") or {}
+        if is_remote_url(raw_path):
+            return RedirectResponse(raw_path, status_code=307)
+        runtime_path = str(item.get(f"video{product_no}_path") or "").strip()
+        video_path = None
+        for candidate in (raw_path, runtime_path):
+            if not candidate:
+                continue
+            try:
+                video_path = _resolve_operation_video_path(candidate)
+            except ValueError:
+                continue
+            break
+        if video_path is None:
+            raise HTTPException(404, f"无法读取原始视频：{raw_path}")
+        source_identity = (
+            item.get(f"video_source{product_no}")
+            or item.get("video_source")
+            or item.get("video_source1")
+            or {}
+        )
         if source_identity.get("sha256") and file_hash(video_path) != source_identity["sha256"]:
             raise HTTPException(409, "原视频内容已变更，与评测时采样帧不一致，请恢复原视频或重新评测")
         return FileResponse(

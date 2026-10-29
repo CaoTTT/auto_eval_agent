@@ -14,7 +14,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ..paths import RUNS_DIR
-from ..preparation import preparation_limit, run_preparation
+from ..preparation import PreparationLimiter, run_preparation, preparation_limit, preparation_concurrency
+from ..remote_media import cleanup_item_downloads
 from ..timing import StageTimings, collect_timings, timing_span
 from ..task_control import PauseRequested, bind_pause_check, check_pause, pause_aware, wait_for_active
 from .scheduler import MAX_CONCURRENCY, MODEL_LIMITER, PIPELINE_LIMITER, PREP_LIMITER, get_settings
@@ -266,6 +267,16 @@ def _mark_interrupted_if_stuck(task: Task) -> bool:
     return True
 
 
+async def _cleanup_task_media_downloads(task: Task) -> None:
+    await asyncio.gather(
+        *(
+            asyncio.to_thread(cleanup_item_downloads, item)
+            for item in task.items
+        ),
+        return_exceptions=True,
+    )
+
+
 async def run_eval(task: Task, cfg: AppConfig) -> None:
     """全量评测入口。pin 契约（R1）：调用方须在提交时同步 `active_runs += 1`
     （endpoint 在 spawn_background 之前），本函数只负责结束时解除——否则
@@ -292,6 +303,8 @@ async def run_eval(task: Task, cfg: AppConfig) -> None:
             await _persist_task_and_wait(task)
     finally:
         task.active_runs -= 1
+        if task.active_runs <= 0:
+            await _cleanup_task_media_downloads(task)
         task.finish_timing()
         if not await finish_pause(task):
             _mark_interrupted_if_stuck(task)
@@ -785,6 +798,7 @@ def _make_item_evaluator(
                 )
             res["timings"] = timings.finish()
             res["total_s"] = res["timings"]["total_s"]
+            await asyncio.to_thread(cleanup_item_downloads, item_dict)
             await finish(idx, res, started)
             return res
 
@@ -816,6 +830,11 @@ def _make_item_evaluator(
                             "finished_at": int(time.time() * 1000),
                         })
                         return {"_paused": True}
+                    finally:
+                        # Retry/resume evaluate working copies that are not in
+                        # task.items. Release their downloads even when pausing
+                        # or cancelling before a result reaches finish().
+                        await asyncio.to_thread(cleanup_item_downloads, item_dict)
 
     return limited_one, clients
 
@@ -1350,6 +1369,8 @@ async def run_update_batch(
         )
     finally:
         task.active_runs -= 1
+        if task.active_runs <= 0:
+            await _cleanup_task_media_downloads(task)
         if manage_status:
             task.finish_timing()
         idle = task.active_runs <= 0

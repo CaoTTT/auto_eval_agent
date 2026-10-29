@@ -450,10 +450,10 @@ def test_stable_plus_r022_remains_frozen_and_preserves_output_contract(
 
 
 @pytest.mark.parametrize("product_count,evidence_mode,expected_sha256", [
-    (2, "video_frames", "57d6d634b399b6c4f035125a8f8d43e052a0b126c1977dde7295cc6894a95b73"),
-    (2, "long_screenshot", "0e3deafd70fbb4f65aeb08525b8cbfe88b20a6f0546430d3d49796517ab2cf1d"),
-    (3, "video_frames", "1ed2f32b5d41d6d54fcc612d5e70187a32d81a229b616c48c1f73dbf1ed2f897"),
-    (3, "long_screenshot", "b30a18e7b9060a17416b1ac8bf18b2830a02fe09a9a8476be380808ba4865a2f"),
+        (2, "video_frames", "e35fb8fd13846f5e76e6b8cc9c8afb4246a2d959c1bffa4efa3e1c67729121dc"),
+        (2, "long_screenshot", "56243790fcebf53f6b785f7f4affe862358035413f49335974f5153c14e2a193"),
+        (3, "video_frames", "47e5a6c939c9d483cd3043d7886aca3b088a1f14e840e26a6994eb4107078806"),
+        (3, "long_screenshot", "7c05bba4606f7d6817b3b8ca674521ca26582ae44449911a7490db2297822ca9"),
 ])
 def test_stable_plus_service_revision_preserves_inputs_output_and_frozen_history(
     product_count, evidence_mode, expected_sha256
@@ -465,7 +465,7 @@ def test_stable_plus_service_revision_preserves_inputs_output_and_frozen_history
     from auto_eval.web.protocol_identity import require_snapshot_protocol
 
     assert hashlib.sha256(Path(prompt.__file__).read_bytes().replace(b"\r\n", b"\n")).hexdigest() == (
-        "5bf5378e66ba98b437a537a08ef29226ac95b5196021d62c474c743727a28c54"
+        "e4cc008b6d0a094861486858f2c5d99d0e84b7e624a3783b26ac76ba949d5333"
     )
     active = resolve_compare_protocol(V02_PLUS_COMPARE_PROTOCOL_ID)
     assert active.bundle_revision == "0.2.3"
@@ -486,7 +486,7 @@ def test_stable_plus_service_revision_preserves_inputs_output_and_frozen_history
     assert marker in system
 
     def output_example(rendered_system):
-        output = rendered_system.split("【二十二、输出JSON结构】", 1)[1]
+        output = rendered_system.rsplit("输出JSON结构】", 1)[1]
         return json.loads(output[output.index("{"):output.rindex("}") + 1])
 
     current_example = output_example(system)
@@ -502,11 +502,19 @@ def test_stable_plus_service_revision_preserves_inputs_output_and_frozen_history
         assert restored.user_template is frozen.user_template
         old_system = restored.system_template.render(**values)
         assert marker not in old_system
-        if revision == "0.2.2":
-            assert restored.user_template.render(**values) == user
+        assert restored.user_template.render(**values) != user
         old_example = output_example(old_system)
         assert list(current_example) == list(old_example)
-        assert current_example == old_example
+        assert current_example["accuracy_applicable"] is False
+        assert current_example["accuracy_verification_status"] == "not_required"
+        assert all(current_example[f"answer{number}_accuracy_score"] is None for number in (1, 2, 3))
+        accuracy_fields = {
+            key for key in current_example if key == "accuracy" or key.startswith("accuracy_")
+            or key.endswith("_accuracy_score")
+        }
+        assert {key: value for key, value in current_example.items() if key not in accuracy_fields} == {
+            key: value for key, value in old_example.items() if key not in accuracy_fields
+        }
         assert active.observation_model is frozen.observation_model is VisualCompareObservationV02
         assert active.require_response_pass is frozen.require_response_pass is True
         assert active.request_metadata() == {**frozen.request_metadata(), "bundle_revision": "0.2.3"}

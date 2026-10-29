@@ -146,7 +146,10 @@ async def test_interrupted_download_releases_file_lease(tmp_path, monkeypatch, f
             await asyncio.Event().wait()
     async def receive():
         return {"type": "http.disconnect"}
-    transfer = asyncio.create_task(response({"type": "http", "method": "GET", "headers": []}, receive, send))
+    transfer = asyncio.create_task(response({
+        "type": "http", "method": "GET", "headers": [],
+        "asgi": {"spec_version": "2.4"},
+    }, receive, send))
     try:
         await asyncio.wait_for(sending.wait(), 3)
         if failure == "cancel":

@@ -218,6 +218,62 @@ def test_write_frames_zip_can_export_one_dataset_item(tmp_path: Path):
         assert {row["id"] for row in manifest} == {"op_1"}
 
 
+def test_remote_compare_video_urls_survive_excel_and_frame_zip(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setattr(history, "PROJECT_ROOT", tmp_path)
+    frame_dir = tmp_path / "runs" / "remote" / "video1"
+    frame_dir.mkdir(parents=True)
+    frame = frame_dir / "kf_001.jpg"
+    frame.write_bytes(b"frame")
+    (frame_dir / "keyframes.json").write_text(
+        json.dumps({
+            "video": "https://example.test/one.mp4",
+            "selected": [{"index": 1, "time": 1.0, "source": "scene"}],
+        }),
+        encoding="utf-8",
+    )
+    snapshot = {
+        "task_id": "remote-task",
+        "mode": "compare",
+        "items": [{
+            "id": "remote",
+            "query": "q",
+            "product_count": 2,
+            "evidence_mode": "video_frames",
+            "video1": "https://example.test/one.mp4",
+            "video2": "https://example.test/two.mp4",
+            "video1_path": str(tmp_path / "runs" / "downloads" / "deleted-one.mp4"),
+            "video2_path": str(tmp_path / "runs" / "downloads" / "deleted-two.mp4"),
+            "frames1": [str(frame)],
+            "frames2": [],
+            "source_data": {
+                "query": "q",
+                "product_count": 2,
+                "video1": "https://example.test/one.mp4",
+                "video2": "https://example.test/two.mp4",
+            },
+        }],
+        "results": [],
+    }
+
+    row = history.export_rows(snapshot)["数据集明细"][0]
+    assert row["产品1录屏项目相对路径"] == "https://example.test/one.mp4"
+    assert row["产品2录屏项目相对路径"] == "https://example.test/two.mp4"
+
+    archive = tmp_path / "remote.zip"
+    history.write_frames_zip(snapshot, archive, project_root=tmp_path)
+    with zipfile.ZipFile(archive) as zf:
+        manifest = [
+            json.loads(line)
+            for line in zf.read("manifest.jsonl").decode("utf-8").splitlines()
+        ]
+        assert manifest[0]["source_video_path"] == "https://example.test/one.mp4"
+        assert manifest[0]["video_project_path"] == "https://example.test/one.mp4"
+        metadata = json.loads(zf.read("001_remote/product1/keyframes.json"))
+        assert metadata["video"] == "https://example.test/one.mp4"
+
+
 def test_load_item_judge_calls_matches_task_and_item_index(tmp_path: Path):
     snapshot = _snapshot(tmp_path)
     snapshot.update({

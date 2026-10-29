@@ -15,6 +15,7 @@ from .config import QueryImageConfig
 from .conversation import is_conversation
 from .paths import PROJECT_ROOT, RUNS_DIR, resolve_project_path
 from .preparation import check_preparation
+from .remote_media import download_remote_image, is_remote_url
 
 INPUT_SCHEMA_VERSION = "1.1"
 PREPROCESS_VERSION = "query-image-1"
@@ -100,7 +101,14 @@ def inspect_image(path: Path, cfg: QueryImageConfig) -> tuple[bytes, bytes, dict
                         "preprocess_version": PREPROCESS_VERSION}
 
 
-def prepare_query_images(item: dict, *, session_name: str, cfg: QueryImageConfig) -> dict:
+def prepare_query_images(
+    item: dict,
+    *,
+    session_name: str,
+    cfg: QueryImageConfig,
+    download_fn=None,
+    prefetched_paths: dict[int, Path] | None = None,
+) -> dict:
     normalized = normalize_query_input(item)
     metas = []
     # Hash the owner name instead of placing client-supplied task IDs in paths.
@@ -108,30 +116,56 @@ def prepare_query_images(item: dict, *, session_name: str, cfg: QueryImageConfig
     root = RUNS_DIR / "query_images" / owner
     previous = item.get("query_image_meta") or []
     for index, source in enumerate(normalized["query_images"]):
-        path = authorized_path(source, cfg)
-        raw, model, info = inspect_image(path, cfg)
-        if index < len(previous) and previous[index].get("original_path") == str(path):
-            if previous[index].get("original_sha256") != info["original_sha256"]:
-                raise QueryImageError("query_image_changed", "已固化的提问原图发生变化")
-        folder = root / info["original_sha256"]
-        folder.mkdir(parents=True, exist_ok=True)
-        original = folder / ("original" + path.suffix.lower())
-        view = folder / ("model.png" if model != raw else original.name)
-        check_preparation()
-        _snapshot_bytes(original, raw)
-        if view != original:
-            _snapshot_bytes(view, model)
-        prior = previous[index] if index < len(previous) else {}
-        same_original = prior.get("original_path") == str(path) and prior.get("original_sha256") == info["original_sha256"]
-        image_id = (prior.get("image_id") if same_original else None) or uuid.uuid4().hex
-        meta = {**info, "image_id": image_id, "query_image_id": f"QI{index + 1}",
-                "image_role": "query_image", "source_path": prior.get("source_path", source) if same_original else source,
-                "original_path": str(original), "path": str(view),
-                "preview_url": f"/api/query-images/{image_id}"}
-        registry = RUNS_DIR / "query_images" / "registry"
-        registry.mkdir(parents=True, exist_ok=True)
-        (registry / f"{image_id}.json").write_text(json.dumps(meta), encoding="utf-8")
-        metas.append(meta)
+        remote = is_remote_url(source)
+        downloaded: Path | None = None
+        try:
+            if remote:
+                prefetched = (prefetched_paths or {}).get(index)
+                if prefetched is not None:
+                    path = Path(prefetched).resolve()
+                else:
+                    if download_fn is None:
+                        download_fn = download_remote_image
+                    downloaded = download_fn(
+                        source,
+                        RUNS_DIR / "downloads" / "query_images" / owner,
+                    ).resolve()
+                    path = downloaded
+            else:
+                path = authorized_path(source, cfg)
+            raw, model, info = inspect_image(path, cfg)
+            prior = previous[index] if index < len(previous) else {}
+            if remote and prior.get("source_url") == source:
+                if prior.get("original_sha256") != info["original_sha256"]:
+                    raise QueryImageError("query_image_changed", "已固化的提问原图发生变化")
+            elif not remote and prior.get("original_path") == str(path):
+                if prior.get("original_sha256") != info["original_sha256"]:
+                    raise QueryImageError("query_image_changed", "已固化的提问原图发生变化")
+            folder = root / info["original_sha256"]
+            folder.mkdir(parents=True, exist_ok=True)
+            original = folder / ("original" + path.suffix.lower())
+            view = folder / ("model.png" if model != raw else original.name)
+            check_preparation()
+            _snapshot_bytes(original, raw)
+            if view != original:
+                _snapshot_bytes(view, model)
+            same_original = (
+                (prior.get("source_url") == source if remote else prior.get("original_path") == str(path))
+                and prior.get("original_sha256") == info["original_sha256"]
+            )
+            image_id = (prior.get("image_id") if same_original else None) or uuid.uuid4().hex
+            meta = {**info, "image_id": image_id, "query_image_id": f"QI{index + 1}",
+                    "image_role": "query_image", "source_path": prior.get("source_path", source) if same_original else source,
+                    "source_url": source if remote else prior.get("source_url", ""),
+                    "original_path": str(original), "path": str(view),
+                    "preview_url": f"/api/query-images/{image_id}"}
+            registry = RUNS_DIR / "query_images" / "registry"
+            registry.mkdir(parents=True, exist_ok=True)
+            (registry / f"{image_id}.json").write_text(json.dumps(meta), encoding="utf-8")
+            metas.append(meta)
+        finally:
+            if downloaded is not None:
+                downloaded.unlink(missing_ok=True)
     return {**normalized, "query_images": [m["original_path"] for m in metas],
             "query_image_meta": metas, "query_image_views": [m["path"] for m in metas],
             "input_schema_version": "2.0" if item.get("session_id") else INPUT_SCHEMA_VERSION,

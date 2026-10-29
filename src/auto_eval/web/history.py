@@ -686,6 +686,7 @@ def _aligned_results(snapshot: dict, results: list[dict]) -> list[dict]:
 
 
 _RUNTIME_ITEM_FIELDS = {
+    "_temporary_download_paths",
     "screenshot_evidence",
     "evidence_mode", "screenshot_meta1", "screenshot_meta2", "screenshot_meta3",
     "frames",
@@ -768,7 +769,10 @@ def _project_relative_path(
     """把项目内路径转为稳定的 POSIX 相对路径；项目外路径返回空。"""
     if value is None or str(value).strip() == "":
         return ""
-    path = Path(str(value)).expanduser()
+    raw = str(value).strip()
+    if "://" in raw:
+        return ""
+    path = Path(raw).expanduser()
     if not path.is_absolute():
         return path.as_posix()
     root = project_root or PROJECT_ROOT
@@ -788,6 +792,29 @@ def _source_data_for_item(item: dict) -> dict:
         for key, value in item.items()
         if key not in _RUNTIME_ITEM_FIELDS
     }
+
+
+def _video_export_reference(stream: dict) -> str:
+    """Keep a durable URL when the runtime download has already been removed."""
+    source = str(stream.get("source_video") or "").strip()
+    if "://" in source:
+        return source
+    relative = _project_relative_path(stream["runtime_video"])
+    runtime = Path(str(stream["runtime_video"] or "")).expanduser()
+    if runtime and not runtime.is_absolute():
+        runtime = PROJECT_ROOT / runtime
+    if relative and runtime.is_file():
+        return relative
+    return _project_relative_path(source)
+
+
+def _local_absolute_path(value: Any, project_root: Path | None = None) -> str:
+    raw = str(value or "").strip()
+    if not raw or "://" in raw:
+        return ""
+    path = Path(raw).expanduser()
+    root = project_root or PROJECT_ROOT
+    return str(path if path.is_absolute() else root / path)
 
 
 # Exact names consumed by input normalization. Do not exclude by prefix:
@@ -897,7 +924,7 @@ def _item_visual_streams(item: dict) -> list[dict[str, Any]]:
             streams.append({
                 "product_no": product_no, "evidence_mode": "long_screenshot",
                 "source_video": "", "runtime_video": "", "duration": "",
-                "original_path": str(PROJECT_ROOT / original) if original else "",
+                "original_path": _local_absolute_path(original),
                 "screenshot_meta": meta,
                 "frames": [PROJECT_ROOT / str(path) for path in item.get(f"frames{product_no}", [])],
             })
@@ -981,9 +1008,7 @@ def _dataset_rows(snapshot: dict, *, include_extra: bool = True) -> list[dict]:
                 _project_relative_path(frames[0].parent) if frames else ""
             )
             row.update({
-                f"{prefix}录屏项目相对路径": _project_relative_path(
-                    stream["runtime_video"]
-                ),
+                f"{prefix}录屏项目相对路径": _video_export_reference(stream),
                 f"{prefix}抽帧目录项目相对路径": frame_dir,
                 f"{prefix}帧项目相对路径": "\n".join(frame_project_paths),
                 f"{prefix}抽帧数量": len(frames),
@@ -1059,7 +1084,7 @@ def _frame_manifest_rows(snapshot: dict) -> list[dict]:
                 "id": item.get("id") or f"q{item_index}",
                 "query": item.get("query") or item.get("question") or "",
                 "产品序号": product_no or "",
-                "录屏项目相对路径": _project_relative_path(stream["runtime_video"]),
+                "录屏项目相对路径": _video_export_reference(stream),
                 "原始video_path": stream["source_video"],
                 "录屏内容SHA256": stream.get("video_source", {}).get("sha256", ""),
             }
@@ -1407,6 +1432,7 @@ def write_frames_zip(
                         manifest.append({
                             "dataset_index": item_index + 1, "id": raw_id, "product_no": product_no,
                             "evidence_mode": "long_screenshot", "image_role": label,
+                            "source_url": meta.get("source_url", ""),
                             "image_path": archive_path, "status": "ok" if exists else "missing",
                             "split_status": meta.get("split_status", "未准备"),
                         })
@@ -1427,10 +1453,7 @@ def write_frames_zip(
                     "product_no": product_no,
                     "source_video_path": stream["source_video"],
                     "source_video_sha256": stream.get("video_source", {}).get("sha256", ""),
-                    "video_project_path": _project_relative_path(
-                        stream["runtime_video"],
-                        project_root,
-                    ),
+                    "video_project_path": _video_export_reference(stream),
                 }
                 if not frames:
                     manifest.append({
@@ -1466,9 +1489,13 @@ def write_frames_zip(
 
                 if metadata:
                     exported_metadata = dict(metadata)
-                    exported_metadata["video"] = _project_relative_path(
-                        stream["runtime_video"],
-                        project_root,
+                    video_reference = str(
+                        stream["source_video"] or stream["runtime_video"]
+                    ).strip()
+                    exported_metadata["video"] = (
+                        video_reference
+                        if "://" in video_reference
+                        else _project_relative_path(video_reference, project_root)
                     )
                     exported_metadata["product_no"] = product_no
                     zf.writestr(
@@ -1627,7 +1654,8 @@ def _original_screenshot_rows(snapshot: dict, images: WpsCellImages) -> list[dic
             original = (meta.get("original_path") or item.get(f"screenshot{product_no}")
                         or source.get(f"screenshot{product_no}"))
             if isinstance(original, (str, Path)) and str(original).strip():
-                originals[product_no] = (str(PROJECT_ROOT / str(original).strip()), meta.get("original_sha256"))
+                raw = str(original).strip()
+                originals[product_no] = (_local_absolute_path(raw) or raw, meta.get("original_sha256"))
         originals_by_item.append(originals)
     if not any(originals_by_item):
         return []
@@ -1642,6 +1670,9 @@ def _original_screenshot_rows(snapshot: dict, images: WpsCellImages) -> list[dic
         }
         for product_no, (path, expected_sha256) in originals.items():
             key = f"产品{product_no}原图"
+            if "://" in path:
+                row[key] = path
+                continue
             try:
                 row[key] = images.add(path, expected_sha256)
             except OriginalImageError as exc:

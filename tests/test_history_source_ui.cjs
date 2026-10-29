@@ -2,7 +2,8 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
 const read = name => fs.readFileSync(path.join(__dirname, '../src/auto_eval/web/static', name), 'utf8');
-const strip = code => code.replace(/^import[^\n]*\n/gm, '').replace(/^export /gm, '');
+const strip = code => code.replace(/^import[^\n]*\n/gm, '')
+  .replace(/^export\s*\{[^\n]*\};?\s*$/gm, '').replace(/^export /gm, '');
 const response = (data, ok = true) => ({ok, json: async () => data});
 const deferred = () => {let resolve; const promise = new Promise(done => {resolve = done;}); return {promise, resolve};};
 async function tick() {for (let i = 0; i < 12; i++) await Promise.resolve();}
@@ -135,8 +136,7 @@ async function main() {
 
   // Download anchors use a task-scoped route and the saved name, without fetching blobs or switching history.
   const sandbox = {computed: fn => ({get value() {return fn();}}), CompareCaseList: {}};
-  vm.runInNewContext(strip(read('compare-data.js')).replace(/^\{ref, computed, onMounted, onUnmounted, nextTick\};/m, '')
-    .replace(/^\{selectEvidenceMode, productContextValue, missingProductContexts\};/m, '') + '\nthis.Downloads=SourceFileDownloads;this.Panel=CompareDatasetPanel;', sandbox);
+  vm.runInNewContext(strip(read('compare-data.js')) + '\nthis.Downloads=SourceFileDownloads;this.Panel=CompareDatasetPanel;', sandbox);
   const props = {taskId: 'task /中文', files: [{id: 'file /1', filename: '原始.jsonl'}, {id: 'two', filename: 'second.csv'}]};
   const downloads = sandbox.Downloads.setup(props).downloads;
   assert.equal(downloads.value[0].url, '/api/history/task%20%2F%E4%B8%AD%E6%96%87/source-files/file%20%2F1');

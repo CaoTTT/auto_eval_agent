@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import hashlib
 from copy import deepcopy
+from pathlib import Path
 
 from ..conversation import ConversationIndex, VERSION, digest
 from ..image_limits import effective_profile, inspect_asset
 from ..long_screenshot import prepare_long_screenshot
 from ..paths import RUNS_DIR, resolve_project_path
 from ..query_images import QueryImageError, authorized_path, prepare_query_images, _snapshot_bytes
+from ..remote_media import download_remote_image, is_remote_url
 from .video_prepare import operation_video_roots, _cache_lock
 
 
@@ -81,34 +83,70 @@ class ConversationPreparation:
         identity = {"session_id": turn["session_id"], "source_turn": turn["turn_index"]}
         active_identity = identity
         number = turn["turn_index"]
+        query_downloads: dict[int, Path] = {}
         try:
             # Inspect every original before preparation; retain findings even on failure.
             for n, raw in enumerate(turn.get("query_images") or [], 1):
                 active_identity = {**identity, "asset_id": f"T{number:02d}-QI{n:02d}", "image_role": "query_image", "product_no": None}
-                path = authorized_path(raw, effective.query_images)
+                remote = is_remote_url(raw)
+                if remote:
+                    downloaded = download_remote_image(
+                        raw, RUNS_DIR / "downloads" / "conversations" / digest(self.session_name)[:24]
+                    ).resolve()
+                    query_downloads[n - 1] = downloaded
+                    path = downloaded
+                else:
+                    path = authorized_path(raw, effective.query_images)
                 asset, issues = inspect_asset(path, {**identity, "asset_id": f"T{number:02d}-QI{n:02d}",
                     "image_role": "query_image", "product_no": None}, self.limits)
+                if remote:
+                    asset["source_url"] = raw
                 assets.append(asset)
                 findings.extend(issues)
             count = turn.get("product_count", 2)
             for n in range(1, count + 1):
                 active_identity = {**identity, "asset_id": f"P{n}-T{number:02d}-A01", "image_role": "product_answer", "product_no": n}
-                path = resolve_project_path(turn[f"screenshot{n}"]).resolve()
-                if not any(path.is_relative_to(root) for root in operation_video_roots()):
-                    raise ValueError("截图路径不在允许目录中")
-                asset, issues = inspect_asset(path, {**identity, "asset_id": f"P{n}-T{number:02d}-A01",
-                    "image_role": "product_answer", "product_no": n}, self.limits)
-                prior = turn.get(f"screenshot_meta{n}") or {}
-                if prior.get("original_sha256") and prior["original_sha256"] != asset["original_sha256"]:
-                    raise ValueError("冻结回答截图哈希不一致")
-                for part in prior.get("slices", []):
-                    if hashlib.sha256(resolve_project_path(part["path"]).read_bytes()).hexdigest() != part["sha256"]:
-                        raise ValueError("冻结长截图切片已变化，不能静默重建")
-                assets.append(asset)
-                findings.extend(issues)
+                raw = turn[f"screenshot{n}"]
+                remote = is_remote_url(raw)
+                downloaded = None
+                try:
+                    if remote:
+                        downloaded = download_remote_image(
+                            raw, RUNS_DIR / "downloads" / "conversations" / digest(self.session_name)[:24]
+                        ).resolve()
+                        path = downloaded
+                    else:
+                        path = resolve_project_path(raw).resolve()
+                        if not any(path.is_relative_to(root) for root in operation_video_roots()):
+                            raise ValueError("截图路径不在允许目录中")
+                    asset, issues = inspect_asset(path, {**identity, "asset_id": f"P{n}-T{number:02d}-A01",
+                        "image_role": "product_answer", "product_no": n}, self.limits)
+                    prior = turn.get(f"screenshot_meta{n}") or {}
+                    if prior.get("original_sha256") and prior["original_sha256"] != asset["original_sha256"]:
+                        raise ValueError("冻结回答截图哈希不一致")
+                    for part in prior.get("slices", []):
+                        if hashlib.sha256(resolve_project_path(part["path"]).read_bytes()).hexdigest() != part["sha256"]:
+                            raise ValueError("冻结长截图切片已变化，不能静默重建")
+                    directory = self.root / asset["original_sha256"] / self.limits["limits_profile_sha256"][:16]
+                    directory.mkdir(parents=True, exist_ok=True)
+                    original = directory / ("original" + path.suffix.lower())
+                    _snapshot_bytes(original, path.read_bytes())
+                    asset["original_path"] = str(original)
+                    if remote:
+                        asset["source_url"] = raw
+                    assets.append(asset)
+                    findings.extend(issues)
+                finally:
+                    if downloaded is not None:
+                        downloaded.unlink(missing_ok=True)
             if any(f["image_role"] == "query_image" for f in findings):
                 raise QueryImageError("query_image_limit_exceeded", "题图超过限制，不允许缩放或自动切图")
-            prepared_query = prepare_query_images(turn, session_name=self.session_name, cfg=effective.query_images)
+            prepared_query = prepare_query_images(
+                turn,
+                session_name=self.session_name,
+                cfg=effective.query_images,
+                prefetched_paths=query_downloads,
+            )
             turn.update(prepared_query)
             for n, meta in enumerate(turn["query_image_meta"], 1):
                 meta.update(asset_id=f"T{number:02d}-QI{n:02d}", query_image_id=f"T{number:02d}-QI{n:02d}", **identity)
@@ -134,7 +172,9 @@ class ConversationPreparation:
                         raise QueryImageError("image_slice_limit_exceeded", "切片仍超限，无法无损准备完整证据")
                 asset.update(original_path=str(original), slices=meta["slices"], preprocess_version=meta["algorithm_version"])
                 meta.update(asset_id=asset["asset_id"], **identity)
-                turn[f"screenshot{n}"] = str(original)
+                if asset.get("source_url"):
+                    meta["source_url"] = asset["source_url"]
+                turn[f"screenshot{n}"] = asset.get("source_url") or str(original)
                 turn[f"screenshot_meta{n}"] = meta
                 turn[f"frames{n}"] = [p["path"] for p in meta["slices"]]
                 turn["media"].append(str(original))
@@ -150,4 +190,7 @@ class ConversationPreparation:
                 findings.append({**active_identity, "finding_id": digest([active_identity, str(exc), self.limits["limits_profile_sha256"]]),
                     "code": getattr(exc, "code", "conversation_evidence_missing"), "status": "blocked", "severity": "error",
                     "message": str(exc), "limit_kind": "input_integrity"})
+        finally:
+            for path in query_downloads.values():
+                path.unlink(missing_ok=True)
         return turn, assets, findings
