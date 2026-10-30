@@ -38,7 +38,7 @@ def payload(count=2):
 def test_selectable_label_has_seven_dimensions_and_preserves_old_protocols():
     protocol = server._compare_protocol_or_422(PROFILE, require_selectable=True)
     assert protocol.display == "闲聊七维·证据先行·1-5分（候选）"
-    assert protocol.bundle_revision == "1.1.0"
+    assert protocol.bundle_revision == "1.1.1"
     assert protocol.result_schema_version == "chitchat-flat-result-1"
     assert protocol.dimensions == protocol.score_dimensions == DIMS
     assert len([p for p in list_compare_protocols() if p.id == PROFILE]) == 1

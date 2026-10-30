@@ -397,7 +397,7 @@ _PROTOCOLS = {
         id=CHITCHAT_FLAT_COMPARE_PROTOCOL_ID,
         standard_id=CHITCHAT_FLAT_STANDARD_ID,
         standard_version="1.1",
-        bundle_revision="1.1.0",
+        bundle_revision="1.1.1",
         display="闲聊七维·证据先行·1-5分（候选）",
         status="experimental",
         system_template=CHITCHAT_FLAT_SYSTEM,
@@ -477,6 +477,15 @@ def resolve_compare_protocol(protocol_id: str | None, bundle_revision: str | Non
     try:
         protocol = _PROTOCOLS[selected]
         if bundle_revision and bundle_revision != protocol.bundle_revision:
+            if selected == CHITCHAT_FLAT_COMPARE_PROTOCOL_ID and bundle_revision == "1.1.0":
+                from .visual_compare_prompt_chitchat_flat_r110 import (
+                    VISUAL_COMPARE_SYSTEM as legacy_system,
+                    VISUAL_COMPARE_USER as legacy_user,
+                )
+                return replace(
+                    protocol, bundle_revision=bundle_revision,
+                    system_template=legacy_system, user_template=legacy_user,
+                )
             if selected == QA_CHAT_V2_CALIBRATED_COMPARE_PROTOCOL_ID and bundle_revision == "1.1.1":
                 # Existing calibrated tasks retain their original evidence rules.
                 from .visual_compare_prompt_qa_chat_v2_calibrated_r111 import (

@@ -18,6 +18,10 @@ from auto_eval.judges.visual_compare_prompt_chitchat_flat import (
     SYSTEM_TEMPLATE_SOURCE, USER_TEMPLATE_SOURCE,
     VISUAL_COMPARE_SYSTEM, VISUAL_COMPARE_USER, render_system_prompt,
 )
+from auto_eval.judges.visual_compare_prompt_chitchat_flat_r110 import (
+    SYSTEM_TEMPLATE_SOURCE as FROZEN_SYSTEM_TEMPLATE_SOURCE,
+    USER_TEMPLATE_SOURCE as FROZEN_USER_TEMPLATE_SOURCE,
+)
 from auto_eval.judges.visual_compare_prompt_qa_chat_v2 import VISUAL_COMPARE_USER as ORIGINAL_USER
 
 
@@ -193,7 +197,8 @@ def test_raw_parser_accepts_complete_output_without_rewriting_reasons():
 def test_approved_prompt_text_and_input_contract_are_preserved():
     # Freeze the approved text with LF newlines, independent of the author's
     # workspace and the CRLF packaging used for the original Windows files.
-    assert hashlib.sha256(SYSTEM_TEMPLATE_SOURCE.encode()).hexdigest() == "5f3779b43571439fa30d77514d0250d95740d88d0e138e6d74f60597f1b2b6c1"
+    assert hashlib.sha256(FROZEN_SYSTEM_TEMPLATE_SOURCE.encode()).hexdigest() == "5f3779b43571439fa30d77514d0250d95740d88d0e138e6d74f60597f1b2b6c1"
+    assert USER_TEMPLATE_SOURCE == FROZEN_USER_TEMPLATE_SOURCE
     assert hashlib.sha256(USER_TEMPLATE_SOURCE.encode()).hexdigest() == "f1c872491b6437fd69923d641588b6018074e5f14c65a82ab0f0a6706149042a"
     env = Environment()
     assert meta.find_undeclared_variables(env.parse(USER_TEMPLATE_SOURCE)) == {
