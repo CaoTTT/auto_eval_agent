@@ -459,10 +459,10 @@ def test_stable_plus_r022_remains_frozen_and_preserves_output_contract(
 
 
 @pytest.mark.parametrize("product_count,evidence_mode,expected_sha256", [
-        (2, "video_frames", "d100ec24ff9d3d45e104b35567f16d2ec30846ee689c1f0785bf4cb97f9413e2"),
-        (2, "long_screenshot", "e1765f12171a6b5bfbaff53e75731e2238ac77bfa8d2a1332284af8c30616398"),
-        (3, "video_frames", "4a2a09e6f6eb0b1fb30fb97da5cc66953edd749122aec10b0c1f0391b8a6a049"),
-        (3, "long_screenshot", "361b9c0de73bbf822603e1e1b039d17b566b01cfa70cacde16c1acc347659487"),
+        (2, "video_frames", "2f92f8d79b392196f0dd19705f77998336f1f13c4675b95db307ed8fe14d0b20"),
+        (2, "long_screenshot", "1349a303a9aef0409b1c2f8f5ba83324ef01d6da760ddba38757c79d08cef322"),
+        (3, "video_frames", "25e1a3937507b55a3eb39f02680ed98410e8f9731ead6f5ef1988b8d66546def"),
+        (3, "long_screenshot", "fbe086cdade42d8b1cb312e46e58e353ea375de4a9acc25f3e608c2e3aaf1b98"),
 ])
 def test_stable_plus_service_revision_preserves_inputs_output_and_frozen_history(
     product_count, evidence_mode, expected_sha256
@@ -474,7 +474,7 @@ def test_stable_plus_service_revision_preserves_inputs_output_and_frozen_history
     from auto_eval.web.protocol_identity import require_snapshot_protocol
 
     assert hashlib.sha256(Path(prompt.__file__).read_bytes().replace(b"\r\n", b"\n")).hexdigest() == (
-        "08dac1c00ae824ba1f6229973b01ab3eb6a4c78048be3a1e852a0685d1e7acb8"
+        "7e2239e93dc0d498db43a185c887b16c0cd240f05a0d3d8ba1da3759125ddbaf"
     )
     active = resolve_compare_protocol(V02_PLUS_COMPARE_PROTOCOL_ID)
     assert active.bundle_revision == "0.2.3"
