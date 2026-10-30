@@ -14,6 +14,7 @@ from auto_eval.config import AppConfig, JudgeConfig, VisualExtractionConfig, Vis
 from auto_eval.judges import visual_compare_prompt_qa_chat_v2 as original
 from auto_eval.judges import visual_compare_prompt_qa_chat_v2_calibrated as calibrated
 from auto_eval.judges import visual_compare_prompt_qa_chat_v2_calibrated_r111 as frozen_calibrated
+from auto_eval.judges import visual_compare_prompt_qa_chat_v2_calibrated_r112 as frozen_calibrated_r112
 from auto_eval.judges.compare_protocols import (
     DEFAULT_COMPARE_PROTOCOL_ID,
     QA_CHAT_DIMENSIONS,
@@ -65,7 +66,7 @@ def test_calibrated_protocol_is_separate_selectable_and_preserves_old_identity()
     assert protocol.id == "qa_chat_compare@1.1-demand-calibrated"
     assert protocol.standard_id == "qa_chat_compare"
     assert protocol.standard_version == "1.1-demand-calibrated"
-    assert protocol.bundle_revision == "1.1.2"
+    assert protocol.bundle_revision == "1.1.3"
     assert protocol.result_schema_version == "qa-chat-result-2"
     assert protocol.observation_model is old.observation_model is QAChatV2Observation
     assert protocol.score_dimensions == old.score_dimensions == QA_CHAT_DIMENSIONS
@@ -78,9 +79,9 @@ def test_calibrated_protocol_is_separate_selectable_and_preserves_old_identity()
     assert old.standard_version == "1.1" and old.bundle_revision == "1.1.0"
     assert old.system_template is original.VISUAL_COMPARE_SYSTEM
     assert resolve_compare_protocol(None).id == DEFAULT_COMPARE_PROTOCOL_ID
-    assert resolve_compare_standard("qa_chat_compare", "1.1-demand-calibrated", "1.1.2") is protocol
-    assert resolve_compare_standard(None, protocol.id, "1.1.2") is protocol
-    assert resolve_compare_standard(protocol.id, None, "1.1.2") is protocol
+    assert resolve_compare_standard("qa_chat_compare", "1.1-demand-calibrated", "1.1.3") is protocol
+    assert resolve_compare_standard(None, protocol.id, "1.1.3") is protocol
+    assert resolve_compare_standard(protocol.id, None, "1.1.3") is protocol
     for profile_id, wrong_revision in ((old.id, "1.1.1"), (protocol.id, "1.1.0")):
         with pytest.raises(ValueError, match="无法恢复"):
             resolve_compare_protocol(profile_id, wrong_revision)
@@ -88,7 +89,7 @@ def test_calibrated_protocol_is_separate_selectable_and_preserves_old_identity()
 
 @pytest.mark.parametrize("count", [2, 3])
 @pytest.mark.parametrize("mode", ["long_screenshot", "video_frames"])
-def test_additive_calibration_preserves_complete_old_text_inputs_and_exact_output(count, mode):
+def test_deduction_calibration_preserves_rubric_gates_evidence_inputs_and_exact_output(count, mode):
     # Freeze the original module as well as comparing both runtime contracts;
     # otherwise changing both modules together could hide an unintended rewrite.
     old_source = Path(original.__file__).read_bytes().replace(b"\r\n", b"\n")
@@ -98,8 +99,15 @@ def test_additive_calibration_preserves_complete_old_text_inputs_and_exact_outpu
     new_system = calibrated.render_system_prompt(product_count=count, evidence_mode=mode, persona="contract-test")
     assert calibrated.CALIBRATION_RULES.strip()
     assert new_system.count(calibrated.CALIBRATION_RULES) == 1
-    without_calibration = new_system.replace(calibrated.CALIBRATION_RULES, "", 1)
-    assert re.sub(r"\s+", "", without_calibration) == re.sub(r"\s+", "", old_system)
+    # The candidate owns only its execution policy: retain all source anchors,
+    # evidence, gate, state and wire rules while replacing the scoring section.
+    new_prefix, new_tail = new_system.split("【四、1—5分判定】", 1)
+    old_prefix, old_tail = old_system.split("【四、1—5分判定】", 1)
+    assert new_prefix == old_prefix
+    new_contract = new_tail.split("【五、只输出必要字段】", 1)[1]
+    old_contract = old_tail.split("【五、只输出必要字段】", 1)[1]
+    new_contract = new_contract.replace(calibrated.CALIBRATION_RULES, "", 1)
+    assert re.sub(r"\s+", "", new_contract) == re.sub(r"\s+", "", old_contract)
     assert new_system.count(original.SOURCE_ANCHORS) == 1
     assert calibrated.VISUAL_COMPARE_USER is original.VISUAL_COMPARE_USER
     values = dict(
@@ -121,18 +129,56 @@ def test_additive_calibration_preserves_complete_old_text_inputs_and_exact_outpu
 
 @pytest.mark.parametrize("count", [2, 3])
 @pytest.mark.parametrize("mode", ["long_screenshot", "video_frames"])
-def test_frozen_calibrated_revision_keeps_its_original_prompt_and_wire_contract(count, mode):
-    frozen_source = Path(frozen_calibrated.__file__).read_bytes().replace(b"\r\n", b"\n")
-    assert hashlib.sha256(frozen_source).hexdigest() == (
-        "e02179aa541bbfd50e0467c2396665e2612d51acd5e0e203500fb93e04e562d1")
-    protocol = resolve_compare_protocol(QA_CHAT_V2_CALIBRATED_COMPARE_PROTOCOL_ID, "1.1.1")
+def test_rendered_deduction_policy_has_one_baseline_and_keeps_null_and_defect_boundaries(count, mode):
+    # Inspect the message actually sent to the judge, so a local constant that
+    # is accidentally omitted or contradicted by inherited rules cannot pass.
+    system = calibrated.render_system_prompt(product_count=count, evidence_mode=mode)
+    execution = re.sub(r"\s+", "", system.split("【完整原表锚点与案例】", 1)[0])
+    assert execution.count("【四、1—5分判定】") == 1
+    for score, meaning in (
+        (1, "严重不达标，基本不可用"), (2, "部分满足，但存在明显问题"),
+        (3, "基本达标，能够使用"), (4, "表现良好，较完整地满足需求"),
+        (5, "体验优秀，达到标杆水平"),
+    ):
+        assert f"{score}分“{meaning}”" in execution
+    assert "对每个可评分维度从5分起评" in execution
+    assert "所有活动产品使用相同起点、相同缺陷认定条件和相同扣分尺度" in execution
+    assert "该维applicable=true、该产品未被Gate阻断，且证据足以可靠评分" in execution
+    assert "不能以缺少证据、没有看见问题为由直接给5分" in execution
+    assert "最终分数=5-本维综合扣分，最低1分" in execution
+    for deducted, final in ((0, 5), (1, 4), (2, 3), (3, 2), (4, 1)):
+        assert re.search(rf"扣{deducted}分，(?:保留|得到){final}分", execution)
+    assert "证据足够且没有剩余有效扣分项时保留5分" in execution
+    assert "可定位证据、当前需求或原标准依据、该维实际不足及影响" in execution
+    assert "同一缺陷在同一维度不重复扣；涉及多个维度时，分别证明各维独立影响" in execution
+    assert "不规定每个问题一律扣1分" in execution
+    assert "不作为亮点加分冲抵其他已成立缺陷" in execution
+    assert "无引导需求且未引导时按原规则不适用" in execution
+    assert "实际引入偏题或越界时，仍按原标准扣分" in execution
+    for old_policy in (
+        "不设置默认3分或默认5分", "未发现缺点也不自动等于满分",
+        "不得因未写出缺点自动给5分",
+    ):
+        assert old_policy not in execution
+
+
+@pytest.mark.parametrize("revision,module,source_hash", [
+    ("1.1.1", frozen_calibrated, "e02179aa541bbfd50e0467c2396665e2612d51acd5e0e203500fb93e04e562d1"),
+    ("1.1.2", frozen_calibrated_r112, "0f428cd5f4ff2f6a800b88d77328e45ad25ef2196528afc467d0be053b91d50e"),
+])
+@pytest.mark.parametrize("count", [2, 3])
+@pytest.mark.parametrize("mode", ["long_screenshot", "video_frames"])
+def test_frozen_calibrated_revision_keeps_its_original_prompt_and_wire_contract(count, mode, revision, module, source_hash):
+    frozen_source = Path(module.__file__).read_bytes().replace(b"\r\n", b"\n")
+    assert hashlib.sha256(frozen_source).hexdigest() == source_hash
+    protocol = resolve_compare_protocol(QA_CHAT_V2_CALIBRATED_COMPARE_PROTOCOL_ID, revision)
     system, user = protocol.prompt_templates(count)
     values = dict(product_count=count, evidence_mode=mode, persona="frozen-contract")
-    assert system.render(**values) == frozen_calibrated.render_system_prompt(**values)
+    assert system.render(**values) == module.render_system_prompt(**values)
     assert system.render(**values) != calibrated.render_system_prompt(**values)
     assert user is calibrated.VISUAL_COMPARE_USER is original.VISUAL_COMPARE_USER
-    assert frozen_calibrated.output_example(count) == calibrated.output_example(count)
-    assert protocol.bundle_revision == "1.1.1"
+    assert module.output_example(count) == calibrated.output_example(count)
+    assert protocol.bundle_revision == revision
     assert protocol.observation_model is QAChatV2Observation
 
 
@@ -140,6 +186,7 @@ def test_frozen_calibrated_revision_keeps_its_original_prompt_and_wire_contract(
     (QA_CHAT_V2_COMPARE_PROTOCOL_ID, "1.1.0"),
     (QA_CHAT_V2_CALIBRATED_COMPARE_PROTOCOL_ID, "1.1.1"),
     (QA_CHAT_V2_CALIBRATED_COMPARE_PROTOCOL_ID, "1.1.2"),
+    (QA_CHAT_V2_CALIBRATED_COMPARE_PROTOCOL_ID, "1.1.3"),
 ])
 def test_frozen_snapshot_roundtrip_never_upgrades_or_downgrades_chat(profile_id, revision):
     protocol = resolve_compare_protocol(profile_id, revision)
@@ -183,7 +230,7 @@ def test_config_api_exposes_calibrated_selection(monkeypatch):
     options = server.api_config()["evaluation_profiles"]
     selected = next(item for item in options if item["id"] == QA_CHAT_V2_CALIBRATED_COMPARE_PROTOCOL_ID)
     assert selected["selectable"] is True
-    assert selected["bundle_revision"] == "1.1.2"
+    assert selected["bundle_revision"] == "1.1.3"
     assert selected["result_schema_version"] == "qa-chat-result-2"
     assert selected["score_dimensions"] == list(QA_CHAT_DIMENSIONS)
     assert server._compare_protocol_or_422(selected["id"], require_selectable=True).id == selected["id"]
@@ -209,7 +256,7 @@ class _FakeClient:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("count", [2, 3])
 @pytest.mark.parametrize("mode", ["long_screenshot", "video_frames"])
-@pytest.mark.parametrize("revision", ["1.1.1", "1.1.2"])
+@pytest.mark.parametrize("revision", ["1.1.1", "1.1.2", "1.1.3"])
 async def test_runtime_calls_frozen_system_with_unchanged_media_and_v2_result(tmp_path, count, mode, revision):
     profile = VisualModeProfile(extraction=VisualExtractionConfig(algorithm_version="test"))
     client = _FakeClient(_payload(count))
@@ -236,7 +283,9 @@ async def test_runtime_calls_frozen_system_with_unchanged_media_and_v2_result(tm
     result = await VisualCompareJudge(client, profile, restored_protocol).evaluate(**arguments)
     assert len(client.calls) == 1
     system, user, options = client.calls[0]
-    template_module = frozen_calibrated if revision == "1.1.1" else calibrated
+    template_module = {
+        "1.1.1": frozen_calibrated, "1.1.2": frozen_calibrated_r112, "1.1.3": calibrated,
+    }[revision]
     assert system == template_module.render_system_prompt(product_count=count, evidence_mode=mode, persona=client.persona)
     assert system != original.render_system_prompt(product_count=count, evidence_mode=mode, persona=client.persona)
     assert len(options["user_image_refs"]) == count
