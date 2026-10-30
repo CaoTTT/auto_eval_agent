@@ -13,6 +13,7 @@ from pydantic import BaseModel, ValidationError
 
 from ..config import VisualModeProfile
 from ..compare_input import normalize_product_contexts
+from ..product_order import product_order_metadata
 from ..query_images import encode_query_image, check_request_budget, input_manifest
 from ..preparation import run_preparation, check_preparation
 from ..media import encode_frame
@@ -78,6 +79,7 @@ from .compare_protocols import (
     DIMENSIONS,
     resolve_compare_protocol,
 )
+from .product_order import remap_judge_result, swap_judge_inputs
 
 
 # 按当前实验约定：准确性保留模型结果，但暂不参与任何汇总或总排名。
@@ -383,6 +385,83 @@ class VisualCompareJudge:
         )
 
     async def evaluate(
+        self,
+        *,
+        question: str,
+        context: str = "",
+        context1: str | object = _CONTEXT_NOT_PROVIDED,
+        answer1: str = "",
+        frames1: list[str] | None = None,
+        context2: str = "",
+        answer2: str = "",
+        frames2: list[str] | None = None,
+        context3: str = "",
+        answer3: str = "",
+        frames3: list[str] | None = None,
+        product_count: Literal[2, 3] | None = None,
+        evidence_mode: str = "video_frames",
+        screenshot_metas: list[dict] | None = None,
+        query_image_meta: list[dict] | None = None,
+        conversation_input: dict | None = None,
+        evidence_callback=None,
+        evaluation_time: datetime | None = None,
+        stream_callback=None,
+        trusted_collection_metadata: dict | None = None,
+        reverse_product_order: bool = False,
+    ) -> dict[str, Any]:
+        """Present optional reversed slots and restore original product ownership."""
+        if type(reverse_product_order) is not bool:
+            raise ValueError("reverse_product_order 必须是布尔值 true 或 false")
+        count = product_count or (3 if (context3 or answer3 or frames3 is not None) else 2)
+        if reverse_product_order and (
+            count != 2 or context3 or answer3 or frames3 is not None
+            or (screenshot_metas is not None and len(screenshot_metas) != 2)
+            or any(turn.get("product_count", 2) != 2 for turn in (conversation_input or {}).get("turns", []))
+        ):
+            raise ValueError("三产品评估不支持产品位置互换")
+        arguments = dict(
+            question=question, context=context, context1=context1,
+            answer1=answer1, frames1=frames1, context2=context2,
+            answer2=answer2, frames2=frames2, context3=context3,
+            answer3=answer3, frames3=frames3, product_count=product_count,
+            evidence_mode=evidence_mode, screenshot_metas=screenshot_metas,
+            query_image_meta=query_image_meta, conversation_input=conversation_input,
+            evidence_callback=evidence_callback, evaluation_time=evaluation_time,
+            stream_callback=stream_callback, trusted_collection_metadata=trusted_collection_metadata,
+        )
+        metadata = product_order_metadata(reverse_product_order, count)
+        if reverse_product_order:
+            # Resolve the legacy product-1 alias before it changes judge slot.
+            product_contexts_only = (
+                self.protocol.output_contract == OUTPUT_CONTRACT_1022
+                and self.protocol.bundle_revision in {"0.2.4", "0.2.5", "0.2.6"}
+            )
+            if product_contexts_only:
+                contexts = {"context": context, "context2": context2}
+                if context1 is not _CONTEXT_NOT_PROVIDED:
+                    contexts["context1"] = context1
+                arguments.update(normalize_product_contexts(contexts, 2))
+            elif context1 is _CONTEXT_NOT_PROVIDED:
+                arguments["context1"] = ""
+            arguments["context"] = ""
+            arguments = swap_judge_inputs(arguments, normalize_legacy_context=product_contexts_only)
+            if evidence_callback:
+                def ordered_evidence_callback(audit):
+                    annotated = {**audit, **metadata}
+                    for key in ("images", "preprocessing"):
+                        annotated[key] = [
+                            {**record, **({"original_product_no": 3 - record["product_no"]}
+                                          if record.get("product_no") in (1, 2) else {})}
+                            for record in audit.get(key, [])
+                        ]
+                    evidence_callback(annotated)
+                arguments["evidence_callback"] = ordered_evidence_callback
+        result = await self._evaluate_in_order(**arguments)
+        if reverse_product_order:
+            result = remap_judge_result(result)
+        return {**result, **metadata}
+
+    async def _evaluate_in_order(
         self,
         *,
         question: str,

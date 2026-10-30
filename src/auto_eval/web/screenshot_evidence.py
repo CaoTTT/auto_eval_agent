@@ -11,6 +11,7 @@ import zipfile
 from PIL import Image
 
 from ..paths import PROJECT_ROOT, RUNS_DIR
+from ..product_order import product_order_metadata
 from .video_prepare import operation_video_roots
 
 
@@ -24,6 +25,7 @@ def evidence_records(snapshot: dict, item_indexes: set[int] | None = None) -> li
         if not (item.get("screenshot_evidence") or item.get("screenshot1") or item.get("screenshot_meta1")):
             continue
         record = deepcopy(item.get("screenshot_evidence") or {})
+        has_request_record = bool(record) and record.get("record_status") != "request_not_recorded"
         if not record:
             record = {"version": "legacy", "record_status": "request_not_recorded",
                       "system_prompt": "", "content_sequence": [], "images": [], "preprocessing": [],
@@ -37,6 +39,17 @@ def evidence_records(snapshot: dict, item_indexes: set[int] | None = None) -> li
                         "image_no": len(record["images"]) + 1, "image_role": "product_answer",
                         "product_no": n, "part_no": i, "part_count": len(meta["slices"]),
                         "source_turn": item.get("turn_index"), "split_status": meta.get("split_status")})
+        count = item.get("product_count") or (3 if item.get("screenshot3") or item.get("screenshot_meta3") else 2)
+        reverse = record.get("reverse_product_order", (snapshot.get("options") or {}).get("reverse_product_order", False)) is True
+        for key, value in product_order_metadata(reverse, count).items():
+            record.setdefault(key, value)
+        # product_no in a recorded request is the prompt slot. Keep that raw
+        # value and expose source identity separately for exports and replay.
+        for entry in [*record["preprocessing"], *record["images"]]:
+            number = entry.get("product_no")
+            if number in (1, 2, 3):
+                original = 3 - number if reverse and has_request_record and number in (1, 2) else number
+                entry.setdefault("original_product_no", original)
         record.update(item_index=index, item_id=item.get("id", str(index + 1)),
                       session_id=item.get("session_id"), target_turn=item.get("turn_index"),
                       request_budget_report=item.get("request_budget_report"),
@@ -88,6 +101,7 @@ def write_evidence_zip(snapshot: dict, destination: Path, item_indexes: set[int]
                     image.update(archive_status="ok", archive_path=name)
             archive.writestr("manifest.json", json.dumps({"version": "screenshot-evidence-1", "records": records}, ensure_ascii=False, indent=2))
             archive.writestr("README.txt", "图片按 case/image 编号对应 manifest.json 中的请求顺序。无像素拼接。\n"
+                "original_product_no 对应测试集原产品；已记录请求中的 product_no 对应裁判位置，互换信息见 judge_product_order_note。\n"
                 "未切分使用原图；切分使用切片；多轮请求包含历史证据及已记录题图。\n"
                 "缺失、变化或无法校验的图片不会混入证据包，详见 archive_status/archive_error。\n"
                 "旧任务 request_not_recorded 仅含已保存的预处理证据，不能视为完整请求回放。\n")
@@ -108,11 +122,16 @@ def evidence_sheets(snapshot: dict) -> dict[str, list[dict]]:
     for record in evidence_records(snapshot):
         base = {"数据集序号": record["item_index"] + 1, "id": record["item_id"],
                 "会话ID": record.get("session_id"), "目标轮次": record.get("target_turn"),
-                "记录状态": record["record_status"]}
+                "记录状态": record["record_status"],
+                "裁判产品位置互换": "是" if record["reverse_product_order"] else "否",
+                "裁判产品呈现顺序": " → ".join(f"原产品{n}" for n in record["judge_product_order"]),
+                "裁判产品位置说明": record["judge_product_order_note"]}
+        request_recorded = record["record_status"] != "request_not_recorded"
         for entry in record["preprocessing"]:
             meta = entry["metadata"]
             for chunk_no, chunk in enumerate(_chunks(meta), 1):
-                parameters.append({**base, "产品序号": entry["product_no"], "来源轮次": entry.get("source_turn"),
+                parameters.append({**base, "产品序号": entry.get("original_product_no", entry["product_no"]),
+                    "裁判位置": entry["product_no"] if request_recorded else None, "来源轮次": entry.get("source_turn"),
                     "是否切分": meta.get("was_split", meta.get("split_status") != "original" if meta else "未记录"),
                     "切分状态": meta.get("split_status", "未准备"), "分片数量": meta.get("split_count"),
                     "原图宽": meta.get("original_width"), "原图高": meta.get("original_height"),
@@ -121,7 +140,8 @@ def evidence_sheets(snapshot: dict) -> dict[str, list[dict]]:
         for image in record["images"]:
             for chunk_no, chunk in enumerate(_chunks(image), 1):
                 images.append({**base, "请求图片序号": image["image_no"], "图片角色": image.get("image_role", "product_answer"),
-                    "产品序号": image.get("product_no"), "来源轮次": image.get("source_turn"),
+                    "产品序号": image.get("original_product_no", image.get("product_no")),
+                    "裁判位置": image.get("product_no") if request_recorded else None, "来源轮次": image.get("source_turn"),
                     "历史或当前": image.get("request_role"), "图片路径": image.get("ref_path"),
                     "SHA256": image.get("sha256"), "宽": image.get("width"), "高": image.get("height"),
                     "起始行": image.get("start_y"), "结束行": image.get("end_y"),

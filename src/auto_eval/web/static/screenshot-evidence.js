@@ -24,7 +24,8 @@ export const ScreenshotEvidence = {
     const pretty=value=>JSON.stringify(value,null,2);
     const state=value=>({assembled:'请求已组装',model_call_started:'已开始模型调用',
       model_response_received:'已收到模型响应',request_not_recorded:'历史任务：实际请求未记录'})[value] || value;
-    return {opened,loading,error,record,imageErrors,base,toggle,pretty,state};
+    const judgePosition=entry=>record.value?.record_status==='request_not_recorded' ? '未记录' : entry.product_no ?? '共享';
+    return {opened,loading,error,record,imageErrors,base,toggle,pretty,state,judgePosition};
   },
   template:`<section class="screenshot-audit">
     <div class="dataset-toolbar"><button @click="toggle" :aria-expanded="opened">{{opened?'收起':'查看'}}长截图预处理与输入序列</button>
@@ -33,18 +34,19 @@ export const ScreenshotEvidence = {
       <p v-if="loading">正在加载证据记录…</p><p v-if="error" class="err">{{error}}；可收起后重试。</p>
       <template v-if="record">
         <p><strong>{{state(record.record_status)}}</strong> · {{record.images.length}} 张已记录证据图片</p>
+        <p v-if="record.judge_product_order_note" class="hint">{{record.judge_product_order_note}}</p>
         <details><summary>请求版本、模型与预算</summary><pre class="case-text">{{pretty({version:record.version,judge_model:record.judge_model,protocol:record.protocol,request_sha256:record.request_sha256,composition:record.composition,request_budget_report:record.request_budget_report,image_findings:record.image_findings})}}</pre></details>
         <p v-if="record.notice" class="err">{{record.notice}}</p>
         <p class="hint">原图或切片按序输入，无像素拼接。图片顺序与下方 Prompt 中的图片编号对应；文件变化或缺失时不提供替代图片。</p>
         <details v-for="(entry,i) in record.preprocessing" :key="i" class="audit-parameters">
-          <summary>产品 {{entry.product_no}} <span v-if="entry.source_turn">· 来源第 {{entry.source_turn}} 轮</span> · {{entry.metadata.split_status==='original'?'未切分，原图输入':entry.metadata.split_count?'已切分':'未准备'}} · {{entry.metadata.split_count || 0}} 张</summary>
+          <summary>产品 {{entry.original_product_no ?? entry.product_no}} · 裁判位置 {{judgePosition(entry)}} <span v-if="entry.source_turn">· 来源第 {{entry.source_turn}} 轮</span> · {{entry.metadata.split_status==='original'?'未切分，原图输入':entry.metadata.split_count?'已切分':'未准备'}} · {{entry.metadata.split_count || 0}} 张</summary>
           <p>原图 {{entry.metadata.original_width}} × {{entry.metadata.original_height}} px · {{entry.metadata.original_file_bytes}} 字节 · 算法 {{entry.metadata.algorithm_version || '未记录'}}</p>
           <p>切分状态 {{entry.metadata.split_status || '未记录'}} · 重叠 {{entry.metadata.overlap_pixels ?? '未记录'}} px · 耗时 {{entry.metadata.prepare_latency_ms ?? '未记录'}} ms</p>
           <pre class="case-text">{{pretty(entry.metadata)}}</pre>
         </details>
         <div class="evidence-gallery">
           <figure v-for="picture in record.images" :key="picture.image_no" class="evidence-card">
-            <figcaption>图片 {{picture.image_no}} · {{picture.image_role==='query_image'?'共享题图':'产品 '+picture.product_no}} <span v-if="picture.source_turn">· 第 {{picture.source_turn}} 轮</span> · {{picture.request_role==='history'?'历史上下文':picture.request_role==='current'?'当前轮':''}} <span v-if="picture.part_no">· 第 {{picture.part_no}}/{{picture.part_count}} 块</span></figcaption>
+            <figcaption>图片 {{picture.image_no}} · {{picture.image_role==='query_image'?'共享题图':'产品 '+(picture.original_product_no ?? picture.product_no)}} <span v-if="picture.image_role!=='query_image'">· 裁判位置 {{judgePosition(picture)}}</span> <span v-if="picture.source_turn">· 第 {{picture.source_turn}} 轮</span> · {{picture.request_role==='history'?'历史上下文':picture.request_role==='current'?'当前轮':''}} <span v-if="picture.part_no">· 第 {{picture.part_no}}/{{picture.part_count}} 块</span></figcaption>
             <p v-if="imageErrors[picture.image_no]" class="err">图片缺失、已变化或无法校验，请查看 ZIP 清单。</p>
             <a v-else :href="base+'/screenshot-evidence/'+picture.image_no" target="_blank" rel="noopener" class="evidence-image-scroll is-long-screenshot"><img :src="base+'/screenshot-evidence/'+picture.image_no" :alt="'证据图片 '+picture.image_no" loading="lazy" @error="imageErrors[picture.image_no]=true"></a>
             <small>{{picture.width}} × {{picture.height}} px <span v-if="picture.start_y!=null">· 原图纵坐标 [{{picture.start_y}}, {{picture.end_y}})</span></small>

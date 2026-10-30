@@ -230,7 +230,7 @@
 
   <section>
     <h2>② 评估配置</h2>
-    <p class="hint">以下选项用于创建新任务。已创建任务的模型、思考设置与 API/端点固定；暂停恢复、失败补跑沿用原配置。</p>
+    <p class="hint">以下选项用于创建新任务。已创建任务的模型、思考设置、产品呈现顺序与 API/端点固定；暂停恢复、失败补跑沿用原配置。</p>
     <div class="row">
       <span class="lbl">裁判视角：</span>
       <span v-for="j in visibleJudges.filter(j => selectedJudges.includes(j.name))" :key="j.name" class="chip">{{ j.display || j.name }}</span>
@@ -258,6 +258,10 @@
         </option>
       </select>
       <span class="hint">任务创建后版本冻结；失败补跑沿用原版本。</span>
+    </div>
+    <div v-if="mode==='compare'" class="row product-order-control">
+      <label for="reverse-product-order"><input id="reverse-product-order" type="checkbox" v-model="reverseProductOrder" :disabled="submitting || !reverseOrderAvailable" aria-describedby="product-order-help"> 互换裁判看到的产品1、产品2位置</label>
+      <p id="product-order-help" class="hint">默认关闭。开启后，裁判位置1看到原产品2，位置2看到原产品1；输入数据、评分归属和导出中的产品身份保持一致。含三产品时不支持互换，开关自动关闭。</p>
     </div>
     <div class="row">
       <span class="lbl">单题超时：</span>
@@ -316,6 +320,7 @@
     <div v-if="taskId" class="task-control-panel" aria-label="任务暂停与恢复">
       <div class="task-control-heading"><strong>当前任务 · {{ taskId }}</strong><span>{{ isPausing ? '正在暂停' : taskStatusLabel(selectedTaskStatus) }}</span></div>
       <p class="task-judge-summary"><strong>本任务实际配置：</strong>{{ judgeRuntimeLabel(taskJudgeRuntime, taskJudgeSummary) }}</p>
+      <p v-if="taskProductOrderNote" class="hint"><strong>本任务裁判产品顺序：</strong>{{ taskProductOrderNote }}</p>
       <p class="hint">模型或思考设置如需变更，请使用上方配置创建新任务；原任务的恢复和补跑不会使用上方的新选择。</p>
       <template v-if="canPauseTask">
         <button @click="controlTask('pause')" :disabled="controlSubmitting || isPausing || !!loadingTaskId">{{ isPausing ? '等待已发送响应并保存…' : (executionControl.save_error ? '重试保存暂停记录' : '暂停任务') }}</button>
@@ -757,6 +762,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20261028_snapshot_product_contexts_20261030_chitchat_flat"></script>
+  <script type="module" src="/static/app.js?v=20261028_snapshot_product_contexts_20261030_chitchat_flat_product_order"></script>
 </body>
 </html>

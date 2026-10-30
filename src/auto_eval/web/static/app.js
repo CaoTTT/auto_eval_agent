@@ -1,6 +1,11 @@
-import { createApp, ref, computed, onMounted, onUnmounted, nextTick, selectEvidenceMode, isRemoteUrl, productContextValue, missingProductContexts } from "./compare-data.js?v=20261028_snapshot_product_contexts_20261030_chitchat_flat";
+import { createApp, ref, computed, onMounted, onUnmounted, nextTick, selectEvidenceMode, isRemoteUrl, productContextValue, missingProductContexts } from "./compare-data.js?v=20261028_snapshot_product_contexts_20261030_chitchat_flat_product_order";
 
 createApp({
+  watch: {
+    reverseOrderAvailable(available) {
+      if (!available) this.reverseProductOrder = false;
+    },
+  },
   setup() {
     const modes = [
       { key: "rich_content", label: "垂域视觉评测" },
@@ -35,6 +40,10 @@ createApp({
     const enableThinking = ref(false);
     const taskJudgeRuntime = ref(null);
     const taskJudgeSummary = ref({});
+    const reverseProductOrder = ref(false);
+    const reverseOrderAvailable = computed(() => mode.value === 'compare'
+      && opItems.value.length > 0 && opItems.value.every(item => Number(item.productCount) === 2));
+    const taskProductOrderNote = ref('');
     const selectedModelProfile = computed(() =>
       judgeModelProfiles.value.find(profile => profile.id === selectedJudgeModelProfile.value) || null
     );
@@ -250,6 +259,10 @@ createApp({
       taskEvaluationProfile.value = data.evaluation_profile || data.protocol_manifest?.id || (data.mode === 'compare' ? defaultEvaluationProfile() : '');
       taskProtocolManifest.value = data.protocol_manifest || {};
       taskProtocolDiagnostics.value = data.protocol_diagnostics || [];
+      taskProductOrderNote.value = data.mode === 'compare'
+        ? data.judge_product_order_note || (data.options?.reverse_product_order === true
+          ? '已互换：裁判位置1=原产品2，裁判位置2=原产品1；产品数据、评分和胜负均按原产品身份展示。'
+          : '未互换：裁判按原产品顺序评估。') : '';
       scoreRules.value = scoreRules.value.filter(rule => scoreDimensions.value.some(d => d.key === rule.dimension));
     }
     const scoreRules = ref([]), scoreRuleJoin = ref('all');
@@ -1190,6 +1203,7 @@ createApp({
     function detachResultView() {
       closeActiveStream();taskId.value='';results.value=[];summary.value=null;
       taskJudgeRuntime.value = null;taskJudgeSummary.value = {};
+      taskProductOrderNote.value = '';
       selectedTaskTiming.value = null;
       itemProgress.value={};progressEvents.value={};running.value=false;selectedTaskStatus.value='';
       repairStatus.value='idle';activeRetry.value=null;selectedRetryIndexes.value=[];
@@ -1198,6 +1212,7 @@ createApp({
     function useComparisonDataset(data) {
       if (mode.value !== 'compare' || !confirmDatasetReplacement()) return;
       cancelDatasetImport();cancelHistoryLoad();detachResultView();
+      reverseProductOrder.value = false;
       selectedEvaluationProfile.value = newTaskEvaluationProfile(selectedEvaluationProfile.value);
       items.value=JSON.parse(JSON.stringify(data.items));
       opItems.value=comparisonDraftRows(items.value);
@@ -1323,6 +1338,7 @@ createApp({
         }
         importReport.value = report;
         if (mode.value === 'compare') { cancelHistoryLoad();detachResultView(); }
+        reverseProductOrder.value = false;
         datasetName.value = file.name || '';
         datasetSourceFileId.value = sourceFile.id;
         datasetSourceTaskId.value = '';
@@ -1397,6 +1413,7 @@ createApp({
       cancelHistoryLoad();
       const submitViewVersion = historyLoadVersion;
       runError.value = "";
+      if (!reverseOrderAvailable.value) reverseProductOrder.value = false;
       if (mode.value === 'compare' && evaluationProfileDisabled(selectedEvaluationProfile.value)) {
         runError.value = '该评测标准暂不可选，请选择其他评测标准。';
         return;
@@ -1473,6 +1490,7 @@ createApp({
           : datasetSourceTaskId.value ? {source_task_id: datasetSourceTaskId.value} : {}),
         evaluation_profile: mode.value === "compare" ? selectedEvaluationProfile.value : null,
         options: {
+          ...(mode.value === 'compare' ? {reverse_product_order: reverseProductOrder.value} : {}),
           ...(mode.value === 'compare' && datasetSourceTaskId.value ? {dataset_source_task_id:datasetSourceTaskId.value} : {}),
           judges: selectedJudges.value,
           ...(selectedModelProfile.value ? {
@@ -1542,7 +1560,8 @@ createApp({
       );
       running.value = true;
       taskId.value = d.task_id;
-      setTaskProtocol({...d, mode:mode.value, evaluation_profile:d.evaluation_profile || body.evaluation_profile});
+      setTaskProtocol({...d, mode:mode.value, options:body.options,
+        evaluation_profile:d.evaluation_profile || body.evaluation_profile});
       taskJudgeRuntime.value = d.judge_runtime || null;
       taskJudgeSummary.value = {judge_model: d.judge_model, enable_thinking_label: d.enable_thinking_label};
       executionControl.value = {};
@@ -2497,6 +2516,7 @@ createApp({
         if (d.mode === "compare") {
           selectedEvaluationProfile.value = newTaskEvaluationProfile(d.evaluation_profile);
         }
+        reverseProductOrder.value = d.mode === 'compare' && d.options?.reverse_product_order === true;
         datasetName.value = d.dataset_name || "";
         datasetSourceFileId.value = "";
         datasetSourceTaskId.value = d.task_id || id;
@@ -2713,6 +2733,7 @@ createApp({
       timelinessHasConflict, timelinessConflictColumn, timelinessConflictSummary,
       judgeModelProfiles, selectedJudgeModelProfile, selectedModelProfile, enableThinking, changeJudgeModel,
       taskJudgeRuntime, taskJudgeSummary, thinkingLabel, judgeRuntimeLabel,
+      reverseProductOrder, reverseOrderAvailable, taskProductOrderNote,
       mediaConcurrency, requestPacing, evalTimeout, submitting, running, progress, total, results, summary, taskId, runError,
       pacingStatus, pacingError, pacingNumber,
       queueState, queueEntries, selectedTaskStatus, queueNotice, taskStatusLabel, queueKindLabel,

@@ -28,6 +28,7 @@ from ..judges.compare_protocols import (
     V03_COMPARE_PROTOCOL_ID,
 )
 from ..paths import PROJECT_ROOT, RUNS_DIR
+from ..product_order import product_order_metadata
 from .compare_statistics import SHEET_NAME as COMPARE_STATISTICS_SHEET, build_compare_statistics
 from .compare_statistics_xlsx import statistics_cell_styles, statistics_sheet_xml
 from .export_links import ExportLink, screenshot_links
@@ -403,6 +404,7 @@ def snapshot_payload(data: dict) -> dict:
         "mode": data.get("mode"),
         "items": data.get("items") or [],
         "options": data.get("options") or {},
+        **(_snapshot_product_order(data) if data.get("mode") == "compare" else {}),
         "evaluation_profile": _snapshot_evaluation_profile(data),
         "protocol_manifest": (recovered["manifest"] if recovered["is_chat"] or recovered["is_timeliness"] or (recovered.get("is_knowledge_qa") or recovered.get("is_flat_chat")) else data.get("protocol_manifest") or {}),
         "protocol_diagnostics": recovered["diagnostics"],
@@ -500,6 +502,25 @@ def _judge_export_fields(data: dict) -> dict:
     return {"裁判模型": summary["judge_model"], "思考模式": summary["enable_thinking_label"]}
 
 
+def _snapshot_product_order(snapshot: dict, item: dict | None = None, result: dict | None = None) -> dict:
+    """Describe presentation slots while keeping source product columns unchanged."""
+    result = result or {}
+    reverse = result.get("reverse_product_order", (snapshot.get("options") or {}).get("reverse_product_order", False)) is True
+    items = [item] if item is not None else snapshot.get("items") or []
+    product_count = 3 if any(
+        str(row.get("product_count")) == "3" or row.get("video3") or row.get("screenshot3")
+        for row in items
+    ) else 2
+    return product_order_metadata(reverse, product_count)
+
+
+def _product_order_export_fields(snapshot: dict, item: dict | None = None, result: dict | None = None) -> dict:
+    metadata = _snapshot_product_order(snapshot, item, result)
+    return {"裁判产品位置互换": "是" if metadata["reverse_product_order"] else "否",
+            "裁判产品呈现顺序": " → ".join(f"原产品{n}" for n in metadata["judge_product_order"]),
+            "裁判产品位置说明": metadata["judge_product_order_note"]}
+
+
 def export_rows(snapshot: dict) -> dict[str, list[dict]]:
     """把一次评测拆成多个 Sheet 的行数据。
 
@@ -549,6 +570,11 @@ def export_rows(snapshot: dict) -> dict[str, list[dict]]:
             result_rows = _visual_compare_export_rows(aligned_results, snapshot.get("protocol_manifest"))
     else:
         result_rows = _result_rows(aligned_results)
+    if mode == "compare":
+        source_items = snapshot.get("items") or []
+        for index, row in enumerate(result_rows):
+            item = source_items[index] if index < len(source_items) else aligned_results[index]
+            row.update(_product_order_export_fields(snapshot, item, aligned_results[index]))
     dataset_rows = _dataset_rows(snapshot, include_extra=False)
     rows: dict[str, list[dict]] = {
         "数据集明细": dataset_rows,
@@ -1136,6 +1162,7 @@ def _run_info(snapshot: dict) -> dict:
         "evaluation_profile": snapshot.get("evaluation_profile") or "",
         "protocol_manifest": snapshot.get("protocol_manifest") or {},
         **_judge_export_fields(snapshot),
+        **(_product_order_export_fields(snapshot) if snapshot.get("mode") == "compare" else {}),
         "error": snapshot.get("error") or "",
     }
 
@@ -1319,7 +1346,7 @@ def _visual_compare_export_rows(results: list[dict], protocol_manifest: dict | N
 def result_export_row(mode: str, result: dict, index: int, items: list[dict],
                       evaluation_profile: str | None = None,
                       protocol_manifest: dict | None = None,
-                      task_results: list[dict] | None = None) -> dict:
+                      task_results: list[dict] | None = None, *, options: dict | None = None) -> dict:
     """单条 result → 与 xlsx/CSV「逐题结果」同名列、同转换的行。
 
     供 GET /api/eval/item/result 使用：键名与导出列完全一致，
@@ -1334,7 +1361,8 @@ def result_export_row(mode: str, result: dict, index: int, items: list[dict],
     if not row.get("query"):
         row["query"] = item.get("query") or item.get("question") or ""
     snapshot = {"mode": mode, "items": items, "evaluation_profile": evaluation_profile,
-                "protocol_manifest": protocol_manifest or {}, "results": task_results if task_results is not None else [row]}
+                "protocol_manifest": protocol_manifest or {}, "options": options or {},
+                "results": task_results if task_results is not None else [row]}
     if mode == "compare" and recover_protocol_identity(snapshot).get("is_flat_chat"):
         from .chitchat_flat_export import chitchat_flat_export_rows
         export = chitchat_flat_export_rows(snapshot, [dict(row, index=index)])[0]
@@ -1355,6 +1383,8 @@ def result_export_row(mode: str, result: dict, index: int, items: list[dict],
         )[0]
     if result.get("error"):
         export["error"] = result["error"]
+    if mode == "compare":
+        export.update(_product_order_export_fields(snapshot, item, row))
     columns = _extra_input_columns({"mode": mode, "items": items})
     _append_extra_input_values([export], [item], columns)
     return export

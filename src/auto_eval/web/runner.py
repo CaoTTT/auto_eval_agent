@@ -21,6 +21,7 @@ from ..task_control import PauseRequested, bind_pause_check, check_pause, pause_
 from .scheduler import MAX_CONCURRENCY, MODEL_LIMITER, PIPELINE_LIMITER, PREP_LIMITER, get_settings
 from ..config import AppConfig, JudgeConfig, VisualModeProfile
 from ..compare_input import normalize_product_contexts
+from ..product_order import product_order_metadata, validate_product_order
 from ..query_images import prepare_query_images, QueryImageError, PREPARED_FIELDS
 from ..judges import (
     JudgeClient,
@@ -335,6 +336,11 @@ def _make_item_evaluator(
     内）被 await，负责 append/merge、完成日志、SSE、持久化；缺省为完整跑批的原有行为。
     """
     runtime_options = options if options is not None else task.options
+    reverse_product_order = validate_product_order(task.mode, task.items, task.options)
+    if "reverse_product_order" in runtime_options:
+        requested_order = validate_product_order(task.mode, task.items, runtime_options)
+        if requested_order != reverse_product_order:
+            raise ValueError("任务的产品位置顺序已冻结，请新建任务切换顺序")
     # Reuse the persisted task creation time across retries, resumes and updates.
     # An explicit business timezone keeps the prompt independent of the host.
     evaluation_time = (
@@ -475,6 +481,8 @@ def _make_item_evaluator(
         item_id = item_dict.get("id") or f"q{idx}"
 
         def collect_judge_trace(trace_path: str, record: dict) -> None:
+            if task.mode == "compare" and reverse_product_order:
+                record = {**record, **product_order_metadata(reverse_product_order, _compare_product_count(item_dict))}
             pending_judge_traces.append((trace_path, record))
 
         def publish_timings(snapshot: dict) -> None:
@@ -542,6 +550,8 @@ def _make_item_evaluator(
                 def save_evidence(record):
                     nonlocal request_evidence
                     request_evidence = copy.deepcopy(record)
+                    if task.mode == "compare":
+                        request_evidence.update(product_order_metadata(reverse_product_order, _compare_product_count(item_dict)))
                     request_evidence["request_id"] = request_id
                     if record.get("evidence_mode") == "long_screenshot":
                         item_dict["screenshot_evidence"] = request_evidence
@@ -681,6 +691,7 @@ def _make_item_evaluator(
                                     compare_judges=compare_judges,
                                     evidence_callback=save_evidence,
                                     category_display=category_display,
+                                    **({"reverse_product_order": True} if reverse_product_order else {}),
                                     **({"evaluation_time": evaluation_time} if evaluation_time is not None else {}),
                                     **({"conversation_input": conversation_input} if conversation_input else {}),
                                 ),
@@ -771,8 +782,11 @@ def _make_item_evaluator(
                     "request_id": request_id,
                     **{key: request_evidence.get(key) for key in
                        ("request_sha256", "judge_model", "evidence_mode", "images")},
+                    **(product_order_metadata(reverse_product_order, _compare_product_count(item_dict))
+                       if task.mode == "compare" else {}),
                 }
             if task.mode == "compare":
+                res.update(product_order_metadata(reverse_product_order, _compare_product_count(item_dict)))
                 if task.evaluation_profile in {"timeliness_compare@1.0", "knowledge_qa_compare@1.0"}:
                     # This is audit metadata, never the product's test date.
                     res.setdefault("evaluation_run_at", datetime.now().astimezone().isoformat(timespec="seconds"))
@@ -1454,8 +1468,10 @@ async def _eval_one(
     evidence_callback=None,
     trusted_collection_metadata=None,
     evaluation_time: datetime | None = None,
+    reverse_product_order: bool = False,
 ) -> dict:
     t0 = time.perf_counter()
+    validate_product_order(mode, [item_dict], {"reverse_product_order": reverse_product_order})
     if mode == "compare" and compare_judges:
         protocol = getattr(compare_judges[0], "protocol", None)
         if (getattr(protocol, "output_contract", None) == "compare_1022_v2"
@@ -1530,6 +1546,7 @@ async def _eval_one(
             out[f"context{product_no}"] = contexts[product_no]
 
         compare_result = await compare_judges[0].evaluate(
+            **({"reverse_product_order": True} if reverse_product_order else {}),
             # Only a program caller may supply a collection conclusion. Imported
             # columns, copied answers, and successful decoding do not prove it.
             **({"trusted_collection_metadata": trusted_collection_metadata}
@@ -1560,6 +1577,7 @@ async def _eval_one(
             } if item_dict.get("evidence_mode") == "long_screenshot" else {}),
         )
         out.update(compare_result)
+        out.update(product_order_metadata(reverse_product_order, product_count))
         result_protocol = getattr(compare_judges[0], "protocol", None) or resolve_compare_protocol(compare_result.get("evaluation_profile"))
         log_event(
             "结果聚合",

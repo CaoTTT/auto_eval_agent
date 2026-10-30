@@ -25,6 +25,7 @@ from starlette.background import BackgroundTask
 
 from ..config import load_config
 from ..compare_input import CONTEXT_ERROR_CODE
+from ..product_order import product_order_metadata, validate_product_order
 from ..judge_profiles import (
     model_profiles, default_profile_id, configured_profile,
     resolve_new_runtime, restore_runtime, check_frozen_options, legacy_runtime,
@@ -241,6 +242,10 @@ def _new_judge_runtime(app_cfg, options):
 
 def _check_judge_options(task, options):
     try:
+        validate_product_order(task.mode, task.items, {**task.options, **options})
+        if ("reverse_product_order" in options
+                and options["reverse_product_order"] != task.options.get("reverse_product_order", False)):
+            raise ValueError("已有任务的裁判产品顺序不可变；请复用数据集创建新任务")
         if task.mode == "compare":
             from .protocol_identity import require_snapshot_protocol
             require_snapshot_protocol({"mode": task.mode, "evaluation_profile": task.evaluation_profile,
@@ -265,6 +270,10 @@ def _resolve_operation_video_path(raw_path: str) -> Path:
 
 def _validate_eval_request(req: EvalReq, app_cfg, *, previous_items=None) -> None:
     """提交前校验：compare 模式支持完整的2或3产品同类视觉证据。"""
+    try:
+        validate_product_order(req.mode, req.items, req.options)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     # Cleanup ownership is assigned by media preparation, never by a client.
     # Apply this before the mode-specific return: both modes share teardown.
     for item in req.items:
@@ -322,6 +331,11 @@ def _validate_eval_request(req: EvalReq, app_cfg, *, previous_items=None) -> Non
             422,
             f"垂域视觉对比输入不完整：{preview}{suffix}",
         )
+    try:
+        validate_product_order(req.mode, req.items, req.options)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    req.options.setdefault("reverse_product_order", False)
 
 
 def _sse(event: str, data) -> str:
@@ -585,6 +599,9 @@ async def api_eval(req: EvalReq):
         "evaluation_profile": task.evaluation_profile,
         "protocol_manifest": task.protocol_manifest,
         "judge_runtime": task.judge_runtime,
+        **(product_order_metadata(task.options.get("reverse_product_order", False),
+                                 max((item.get("product_count", 2) for item in task.items), default=2))
+           if task.mode == "compare" else {}),
     }
 
 
@@ -890,7 +907,7 @@ async def api_eval_items(req: EvalItemsReq):
     validated_request = EvalReq(
         mode=mode,
         items=req.items,
-        options=req.options,
+        options=dict(req.options) if created else {**task.options, **req.options},
         evaluation_profile=protocol.id if protocol else None,
     )
     previous_conversations = []
@@ -906,6 +923,7 @@ async def api_eval_items(req: EvalItemsReq):
     _validate_eval_request(validated_request, app_cfg, previous_items=previous_conversations)
     req.items = validated_request.items
     if created:
+        req.options = validated_request.options
         task = new_task(
             mode,
             [],
@@ -995,7 +1013,8 @@ async def api_item_result(task_id: str, item_id: str):
         "index": idx,
         "item": task.items[idx],
         "result": (
-            result_export_row(task.mode, raw, idx, task.items, task.evaluation_profile, task.protocol_manifest, task.results)
+            result_export_row(task.mode, raw, idx, task.items, task.evaluation_profile, task.protocol_manifest, task.results,
+                              options=task.options)
             if raw is not None
             else None
         ),
