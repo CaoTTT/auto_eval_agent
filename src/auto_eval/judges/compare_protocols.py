@@ -75,6 +75,15 @@ from .visual_compare_prompt_knowledge_qa import (
     VISUAL_COMPARE_SYSTEM as KNOWLEDGE_QA_SYSTEM,
     VISUAL_COMPARE_USER as KNOWLEDGE_QA_USER,
 )
+from .chitchat_flat_schema import (
+    CHITCHAT_FLAT_STANDARD_ID, CHITCHAT_FLAT_COMPARE_PROTOCOL_ID,
+    CHITCHAT_FLAT_RESULT_SCHEMA_VERSION, CHITCHAT_FLAT_DIMENSIONS,
+    CHITCHAT_FLAT_DIMENSION_NAMES, ChitchatFlatObservation,
+)
+from .visual_compare_prompt_chitchat_flat import (
+    VISUAL_COMPARE_SYSTEM as CHITCHAT_FLAT_SYSTEM,
+    VISUAL_COMPARE_USER as CHITCHAT_FLAT_USER,
+)
 
 
 STANDARD_ID = "qa_competitor_compare"
@@ -97,9 +106,10 @@ DIMENSIONS = (
 DIMENSION_NAMES = dict(zip(DIMENSIONS, (
     "理解需求", "内容准确性", "服务闭环", "场景化满足", "直观高效", "有理有据", "引导推荐",
 )))
-ALL_DIMENSIONS = tuple(dict.fromkeys((*DIMENSIONS, *QA_CHAT_DIMENSIONS, *TIMELINESS_DIMENSIONS, *KNOWLEDGE_QA_DIMENSIONS)))
+ALL_DIMENSIONS = tuple(dict.fromkeys((*DIMENSIONS, *QA_CHAT_DIMENSIONS, *TIMELINESS_DIMENSIONS, *KNOWLEDGE_QA_DIMENSIONS, *CHITCHAT_FLAT_DIMENSIONS)))
 DIMENSION_LABELS = {**KNOWLEDGE_QA_DIMENSION_NAMES, **DIMENSION_NAMES,
-                    **QA_CHAT_DIMENSION_NAMES, **TIMELINESS_DIMENSION_NAMES}
+                    **QA_CHAT_DIMENSION_NAMES, **TIMELINESS_DIMENSION_NAMES,
+                    **CHITCHAT_FLAT_DIMENSION_NAMES}
 
 V02QualityScore: TypeAlias = Literal[1, 2, 3, 4, 5]
 
@@ -227,6 +237,12 @@ class CompareProtocol:
         if self.standard_id == KNOWLEDGE_QA_STANDARD_ID:
             metadata["allowed_scores_by_dimension"] = {
                 key: list(KNOWLEDGE_QA_ALLOWED_SCORES[key]) for key in self.score_dimensions
+            }
+            metadata["has_gates"] = False
+        if self.standard_id == CHITCHAT_FLAT_STANDARD_ID:
+            metadata["allowed_scores_by_dimension"] = {
+                key: [1, 5] if key in CHITCHAT_FLAT_DIMENSIONS[:2] else [1, 2, 3, 4, 5]
+                for key in self.score_dimensions
             }
             metadata["has_gates"] = False
         return metadata
@@ -376,6 +392,24 @@ _PROTOCOLS = {
         dimension_names=dict(QA_CHAT_DIMENSION_NAMES),
         score_dimensions=QA_CHAT_DIMENSIONS,
         result_schema_version=QA_CHAT_V2_RESULT_SCHEMA_VERSION,
+    ),
+    CHITCHAT_FLAT_COMPARE_PROTOCOL_ID: CompareProtocol(
+        id=CHITCHAT_FLAT_COMPARE_PROTOCOL_ID,
+        standard_id=CHITCHAT_FLAT_STANDARD_ID,
+        standard_version="1.1",
+        bundle_revision="1.1.0",
+        display="闲聊七维·证据先行·1-5分（候选）",
+        status="experimental",
+        system_template=CHITCHAT_FLAT_SYSTEM,
+        user_template=CHITCHAT_FLAT_USER,
+        observation_model=ChitchatFlatObservation,
+        require_response_pass=False,
+        score_min=1,
+        score_max=5,
+        dimensions=CHITCHAT_FLAT_DIMENSIONS,
+        dimension_names=dict(CHITCHAT_FLAT_DIMENSION_NAMES),
+        score_dimensions=CHITCHAT_FLAT_DIMENSIONS,
+        result_schema_version=CHITCHAT_FLAT_RESULT_SCHEMA_VERSION,
     ),
     TIMELINESS_COMPARE_PROTOCOL_ID: CompareProtocol(
         id=TIMELINESS_COMPARE_PROTOCOL_ID,

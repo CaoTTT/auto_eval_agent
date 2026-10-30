@@ -30,9 +30,9 @@ def human_protocol(version: str, standard_id: str = "", revision: str | None = N
 def baseline_protocol(baseline: dict):
     protocol = human_protocol(baseline["human_standard_version"], baseline.get("human_standard_id", ""),
                               baseline.get("human_bundle_revision"))
-    if protocol.standard_id in ("qa_chat_compare", "timeliness_compare", "knowledge_qa_compare") and not baseline.get("human_bundle_revision"):
+    if protocol.standard_id in ("qa_chat_compare", "timeliness_compare", "knowledge_qa_compare", "chitchat_evidence_first_flat") and not baseline.get("human_bundle_revision"):
         raise HumanError("人工基准缺少冻结修订号，不能用当前标准补写历史")
-    if protocol.standard_id in ("timeliness_compare", "knowledge_qa_compare") and not baseline.get("human_result_schema_version"):
+    if protocol.standard_id in ("timeliness_compare", "knowledge_qa_compare", "chitchat_evidence_first_flat") and not baseline.get("human_result_schema_version"):
         raise HumanError("人工基准缺少冻结结果Schema")
     if baseline.get("human_result_schema_version") and baseline["human_result_schema_version"] != protocol.result_schema_version:
         raise HumanError("人工基准结果Schema与冻结标准冲突")
@@ -148,6 +148,11 @@ class ImportMapping(StrictModel):
         if protocol.standard_id == "timeliness_compare":
             if self.na_status in ("unverifiable", "gate_blocked"):
                 raise ValueError("时效性请使用 insufficient_evidence / blocked_gate / blocked_understanding 状态")
+        elif protocol.standard_id == "chitchat_evidence_first_flat":
+            if self.na_status not in ("na_unspecified", "unverifiable"):
+                raise ValueError("闲聊七维缺证使用unverifiable，不使用不适用或Gate/理解阻断状态")
+            if any(self.gates.values()):
+                raise ValueError("闲聊七维没有额外Gate，不能映射Gate列")
         elif protocol.standard_id == "knowledge_qa_compare":
             if self.na_status not in ("na_unspecified", "not_applicable", "insufficient_evidence", "unverifiable"):
                 raise ValueError("知识问答不使用Gate或理解阻断状态")
@@ -193,6 +198,14 @@ class HumanScoreLabel(StrictModel):
     def validate_score(self, info: ValidationInfo):
         if (self.score_status == "scored") != (self.score is not None):
             raise ValueError("仅 scored 标签可包含数字分")
+        if (info.context or {}).get("standard_id") == "chitchat_evidence_first_flat":
+            from .chitchat_flat_statistics import ALLOWED_SCORES
+            if self.score_status not in ("scored", "unverifiable", "input_failed", "unlabeled", "na_unspecified"):
+                raise ValueError("闲聊七维人工评分状态无效")
+            if self.score is not None and (type(self.score) is not int or self.score not in ALLOWED_SCORES.get(self.dimension_id, ())):
+                raise ValueError("响应体验/安全稳定仅1、5，其余五维仅1—5严格整数")
+            if self.applicable is False:
+                raise ValueError("闲聊七维缺证不能标为不适用")
         if type(self.score) is float and not (
             (info.context or {}).get("standard_id") == "knowledge_qa_compare"
             and self.dimension_id == "accuracy" and self.score == 1.5
@@ -269,6 +282,9 @@ class HumanStore:
                 from ..judges.knowledge_qa_schema import KNOWLEDGE_QA_ALLOWED_SCORES
                 manifest["allowed_scores_by_dimension"] = {
                     key: list(values) for key, values in KNOWLEDGE_QA_ALLOWED_SCORES.items()}
+            if protocol.standard_id == "chitchat_evidence_first_flat":
+                from .chitchat_flat_statistics import ALLOWED_SCORES
+                manifest["allowed_scores_by_dimension"] = {key: list(values) for key, values in ALLOWED_SCORES.items()}
             for key, value in (("cases", cases), ("labels", labels), ("states", preview["states"])):
                 atomic_json(folder / f"{key}.json", value)
             folder.mkdir(parents=True, exist_ok=True)

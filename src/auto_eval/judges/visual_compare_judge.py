@@ -25,6 +25,12 @@ from .base import JudgeClient, JudgeOutputEmptyError, JudgeOutputParseError
 from .prompts import parse_json_loose, parse_json_preserving_pairs, scan_recoverable_json_object
 from .query_image_prompt import QUERY_IMAGE_INSTRUCTIONS
 from .qa_chat_schema import QA_CHAT_STANDARD_ID, QAChatObservation, finalize_qa_chat_observation
+from .chitchat_flat_schema import (
+    CHITCHAT_FLAT_RESULT_SCHEMA_VERSION, ChitchatFlatObservation,
+    expected_output_keys as chitchat_flat_output_keys,
+    parse_output as parse_chitchat_flat_output,
+    finalize_chitchat_flat_observation,
+)
 from .qa_chat_v2_schema import (
     QA_CHAT_V2_RESULT_SCHEMA_VERSION, QAChatV2Observation,
     collection_metadata, expected_output_keys, finalize_qa_chat_v2_observation,
@@ -314,6 +320,11 @@ def visual_compare_result_fields(
     )
     if selected_protocol.output_contract == OUTPUT_CONTRACT_1022:
         return _compact_1022_result(observation, selected_protocol)
+    if selected_protocol.result_schema_version == CHITCHAT_FLAT_RESULT_SCHEMA_VERSION:
+        if not isinstance(observation, ChitchatFlatObservation):
+            raise ValueError("闲聊七维协议需要独立ChitchatFlatObservation结果模型")
+        return finalize_chitchat_flat_observation(
+            observation, selected_protocol, trusted_collection_metadata=trusted_collection_metadata)
     if selected_protocol.result_schema_version == KNOWLEDGE_QA_RESULT_SCHEMA_VERSION:
         if not isinstance(observation, KnowledgeQAObservation):
             raise ValueError("知识问答协议需要独立KnowledgeQAObservation结果模型")
@@ -406,16 +417,18 @@ class VisualCompareJudge:
         is_chat_v2 = self.protocol.result_schema_version == QA_CHAT_V2_RESULT_SCHEMA_VERSION
         is_timeliness = self.protocol.standard_id == "timeliness_compare"
         is_knowledge_qa = self.protocol.result_schema_version == KNOWLEDGE_QA_RESULT_SCHEMA_VERSION
-        is_strict_output = is_chat_v2 or is_timeliness or is_knowledge_qa
+        is_flat_chat = self.protocol.result_schema_version == CHITCHAT_FLAT_RESULT_SCHEMA_VERSION
+        is_strict_output = is_chat_v2 or is_timeliness or is_knowledge_qa or is_flat_chat
         timeliness_contracts = {
             TIMELINESS_RESULT_SCHEMA_VERSION: (timeliness_output_keys, timeliness_allowed_keys),
             TIMELINESS_V2_RESULT_SCHEMA_VERSION: (timeliness_v2_output_keys, timeliness_v2_allowed_keys),
             TIMELINESS_V1_RESULT_SCHEMA_VERSION: (timeliness_v1_output_keys, timeliness_v1_output_keys),
             KNOWLEDGE_QA_RESULT_SCHEMA_VERSION: (knowledge_qa_output_keys, knowledge_qa_output_keys),
+            CHITCHAT_FLAT_RESULT_SCHEMA_VERSION: (chitchat_flat_output_keys, chitchat_flat_output_keys),
         }
         strict_output_keys, allowed_output_keys = timeliness_contracts.get(
             self.protocol.result_schema_version, (expected_output_keys, expected_output_keys))
-        output_label = "知识问答V1" if is_knowledge_qa else "时效性评估V1" if is_timeliness else "问答闲聊V2"
+        output_label = "闲聊七维" if is_flat_chat else "知识问答V1" if is_knowledge_qa else "时效性评估V1" if is_timeliness else "问答闲聊V2"
         trusted_collection = collection_metadata(trusted_collection_metadata, actual_product_count) if is_strict_output else None
         compact_1022 = self.protocol.output_contract == OUTPUT_CONTRACT_1022
         product_contexts_only = compact_1022 and self.protocol.bundle_revision in {"0.2.4", "0.2.5", "0.2.6"}
@@ -441,7 +454,7 @@ class VisualCompareJudge:
                     actual_product_count,
                 ),
             }
-        elif is_knowledge_qa:
+        elif is_knowledge_qa or is_flat_chat:
             output_options = {"require_complete": True}
         if evidence_mode not in ("video_frames", "long_screenshot"):
             raise ValueError("未知视觉证据模式")
@@ -641,15 +654,18 @@ class VisualCompareJudge:
                 evidence_callback(audit)
         repaired = ""
         local_format_recovery_steps: list[str] = []
-        if is_knowledge_qa:
-            # The knowledge rubric has exactly one semantic response. Its
+        if is_knowledge_qa or is_flat_chat:
+            # These rubrics have exactly one semantic response. Their
             # independent parser rejects duplicate keys and invalid numbers;
             # no repair request can invent a missing reason, status or score.
-            parsed_pairs = parse_json_preserving_pairs(raw_output) if isinstance(raw_output, str) else None
-            original_parsed_pairs = parsed_pairs
+            parsed_pairs = None
+            original_parsed_pairs = None
             repair_parsed_pairs = None
             try:
-                data = parse_knowledge_qa_output(raw_output, actual_product_count).model_dump()
+                parsed_pairs = parse_json_preserving_pairs(raw_output) if isinstance(raw_output, str) else None
+                original_parsed_pairs = parsed_pairs
+                parse_independent = parse_chitchat_flat_output if is_flat_chat else parse_knowledge_qa_output
+                data = parse_independent(raw_output, actual_product_count).model_dump()
             except (ValueError, ValidationError) as exc:
                 category = "empty_response" if not isinstance(raw_output, str) or not raw_output.strip() else "schema"
                 error_cls = JudgeOutputEmptyError if category == "empty_response" else JudgeOutputParseError

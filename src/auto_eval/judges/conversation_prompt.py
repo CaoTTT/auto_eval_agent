@@ -32,6 +32,7 @@ def assemble_conversation(system: str, bundle: dict, protocol, evaluation_dateti
     profile, limits = bundle["profile"], bundle["limits"]
     is_timeliness = protocol.standard_id == "timeliness_compare"
     is_knowledge_qa = protocol.standard_id == "knowledge_qa_compare"
+    is_flat_chat = protocol.standard_id == "chitchat_evidence_first_flat"
     product_contexts_only = (
         protocol.output_contract == OUTPUT_CONTRACT_1022
         and protocol.bundle_revision in {"0.2.4", "0.2.5", "0.2.6"}
@@ -104,7 +105,9 @@ def assemble_conversation(system: str, bundle: dict, protocol, evaluation_dateti
                        "image_role": "product_answer", "request_role": role, "ref_path": part["path"]})
                 text(f"{asset_id} 结束")
         text(f"产品{n}轨迹结束")
-    if is_knowledge_qa:
+    if is_flat_chat:
+        text(f"只输出 target_turn={target} 的七维扁平JSON；每维先合并证据理由DIM_reason，再逐产品answerN_DIM_score；不输出个性化、总分或额外Gate字段。")
+    elif is_knowledge_qa:
         text(f"只输出 target_turn={target} 的四维评分；使用上述协议的合并理由、逐产品status/score及允许分值，不输出Gate。")
     else:
         text(f"只输出 target_turn={target} 的评分；使用上述协议的原有 Schema、适用性、Gate 与分数范围。")

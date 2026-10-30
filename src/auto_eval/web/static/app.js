@@ -1,4 +1,4 @@
-import { createApp, ref, computed, onMounted, onUnmounted, nextTick, selectEvidenceMode, isRemoteUrl, productContextValue, missingProductContexts } from "./compare-data.js?v=20261028_snapshot_product_contexts_20261029_knowledge_qa";
+import { createApp, ref, computed, onMounted, onUnmounted, nextTick, selectEvidenceMode, isRemoteUrl, productContextValue, missingProductContexts } from "./compare-data.js?v=20261028_snapshot_product_contexts_20261030_chitchat_flat";
 
 createApp({
   setup() {
@@ -65,6 +65,7 @@ createApp({
     const taskIsChat = computed(() => (taskEvaluationProfile.value || '').startsWith('qa_chat_compare@'));
     const taskIsTimeliness = computed(() => (taskEvaluationProfile.value || '').startsWith('timeliness_compare@'));
     const taskIsKnowledgeQA = computed(() => (taskEvaluationProfile.value || '').startsWith('knowledge_qa_compare@'));
+    const taskIsFlatChat = computed(() => (taskEvaluationProfile.value || '').startsWith('chitchat_evidence_first_flat@'));
     function compact1022(row = {}) {
       if (row.output_contract) return row.output_contract === 'compare_1022_v2';
       const profile = row.evaluation_profile || (row.standard_id && row.standard_version
@@ -86,7 +87,14 @@ createApp({
       if (row.result_schema_version) return row.result_schema_version === 'knowledge-qa-result-2';
       return taskIsKnowledgeQA.value;
     }
+    function isFlatChatRow(row = {}) {
+      if (row.standard_id) return row.standard_id === 'chitchat_evidence_first_flat';
+      if (row.evaluation_profile) return row.evaluation_profile.startsWith('chitchat_evidence_first_flat@');
+      if (row.result_schema_version) return row.result_schema_version === 'chitchat-flat-result-1';
+      return taskIsFlatChat.value;
+    }
     function chatUsesSharedReasons(row = {}) {
+      if (isFlatChatRow(row)) return true;
       if (isKnowledgeQARow(row)) return true;
       if (isTimelinessRow(row)) return true;
       if (row.result_schema_version) return row.result_schema_version === 'qa-chat-result-2';
@@ -224,15 +232,19 @@ createApp({
       {key:'accuracy',label:'准确性'}, {key:'clarity_and_structure',label:'清晰易懂与结构化'},
       {key:'content_quality',label:'丰富、简洁与专业性'}, {key:'multimedia_value',label:'富媒体增益'},
     ];
+    const flatChatDimensions = [
+      {key:'response_experience',label:'响应体验'}, {key:'safety_stability',label:'安全稳定'},
+      ...chatDimensions.filter(d => d.key !== 'personalization'),
+    ];
     const taskDimensions = computed(() => {
       const frozen = taskProtocolManifest.value.dimensions;
       const registered = evaluationProfiles.value.find(p => p.id === taskEvaluationProfile.value)?.dimensions;
       if (compact1022()) return (frozen?.length ? frozen : legacyScoreDimensions.filter(d => !d.gate)).filter(d => d.key !== 'accuracy');
       if (taskEvaluationProfile.value === 'qa_competitor_compare@0.2-simplified-1022'
           && taskProtocolManifest.value.bundle_revision === '0.2.1') return frozen?.length ? frozen : legacyScoreDimensions.filter(d => !d.gate);
-      return frozen?.length ? frozen : registered?.length ? registered : taskIsKnowledgeQA.value ? knowledgeQADimensions : taskIsTimeliness.value ? timelinessDimensions : taskIsChat.value ? chatDimensions : legacyScoreDimensions.filter(d => !d.gate);
+      return frozen?.length ? frozen : registered?.length ? registered : taskIsFlatChat.value ? flatChatDimensions : taskIsKnowledgeQA.value ? knowledgeQADimensions : taskIsTimeliness.value ? timelinessDimensions : taskIsChat.value ? chatDimensions : legacyScoreDimensions.filter(d => !d.gate);
     });
-    const scoreDimensions = computed(() => [...(taskIsKnowledgeQA.value ? [] : legacyScoreDimensions.filter(d => d.gate)), ...taskDimensions.value]);
+    const scoreDimensions = computed(() => [...(taskIsKnowledgeQA.value || taskIsFlatChat.value ? [] : legacyScoreDimensions.filter(d => d.gate)), ...taskDimensions.value]);
     const summaryDimensions = computed(() => taskDimensions.value.filter(d => taskIsKnowledgeQA.value || d.key !== 'accuracy'));
     function setTaskProtocol(data) {
       taskEvaluationProfile.value = data.evaluation_profile || data.protocol_manifest?.id || (data.mode === 'compare' ? defaultEvaluationProfile() : '');
@@ -288,6 +300,17 @@ createApp({
       ? scoreRules.value.map((rule, i) => scoreRuleError(rule) ? `条件 ${i + 1}：${scoreRuleError(rule)}` : '').filter(Boolean).join('；') : '');
     function scoreValue(row, dimension, product) {
       if (taskProtocolDiagnostics.value.length) return null;
+      if (isFlatChatRow(row)) {
+        const prefix = `answer${product}_${dimension}`, value = row[`${prefix}_score`];
+        const count = Number(row.product_count || items.value[row.index]?.product_count || 2);
+        const state = row[`${prefix}_score_status`];
+        const allowed = ['response_experience','safety_stability'].includes(dimension) ? [1,5]
+          : flatChatDimensions.some(d => d.key === dimension) ? [1,2,3,4,5] : [];
+        return !row.error && product >= 1 && product <= count && (state == null || state === 'scored')
+          && row[`answer${product}_input_status`] !== 'failed'
+          && row[`answer${product}_execution_status`] !== 'input_failed'
+          && Number.isInteger(value) && allowed.includes(value) ? value : null;
+      }
       if (isKnowledgeQARow(row)) {
         const prefix = `answer${product}_${dimension}`, value = row[`${prefix}_score`];
         const count = Number(row.product_count || items.value[row.index]?.product_count || 2);
@@ -398,7 +421,7 @@ createApp({
         }
       } else if (column.key.endsWith('_summary')) {
         const dimension = column.key.replace('_summary', '');
-        if (isKnowledgeQARow(row)) {
+        if (isKnowledgeQARow(row) || isFlatChatRow(row)) {
           add('证据与评分理由', row[`${dimension}_reason`]);
         } else if (isTimelinessRow(row)) {
           add('维度共享证据（保留原产品归属）', row[`${dimension}_evidence`]);
@@ -913,14 +936,14 @@ createApp({
           ...contextCols,
           { key: "product_count", label: "产品数" },
           { key: "input_status_summary", label: "输入状态" },
-          ...(taskIsKnowledgeQA.value ? [] : [
+          ...(taskIsKnowledgeQA.value || taskIsFlatChat.value ? [] : [
             { key: "response_gate_summary", label: "响应体验Gate" },
             { key: "safety_gate_summary", label: "安全稳定Gate" },
           ]),
           ...taskDimensions.value.map(d => ({key:`${d.key}_summary`, label:d.key === 'accuracy' && !taskIsKnowledgeQA.value ? '内容准确（暂不汇总）' : d.label})),
           ...((taskIsTimeliness.value ? timelinessHasConflict() : !chatUsesSharedReasons())
             ? [{ key: "has_conflict", label: "内容冲突" }] : []),
-          ...(compact1022() ? [] : [{ key: "needs_human_review", label: "需人工复核" }]),
+          ...(compact1022() || taskIsFlatChat.value ? [] : [{ key: "needs_human_review", label: "需人工复核" }]),
           ...(compact1022() || chatUsesSharedReasons() ? [] : [{ key: "rationale", label: "理由" }]),
           { key: "latency_s", label: "总耗时" },
         ];
@@ -1873,6 +1896,51 @@ createApp({
       return ({scored:'已评分',not_applicable:'不适用',gate_blocked:'门槛未通过',input_failed:'输入失败',unverifiable:'无法核验',
         insufficient_evidence:'NA · 证据不足',blocked_gate:'NA · Gate阻断',blocked_understanding:'NA · 理解1分阻断'})[state] || '待评估';
     }
+    function flatChatStatus(row, dimension, product) {
+      if (taskProtocolDiagnostics.value.length) return '协议待恢复';
+      if (row.error) return '评估失败';
+      if (row[`answer${product}_input_status`] === 'failed'
+          || row[`answer${product}_execution_status`] === 'input_failed') return '采集失败';
+      if (scoreValue(row,dimension,product) !== null) return '已评分';
+      const prefix = `answer${product}_${dimension}`, state = row[`${prefix}_score_status`];
+      return row[`${prefix}_score`] === null && (state == null || state === 'unverifiable')
+        ? '证据不足' : '结果缺失或异常';
+    }
+    function flatChatColumn(row, column) {
+      return isFlatChatRow(row) && flatChatDimensions.some(d => `${d.key}_summary` === column.key);
+    }
+    function flatChatProductScores(row, column) {
+      const dimension = column.key.replace(/_summary$/, '');
+      return Array.from({length:Number(row.product_count || items.value[row.index]?.product_count || 2)}, (_,i) => {
+        const product = i + 1, value = scoreValue(row,dimension,product);
+        return {product,label:value === null ? flatChatStatus(row,dimension,product) : `${value}分`,
+          className:value === null ? 'flat-na' : value >= 4 ? 'flat-high' : value <= 2 ? 'flat-low' : 'flat-mid'};
+      });
+    }
+    function flatChatSummaryRows(data) {
+      if (!data) return [];
+      const labels = {unverifiable:'证据不足',input_failed:'采集失败',technical_failure:'评估失败',
+        unfinished:'未完成',invalid_state:'结果异常',identity_error:'协议异常'};
+      return summaryDimensions.value.flatMap(d => Array.from({length:Number(data.product_count || 2)}, (_,i) => {
+        const prefix = `${d.key}_answer${i+1}`, counts = data[`${prefix}_score_status_counts`] || {};
+        const distribution = data[`${prefix}_score_distribution`] || {};
+        const scores = ['response_experience','safety_stability'].includes(d.key) ? [1,5] : [1,2,3,4,5];
+        return {key:`${d.key}-${i+1}`,dimension:d.label,product:i+1,
+          average:data[`${prefix}_avg`] ?? 'N/A',scored:data[`${prefix}_scored`] ?? 0,
+          eligible:data[`${prefix}_eligible`] ?? 0,coverage:summaryPercent(data[`${prefix}_score_coverage`]),
+          distribution:scores.map(score => `${score}分 ${distribution[score] ?? 0}`).join(' · '),
+          states:Object.entries(labels).map(([state,label]) => `${label} ${counts[state] ?? 0}`).join(' · ')};
+      }));
+    }
+    function flatChatRatios(data) {
+      if (!data) return [];
+      const percent = value => typeof value === 'number' && Number.isFinite(value)
+        ? `${(value * 100).toFixed(2)}%` : 'N/A';
+      return timelinessPairedRows(data).map(row => ({...row,
+        ratio:percent(data[`${row.key}_mean_ratio`]),
+        pairedRatio:percent(data[`${row.key}_paired_mean_ratio`]),
+      }));
+    }
     function knowledgeQAStatus(row, dimension, product) {
       if (taskProtocolDiagnostics.value.length) return '协议待恢复';
       if (row.error) return '评估失败';
@@ -1990,6 +2058,7 @@ createApp({
       }
       if (c.key.endsWith("_summary") && !["input_status_summary", "response_gate_summary", "safety_gate_summary"].includes(c.key)) {
         const dimension = c.key.slice(0, -"_summary".length);
+        if (isFlatChatRow(r)) return flatChatProductScores(r,c).map(entry => `P${entry.product}:${entry.label}`).join('；');
         if (isKnowledgeQARow(r)) return knowledgeQAProductScores(r,c).map(entry => `P${entry.product}:${entry.label}`).join('；');
         if (compact1022(r)) {
           return Array.from({length:Number(r.product_count || items.value[r.index]?.product_count || 2)}, (_, i) => {
@@ -2637,7 +2706,8 @@ createApp({
       reasonOnlyColumn, cellReasons, reasonsExpanded, toggleCellReasons, allReasonsExpanded, setAllReasonsExpanded,
       datasetSourceFileId, datasetSourceTaskId, datasetRevision, useComparisonDataset,
       evaluationProfiles, compareProfiles, selectedEvaluationProfile, evaluationProfileLabel, evaluationProfileOptionLabel,
-      taskEvaluationProfile, taskProtocolManifest, taskProtocolDiagnostics, taskIsChat, taskIsTimeliness, taskIsKnowledgeQA, compact1022, summaryDimensions, setTaskProtocol,
+      taskEvaluationProfile, taskProtocolManifest, taskProtocolDiagnostics, taskIsChat, taskIsTimeliness, taskIsKnowledgeQA, taskIsFlatChat, compact1022, summaryDimensions, setTaskProtocol,
+      isFlatChatRow, flatChatColumn, flatChatProductScores, flatChatSummaryRows, flatChatRatios,
       isKnowledgeQARow, knowledgeQAColumn, knowledgeQAProductScores, knowledgeQASummaryRows,
       isTimelinessRow, timelinessColumn, timelinessProductScores, timelinessSummaryRows, timelinessPairedRows, summaryPercent,
       timelinessHasConflict, timelinessConflictColumn, timelinessConflictSummary,

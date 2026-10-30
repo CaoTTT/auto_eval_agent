@@ -260,6 +260,7 @@ def _task_from_snapshot(snapshot: dict, task_id: str) -> Task:
         protocol_manifest=(recover_protocol_identity(snapshot)["manifest"] if
                            recover_protocol_identity(snapshot)["is_chat"] or recover_protocol_identity(snapshot)["is_timeliness"]
                            or recover_protocol_identity(snapshot)["is_knowledge_qa"]
+                           or recover_protocol_identity(snapshot).get("is_flat_chat")
                            else snapshot.get("protocol_manifest") or {}),
         judge_runtime=snapshot.get("judge_runtime") or {},
         dataset_name=snapshot.get("dataset_name") or "",

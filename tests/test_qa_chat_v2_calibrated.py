@@ -140,7 +140,7 @@ def test_rendered_deduction_policy_has_one_baseline_and_keeps_null_and_defect_bo
         (3, "基本达标，能够使用"), (4, "表现良好，较完整地满足需求"),
         (5, "体验优秀，达到标杆水平"),
     ):
-        assert f"{score}分“{meaning}”" in execution
+        assert f"{score}分：{meaning}" in execution
     assert "对每个可评分维度从5分起评" in execution
     assert "所有活动产品使用相同起点、相同缺陷认定条件和相同扣分尺度" in execution
     assert "该维applicable=true、该产品未被Gate阻断，且证据足以可靠评分" in execution
