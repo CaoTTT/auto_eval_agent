@@ -11,7 +11,10 @@ from auto_eval.judges.compare_protocols import (
     V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID,
     QA_CHAT_COMPARE_PROTOCOL_ID,
     QA_CHAT_V2_COMPARE_PROTOCOL_ID,
+    QA_CHAT_V2_CALIBRATED_COMPARE_PROTOCOL_ID,
     TIMELINESS_COMPARE_PROTOCOL_ID,
+    KNOWLEDGE_QA_COMPARE_PROTOCOL_ID,
+    CHITCHAT_FLAT_COMPARE_PROTOCOL_ID,
     V1022_COMPARE_PROTOCOL_ID,
     VisualCompareObservationV02,
     list_compare_protocols,
@@ -50,7 +53,10 @@ def test_registry_defaults_to_stable_v02_and_exposes_experimental_versions():
         V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID,
         QA_CHAT_COMPARE_PROTOCOL_ID,
         QA_CHAT_V2_COMPARE_PROTOCOL_ID,
+        QA_CHAT_V2_CALIBRATED_COMPARE_PROTOCOL_ID,
+        CHITCHAT_FLAT_COMPARE_PROTOCOL_ID,
         TIMELINESS_COMPARE_PROTOCOL_ID,
+        KNOWLEDGE_QA_COMPARE_PROTOCOL_ID,
         V1022_COMPARE_PROTOCOL_ID,
     }
     assert resolve_compare_protocol(V03_COMPARE_PROTOCOL_ID).status == "experimental"
@@ -192,7 +198,10 @@ async def test_eval_api_freezes_selected_protocol_on_new_task(monkeypatch):
         V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID,
         QA_CHAT_COMPARE_PROTOCOL_ID,
         QA_CHAT_V2_COMPARE_PROTOCOL_ID,
+        QA_CHAT_V2_CALIBRATED_COMPARE_PROTOCOL_ID,
+        CHITCHAT_FLAT_COMPARE_PROTOCOL_ID,
         TIMELINESS_COMPARE_PROTOCOL_ID,
+        KNOWLEDGE_QA_COMPARE_PROTOCOL_ID,
         V1022_COMPARE_PROTOCOL_ID,
     ]
     assert [p["id"] for p in public if p["status"] == "stable"] == [
@@ -472,10 +481,10 @@ def test_stable_plus_r022_remains_frozen_and_preserves_output_contract(
 
 
 @pytest.mark.parametrize("product_count,evidence_mode,expected_sha256", [
-        (2, "video_frames", "e35fb8fd13846f5e76e6b8cc9c8afb4246a2d959c1bffa4efa3e1c67729121dc"),
-        (2, "long_screenshot", "56243790fcebf53f6b785f7f4affe862358035413f49335974f5153c14e2a193"),
-        (3, "video_frames", "47e5a6c939c9d483cd3043d7886aca3b088a1f14e840e26a6994eb4107078806"),
-        (3, "long_screenshot", "7c05bba4606f7d6817b3b8ca674521ca26582ae44449911a7490db2297822ca9"),
+        (2, "video_frames", "2f92f8d79b392196f0dd19705f77998336f1f13c4675b95db307ed8fe14d0b20"),
+        (2, "long_screenshot", "1349a303a9aef0409b1c2f8f5ba83324ef01d6da760ddba38757c79d08cef322"),
+        (3, "video_frames", "25e1a3937507b55a3eb39f02680ed98410e8f9731ead6f5ef1988b8d66546def"),
+        (3, "long_screenshot", "fbe086cdade42d8b1cb312e46e58e353ea375de4a9acc25f3e608c2e3aaf1b98"),
 ])
 def test_stable_plus_service_revision_preserves_inputs_output_and_frozen_history(
     product_count, evidence_mode, expected_sha256
@@ -487,7 +496,7 @@ def test_stable_plus_service_revision_preserves_inputs_output_and_frozen_history
     from auto_eval.web.protocol_identity import require_snapshot_protocol
 
     assert hashlib.sha256(Path(prompt.__file__).read_bytes().replace(b"\r\n", b"\n")).hexdigest() == (
-        "e4cc008b6d0a094861486858f2c5d99d0e84b7e624a3783b26ac76ba949d5333"
+        "7e2239e93dc0d498db43a185c887b16c0cd240f05a0d3d8ba1da3759125ddbaf"
     )
     active = resolve_compare_protocol(V02_PLUS_COMPARE_PROTOCOL_ID)
     assert active.bundle_revision == "0.2.3"

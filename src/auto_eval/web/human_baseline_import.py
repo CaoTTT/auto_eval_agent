@@ -166,10 +166,23 @@ def _number(value, minimum: int, maximum: int) -> int:
     return int(number)
 
 
+def _knowledge_number(value, dimension: str) -> int | float:
+    """Read native Excel numeric labels without coercing half marks or bools."""
+    from ..judges.knowledge_qa_schema import KNOWLEDGE_QA_ALLOWED_SCORES
+    allowed = KNOWLEDGE_QA_ALLOWED_SCORES.get(dimension, ())
+    if type(value) is int and value in allowed:
+        return value
+    if dimension == "accuracy" and type(value) is float and value == 1.5:
+        return value
+    raise ValueError("知识问答准确性只接受数字0、1、1.5、2；其他维度只接受数字0、1、2，不接受文本")
+
+
 def parse_human_labels(path: Path, mapping: ImportMapping) -> dict:
     protocol = human_protocol(mapping.human_standard_version, mapping.human_standard_id, mapping.human_bundle_revision or None)
     timeliness = protocol.standard_id == "timeliness_compare"
-    chat = protocol.standard_id in ("qa_chat_compare", "timeliness_compare")
+    knowledge = protocol.standard_id == "knowledge_qa_compare"
+    flat = protocol.standard_id == "chitchat_evidence_first_flat"
+    chat = protocol.standard_id in ("qa_chat_compare", "timeliness_compare", "knowledge_qa_compare", "chitchat_evidence_first_flat")
     catalog = "catalog_" + uuid.uuid4().hex[:16]
     cases, labels, states, issues = [], [], [], []
     all_ids = []
@@ -184,7 +197,7 @@ def parse_human_labels(path: Path, mapping: ImportMapping) -> dict:
         if metadata.get("human_standard_version"):
             recorded_protocol = human_protocol(metadata["human_standard_version"], metadata.get("human_standard_id", ""),
                                                metadata.get("human_bundle_revision") or None)
-            frozen_v2 = any(s in ("qa-chat-result-2", "timeliness-result-1", "timeliness-result-2", "timeliness-result-3") for s in
+            frozen_v2 = any(s in ("qa-chat-result-2", "timeliness-result-1", "timeliness-result-2", "timeliness-result-3", "knowledge-qa-result-2", "chitchat-flat-result-1") for s in
                             (recorded_protocol.result_schema_version, protocol.result_schema_version))
             if frozen_v2 and (recorded_protocol.id, recorded_protocol.bundle_revision) != (protocol.id, protocol.bundle_revision):
                 raise HumanError("模板或基准的冻结标准与所选标准不同；不能仅改版本复用评分，请生成新标准空白模板重新标注")
@@ -303,16 +316,28 @@ def parse_human_labels(path: Path, mapping: ImportMapping) -> dict:
                         base = str(raw[column_index_from_string(col.score)-1].value)
                     value, chosen = (review, col.review) if use_review else (base, col.score)
                     status = "unlabeled" if _blank(value) else (mapping.na_status if str(value).strip().upper() in ("N/A", "NA") else "scored")
-                    if chat and status == "scored" and type(value) is not int:
+                    if chat and not knowledge and status == "scored" and type(value) is not int:
                         raise ValueError(f"人工分须为{protocol.score_min}—{protocol.score_max}严格整数，不接受文本或小数")
-                    score = _number(value, protocol.score_min, protocol.score_max) if status == "scored" else None
+                    score = ((_knowledge_number(value, col.dimension_id) if knowledge else
+                              _number(value, protocol.score_min, protocol.score_max)) if status == "scored" else None)
+                    if flat and score is not None:
+                        from .chitchat_flat_statistics import ALLOWED_SCORES
+                        if score not in ALLOWED_SCORES[col.dimension_id]:
+                            raise ValueError("响应体验/安全稳定仅允许1、5；其余五维1—5")
                     if not _blank(explicit):
                         explicit = {"不适用": "not_applicable", "无法核验": "unverifiable", "Gate阻断": "gate_blocked",
                                     "输入失败": "input_failed", "未标注": "unlabeled", "已评分": "scored"}.get(str(explicit).strip(), str(explicit).strip())
                         if timeliness:
                             explicit = {"gate_blocked": "blocked_gate", "证据不足": "insufficient_evidence",
                                         "理解阻断": "blocked_understanding"}.get(explicit, explicit)
-                        statuses = (("scored", "not_applicable", "insufficient_evidence", "blocked_gate",
+                        if flat:
+                            explicit = {"证据不足": "unverifiable"}.get(explicit, explicit)
+                        if knowledge:
+                            explicit = {"证据不足": "insufficient_evidence"}.get(explicit, explicit)
+                        statuses = (("scored", "unverifiable", "input_failed", "unlabeled", "na_unspecified") if flat else
+                                    ("scored", "not_applicable", "insufficient_evidence", "unverifiable",
+                                     "input_failed", "unlabeled", "na_unspecified") if knowledge else
+                                    ("scored", "not_applicable", "insufficient_evidence", "blocked_gate",
                                      "blocked_understanding", "input_failed", "unlabeled", "na_unspecified") if timeliness else
                                     ("scored", "not_applicable", "unverifiable", "gate_blocked", "input_failed", "unlabeled", "na_unspecified"))
                         if explicit not in statuses:
@@ -337,6 +362,11 @@ def parse_human_labels(path: Path, mapping: ImportMapping) -> dict:
                         raise ValueError("人工状态与产品适用性冲突")
                     if applicable is None:
                         applicable = inferred
+                    if flat and (status == "not_applicable" or applicable is False):
+                        raise ValueError("闲聊七维无不适用状态，缺证须用unverifiable")
+                    if knowledge and col.dimension_id != "multimedia_value" and (
+                            status == "not_applicable" or applicable is False):
+                        raise ValueError("知识问答只有富媒体增益允许不适用，前三维缺证须用证据不足或无法核验")
                     if chat and status in ("unverifiable", "insufficient_evidence") and applicable is False:
                         raise ValueError("无法核验状态不能明确不适用")
                     verification_raw = get(col.verification_status)
@@ -374,10 +404,11 @@ def parse_human_labels(path: Path, mapping: ImportMapping) -> dict:
                                   base_raw=base, review_raw=review, applicable_cell=f"{col.applicable}{row_no}" if col.applicable else "",
                                   applicable_raw=applicable_raw, verification_cell=f"{col.verification_status}{row_no}" if col.verification_status else "",
                                   verification_raw=verification_raw, formula=any(raw[column_index_from_string(c)-1].data_type == "f" for c in (col.score, col.review) if c))
-                    labels.append(HumanScoreLabel(case_key=case_key, product_id=col.product_id,
+                    labels.append(HumanScoreLabel.model_validate(dict(case_key=case_key, product_id=col.product_id,
                         response_id=case["responses"][col.product_id].get("response_id") or digest([case_key, col.product_id])[:24],
                         dimension_id=col.dimension_id, score_status=status, score=score, applicable=applicable, verification_status=verification,
-                        annotation_stage="review" if use_review else "base", reason=reason, source=source).model_dump())
+                        annotation_stage="review" if use_review else "base", reason=reason, source=source),
+                        context={"standard_id": protocol.standard_id}).model_dump())
                 except (ValueError, TypeError) as exc:
                     issue(exc, col.review or col.score or col.status, col.product_id, col.dimension_id)
             for dim in (() if chat else human_dimensions(protocol)):
@@ -420,7 +451,7 @@ def build_human_template(snapshot: dict, standard: str) -> bytes:
     from .human_report_export import tables_workbook
     from .compare_statistics import StatisticsTable
     protocol = human_protocol(standard)
-    if protocol.standard_id == "timeliness_compare":
+    if protocol.standard_id in ("timeliness_compare", "knowledge_qa_compare", "chitchat_evidence_first_flat"):
         from .protocol_identity import recover_protocol_identity, require_snapshot_protocol
         recovered = recover_protocol_identity(snapshot)
         if recovered["executable"] and recovered["evaluation_profile"] == protocol.id:
@@ -430,7 +461,10 @@ def build_human_template(snapshot: dict, standard: str) -> bytes:
     dimensions = human_dimensions(protocol, scores=True)
     names_by_dimension = human_dimension_names(protocol)
     timeliness = protocol.standard_id == "timeliness_compare"
-    chat = protocol.standard_id in ("qa_chat_compare", "timeliness_compare")
+    knowledge = protocol.standard_id == "knowledge_qa_compare"
+    flat = protocol.standard_id == "chitchat_evidence_first_flat"
+    chat = protocol.standard_id in ("qa_chat_compare", "timeliness_compare", "knowledge_qa_compare", "chitchat_evidence_first_flat")
+    detailed_states = chat and not (knowledge or flat)
     items = snapshot.get("items") or []
     count = max((int(i.get("product_count") or (3 if i.get("video3") or i.get("screenshot3") or i.get("answer3") else 2)) for i in items), default=2)
     names = (snapshot.get("options") or {}).get("product_names") or []
@@ -440,9 +474,10 @@ def build_human_template(snapshot: dict, standard: str) -> bytes:
         headers.extend(f"{name}_产品{n}" for name in ("源回答", "源背景", "采集ID", "源摘要", "证据引用"))
         for dim in dimensions:
             headers.extend(f"{name}_产品{n}_{names_by_dimension[dim]}" for name in
-                           (("人工分", "人工复核分", "人工评分状态", "人工批注", "人工是否适用", "人工核验状态") if chat else
+                           (("人工分", "人工复核分", "人工评分状态", "人工批注", "人工是否适用", "人工核验状态") if detailed_states else
                             ("人工分", "人工复核分", "人工评分状态", "人工批注")))
-        headers.extend((f"人工响应Gate_产品{n}", f"人工安全Gate_产品{n}"))
+        if not (knowledge or flat):
+            headers.extend((f"人工响应Gate_产品{n}", f"人工安全Gate_产品{n}"))
         if chat:
             headers.append(f"人工输入状态_产品{n}")
     if not chat:
@@ -458,7 +493,8 @@ def build_human_template(snapshot: dict, standard: str) -> bytes:
         for n in range(1, count+1):
             response = response_identity(item, n)
             row.extend(response.get(k, "") for k in ("answer", "context", "response_id", "sha256", "evidence"))
-            row.extend([None] * (len(dimensions)*(6 if chat else 4) + (3 if chat else 2)))
+            row.extend([None] * (len(dimensions)*(6 if detailed_states else 4)
+                                 + (0 if knowledge or flat else 2) + (1 if chat else 0)))
         if not chat:
             row.extend([None]*len(dimensions))
         table.rows.append(row)
@@ -467,6 +503,12 @@ def build_human_template(snapshot: dict, standard: str) -> bytes:
                 human_result_schema_version=protocol.result_schema_version,
                 evaluation_profile=protocol.id, dimensions=list(dimensions), dimension_names=names_by_dimension,
                 score_range=[protocol.score_min, protocol.score_max])
+    if knowledge:
+        from ..judges.knowledge_qa_schema import KNOWLEDGE_QA_ALLOWED_SCORES
+        meta["allowed_scores_by_dimension"] = {key: list(values) for key, values in KNOWLEDGE_QA_ALLOWED_SCORES.items()}
+    if flat:
+        from .chitchat_flat_statistics import ALLOWED_SCORES
+        meta["allowed_scores_by_dimension"] = {key: list(values) for key, values in ALLOWED_SCORES.items()}
     notes = StatisticsTable("填写说明", ("项目", "说明"), rows=[
         ["模板元信息", json.dumps(meta, ensure_ascii=False)], ["人工标准", protocol.display],
         ["分值范围", f"{protocol.score_min}—{protocol.score_max} 的整数"],
@@ -477,4 +519,24 @@ def build_human_template(snapshot: dict, standard: str) -> bytes:
         ["标准隔离", "禁止将旧标准人工分或模型分复制为新标准标注；全部评分、理由、Gate与适用性栏初始为空。"],
         ["核验/输入状态", "核验：verified/partial/unverifiable/not_required；输入：complete/partial/failed；留空=未知。"],
     ])
+    if knowledge:
+        replacements = {
+            "分值范围": "准确性：0、1、1.5、2；其余三维：0、1、2。必须填写Excel数字，不能用文本数字。",
+            "填写规则": "题号须为文本；留空=未标注；复核分非空优先，保留0及准确性1.5；空分原因在评分状态中明确，不补0。",
+            "状态可选值": "scored / not_applicable / insufficient_evidence / unverifiable / input_failed / unlabeled / na_unspecified；仅富媒体允许not_applicable。",
+            "Gate/适用性": "知识问答无Gate；前三维始终检查，只有富媒体可不适用。理由应包含证据位置或短原话、实际影响及分档依据；缺证不能补造。",
+            "标准隔离": "禁止复制旧标准评分；本模板仅复用原始测评输入，四维分数、状态、理由均需重新人工标注。",
+            "核验/输入状态": "模型不额外输出核验结论；人工输入状态可填complete/partial/failed，留空代表未知。",
+        }
+        notes.rows = [[key, replacements.get(key, value)] for key, value in notes.rows]
+    if flat:
+        replacements = {
+            "分值范围": "响应体验/安全稳定：1、5；其余五维：1—5严格整数。缺证留空，不补0。",
+            "填写规则": "题号须为文本；留空=未标注；复核分非空优先；分数必须是Excel整数，缺证原因写入评分状态与批注。",
+            "状态可选值": "scored / unverifiable / input_failed / unlabeled / na_unspecified；缺证为unverifiable。",
+            "Gate/适用性": "无额外Gate或不适用列；响应/安全仅为本维1或5分，不连带清空其他维度。",
+            "标准隔离": "保留原始输入；七维人工分、状态与理由独立标注，不能复制旧标准评分。",
+            "核验/输入状态": "输入状态可填complete/partial/failed，留空代表未知；证据与评分理由合并保留在人工批注。",
+        }
+        notes.rows = [[key, replacements.get(key, value)] for key, value in notes.rows]
     return tables_workbook({"人工标注": [table], "填写说明": [notes]}, plain=True)

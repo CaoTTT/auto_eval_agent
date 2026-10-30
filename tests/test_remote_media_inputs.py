@@ -1,13 +1,19 @@
 import hashlib
+import asyncio
+from contextlib import contextmanager
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import threading
+import time
+from types import SimpleNamespace
 
 import pytest
 from PIL import Image
 
 from auto_eval import query_images
+from auto_eval import remote_media
+from auto_eval.preparation import run_preparation
 from auto_eval.config import QueryImageConfig, VisualExtractionConfig, VisualModeProfile
 from auto_eval.remote_media import (
     TEMPORARY_DOWNLOAD_PATHS_FIELD,
@@ -269,3 +275,83 @@ def test_remote_media_downloads_http_files_to_temporary_paths(tmp_path):
         server.shutdown()
         thread.join(timeout=5)
         server.server_close()
+
+
+def _stream_chunks(monkeypatch, chunks):
+    @contextmanager
+    def stream(*_args, **_kwargs):
+        yield SimpleNamespace(
+            url="https://example.test/video.mp4",
+            headers={},
+            raise_for_status=lambda: None,
+            iter_bytes=chunks,
+        )
+
+    monkeypatch.setattr(remote_media.httpx, "stream", stream)
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_download_obeys_preparation_stop_and_removes_partial_files(
+    tmp_path, monkeypatch, cancel
+):
+    started = threading.Event()
+    consumed = []
+
+    def chunks():
+        started.set()
+        for n in range(100):
+            time.sleep(0.005)
+            consumed.append(n)
+            yield b"video"
+
+    _stream_chunks(monkeypatch, chunks)
+    output_dir = tmp_path / "downloads"
+    worker = asyncio.create_task(run_preparation(
+        download_remote_video, "https://example.test/video.mp4", output_dir,
+        timeout=10 if cancel else 0.03,
+    ))
+    if cancel:
+        await asyncio.to_thread(started.wait, 1)
+        worker.cancel()
+    with pytest.raises(asyncio.CancelledError if cancel else TimeoutError):
+        await worker
+    assert len(consumed) < 100
+    assert not list(output_dir.iterdir())
+
+
+def test_download_enforces_total_duration_for_continuous_stream(tmp_path, monkeypatch):
+    clock = [0.0]
+    consumed = []
+
+    def chunks():
+        for n in range(10):
+            clock[0] += 0.4
+            consumed.append(n)
+            yield b"video"
+
+    monkeypatch.setattr(remote_media, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    _stream_chunks(monkeypatch, chunks)
+    output_dir = tmp_path / "downloads"
+    with pytest.raises(TimeoutError, match="下载超时"):
+        download_remote_video("https://example.test/video.mp4", output_dir, timeout_s=1)
+    assert len(consumed) == 3
+    assert not list(output_dir.iterdir())
+
+
+def test_download_cleanup_cannot_remove_history_or_follow_external_symlinks(tmp_path):
+    runs = tmp_path / "runs"
+    downloads = runs / "downloads"
+    downloads.mkdir(parents=True)
+    history = runs / "other-task.json"
+    history.write_text("history", encoding="utf-8")
+    temporary = downloads / "video.mp4"
+    temporary.write_bytes(b"download")
+    link = downloads / "history.mp4"
+    link.symlink_to(history)
+    item = {TEMPORARY_DOWNLOAD_PATHS_FIELD: [str(history), str(link), str(temporary)]}
+
+    cleanup_item_downloads(item, runs_dir=runs)
+
+    assert history.read_text(encoding="utf-8") == "history"
+    assert link.is_symlink()
+    assert not temporary.exists()

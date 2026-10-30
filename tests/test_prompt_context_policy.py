@@ -27,6 +27,15 @@ EVALUATION_TIME = datetime(2026, 10, 22, tzinfo=timezone.utc)
 
 
 def response_data(protocol, count):
+    if protocol.standard_id == "chitchat_evidence_first_flat":
+        data = {}
+        for dimension in protocol.dimensions:
+            data[dimension + "_reason"] = "产品1、产品2" + ("、产品3" if count == 3 else "") + "：本轮表现符合标准。"
+            data.update({f"answer{n}_{dimension}_score": 5 for n in range(1, count + 1)})
+        return data
+    if protocol.standard_id == "knowledge_qa_compare":
+        from auto_eval.judges.visual_compare_prompt_knowledge_qa import output_example
+        return json.loads(output_example(count))
     if protocol.id == V1022_COMPARE_PROTOCOL_ID:
         return example_1022_output(count)
     if protocol.standard_id == "timeliness_compare":

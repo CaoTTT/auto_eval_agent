@@ -163,7 +163,7 @@ def _identity(case: dict, item: dict, pid: str, n: int):
 def _policy(snapshot: dict, row: dict, recovered_identity: dict | None = None):
     recovered = recovered_identity if recovered_identity is not None else recover_protocol_identity(
         {**snapshot, "results": snapshot.get("results") or [row]})
-    if recovered["is_chat"] or recovered["is_timeliness"]:
+    if recovered["is_chat"] or recovered["is_timeliness"] or recovered.get("is_knowledge_qa") or recovered.get("is_flat_chat"):
         if not recovered["executable"]:
             return None
         frozen = recovered["manifest"]
@@ -230,13 +230,15 @@ def align_baseline_to_run(baseline: dict, snapshot: dict, mapping: TaskMapping, 
                                   if result.get("judge_runtime") or result.get("judge_model") else runtime_summary)
         policy = _policy(snapshot,result,recovered_identity)
         compact = bool(policy and policy.output_contract == "compare_1022_v2")
-        shared_reasons = compact or bool(policy and policy.result_schema_version in ("qa-chat-result-2", "timeliness-result-1", "timeliness-result-2", "timeliness-result-3"))
+        shared_reasons = compact or bool(policy and policy.result_schema_version in ("qa-chat-result-2", "timeliness-result-1", "timeliness-result-2", "timeliness-result-3", "knowledge-qa-result-2", "chitchat-flat-result-1"))
+        knowledge = bool(policy and policy.standard_id == "knowledge_qa_compare")
+        flat = bool(policy and policy.standard_id == "chitchat_evidence_first_flat")
         same_family = bool(policy and policy.standard_id == human_policy.standard_id)
         compatible = bool(policy and same_family and [policy.score_min,policy.score_max]==baseline["score_range"] and (
             policy.standard_version==baseline["human_standard_version"] or mode=="regression"))
         if policy and not same_family:
             raise HumanError("人工与模型标准家族不同，回归模式也不能跨家族生成数字一致性")
-        if policy and human_policy.standard_id in ("qa_chat_compare", "timeliness_compare") and (policy.id, policy.bundle_revision) != (human_policy.id, human_policy.bundle_revision):
+        if policy and human_policy.standard_id in ("qa_chat_compare", "timeliness_compare", "knowledge_qa_compare", "chitchat_evidence_first_flat") and (policy.id, policy.bundle_revision) != (human_policy.id, human_policy.bundle_revision):
             raise HumanError("此评测必须使用相同完整标准与冻结修订号")
         if (policy and "compare_1022_v2" in (policy.output_contract, human_policy.output_contract)
                 and (policy.id, policy.bundle_revision) != (human_policy.id, human_policy.bundle_revision)
@@ -270,8 +272,20 @@ def align_baseline_to_run(baseline: dict, snapshot: dict, mapping: TaskMapping, 
                 if policy and slot:
                     model_case = Case(i or 0,item,result,"failed" if result.get("error") else "done" if result else "unfinished",
                                       product_count,policy.standard_version,policy.bundle_revision, policy.standard_id)
-                    model_status,model = score_state(model_case,slot,dim,policy)
-                    model_applicable = product_applicable(model_case, slot, dim, policy)
+                    if flat:
+                        from .chitchat_flat_statistics import chitchat_flat_score_state, STATUS_LABELS
+                        formal_status, model = chitchat_flat_score_state(model_case, slot, dim, policy)
+                        model_status = STATUS_LABELS.get(formal_status, formal_status)
+                        model_applicable = True if formal_status in ("scored", "unverifiable") else None
+                    elif knowledge:
+                        from .knowledge_qa_statistics import knowledge_qa_score_state, STATUS_LABELS
+                        formal_status, model = knowledge_qa_score_state(model_case, slot, dim, policy)
+                        model_status = STATUS_LABELS.get(formal_status, formal_status)
+                        model_applicable = (False if formal_status == "not_applicable" else
+                                            True if formal_status in ("scored", "unverifiable") else None)
+                    else:
+                        model_status,model = score_state(model_case,slot,dim,policy)
+                        model_applicable = product_applicable(model_case, slot, dim, policy)
                     if policy.standard_id == "qa_chat_compare":
                         formal_status = "scored" if model is not None else {
                             "输入失败": "input_failed", "响应Gate阻断": "gate_blocked", "安全Gate阻断": "gate_blocked",
@@ -282,7 +296,7 @@ def align_baseline_to_run(baseline: dict, snapshot: dict, mapping: TaskMapping, 
                 human_applicable = label.get("applicable")
                 if human_applicable is None:
                     human_applicable = ((True if label.get("score_status") == "scored" else False if label.get("score_status") == "not_applicable" else None)
-                                        if human_policy.standard_id in ("qa_chat_compare", "timeliness_compare") else state.get("applicability",{}).get(dim))
+                                        if human_policy.standard_id in ("qa_chat_compare", "timeliness_compare", "knowledge_qa_compare", "chitchat_evidence_first_flat") else state.get("applicability",{}).get(dim))
                 mid = digest([snapshot["task_id"],snapshot["snapshot_sha256"],ck,pid,dim])[:32]
                 identity_accepted = status=="verified" and binding=="verified"
                 row = dict(match_id=mid, task_id=snapshot["task_id"], task_snapshot_sha256=snapshot["snapshot_sha256"],
@@ -294,15 +308,15 @@ def align_baseline_to_run(baseline: dict, snapshot: dict, mapping: TaskMapping, 
                            human_reason=label.get("reason",""), model_score=model, model_status=model_status,
                            model_reason=(result.get(f"{dim}_reason") or "") if shared_reasons else
                                         (result.get(f"answer{slot}_{dim}_reason") or "") if policy and policy.standard_id == "qa_chat_compare" else result.get(f"{dim}_rationale") or result.get(f"{dim}_reason") or "",
-                           model_evidence=[] if compact else result.get(f"{dim}_evidence", []) if shared_reasons else result.get(f"answer{slot}_{dim}_evidence", []),
+                           model_evidence=[] if compact or knowledge or flat else result.get(f"{dim}_evidence", []) if shared_reasons else result.get(f"answer{slot}_{dim}_evidence", []),
                            model_reason_scope="dimension_shared" if shared_reasons else "product" if policy and policy.standard_id == "qa_chat_compare" else "dimension_shared",
-                           model_evidence_scope="dimension_shared" if shared_reasons else "product",
+                           model_evidence_scope="merged_in_reason" if knowledge or flat else "dimension_shared" if shared_reasons else "product",
                            model_result_schema_version=policy.result_schema_version if policy else result.get("result_schema_version"),
                            model_output_contract=policy.output_contract if policy else result.get("output_contract"),
                            model_verification_status=result.get(f"answer{slot}_{dim}_verification_status"),
                            model_na_reason=result.get(f"answer{slot}_{dim}_na_reason"),
                            human_verification_status=label.get("verification_status"),
-                           model_gates={g:result.get(f"answer{slot}_{g}_gate") for g in ("response","safety")},
+                           model_gates={} if knowledge or flat else {g:result.get(f"answer{slot}_{g}_gate") for g in ("response","safety")},
                            human_gates=state.get("gates",{}).get(pid,{}), human_applicable=human_applicable,
                            model_applicable=model_applicable, model_input_status=result.get(f"answer{slot}_input_status"),
                            human_input_status=state.get("inputs",{}).get(pid),

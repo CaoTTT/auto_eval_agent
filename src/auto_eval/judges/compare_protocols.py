@@ -58,6 +58,10 @@ from .visual_compare_prompt_qa_chat_v2 import (
     VISUAL_COMPARE_SYSTEM as QA_CHAT_V2_SYSTEM,
     VISUAL_COMPARE_USER as QA_CHAT_V2_USER,
 )
+from .visual_compare_prompt_qa_chat_v2_calibrated import (
+    VISUAL_COMPARE_SYSTEM as QA_CHAT_V2_CALIBRATED_SYSTEM,
+    VISUAL_COMPARE_USER as QA_CHAT_V2_CALIBRATED_USER,
+)
 from .timeliness_schema import (
     TIMELINESS_STANDARD_ID, TIMELINESS_COMPARE_PROTOCOL_ID, TIMELINESS_RESULT_SCHEMA_VERSION,
     TIMELINESS_DIMENSIONS, TIMELINESS_DIMENSION_NAMES, TimelinessObservation,
@@ -65,6 +69,24 @@ from .timeliness_schema import (
 from .visual_compare_prompt_timeliness import (
     VISUAL_COMPARE_SYSTEM as TIMELINESS_SYSTEM,
     VISUAL_COMPARE_USER as TIMELINESS_USER,
+)
+from .knowledge_qa_schema import (
+    KNOWLEDGE_QA_STANDARD_ID, KNOWLEDGE_QA_COMPARE_PROTOCOL_ID,
+    KNOWLEDGE_QA_RESULT_SCHEMA_VERSION, KNOWLEDGE_QA_DIMENSIONS,
+    KNOWLEDGE_QA_DIMENSION_NAMES, KNOWLEDGE_QA_ALLOWED_SCORES, KnowledgeQAObservation,
+)
+from .visual_compare_prompt_knowledge_qa import (
+    VISUAL_COMPARE_SYSTEM as KNOWLEDGE_QA_SYSTEM,
+    VISUAL_COMPARE_USER as KNOWLEDGE_QA_USER,
+)
+from .chitchat_flat_schema import (
+    CHITCHAT_FLAT_STANDARD_ID, CHITCHAT_FLAT_COMPARE_PROTOCOL_ID,
+    CHITCHAT_FLAT_RESULT_SCHEMA_VERSION, CHITCHAT_FLAT_DIMENSIONS,
+    CHITCHAT_FLAT_DIMENSION_NAMES, ChitchatFlatObservation,
+)
+from .visual_compare_prompt_chitchat_flat import (
+    VISUAL_COMPARE_SYSTEM as CHITCHAT_FLAT_SYSTEM,
+    VISUAL_COMPARE_USER as CHITCHAT_FLAT_USER,
 )
 
 
@@ -75,6 +97,7 @@ V02_PRIOR_KNOWLEDGE_COMPARE_PROTOCOL_ID = f"{STANDARD_ID}@0.2-simplified-prior-k
 V03_COMPARE_PROTOCOL_ID = f"{STANDARD_ID}@0.3"
 V02_CALIBRATED_COMPARE_PROTOCOL_ID = f"{STANDARD_ID}@0.2-simplified-calibrated"
 V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID = f"{STANDARD_ID}@0.2-simplified-thinking-exposure"
+QA_CHAT_V2_CALIBRATED_COMPARE_PROTOCOL_ID = f"{QA_CHAT_STANDARD_ID}@1.1-demand-calibrated"
 V1022_COMPARE_PROTOCOL_ID = f"{STANDARD_ID}@{STANDARD_VERSION_1022}"
 DIMENSIONS = (
     "understanding",
@@ -88,8 +111,10 @@ DIMENSIONS = (
 DIMENSION_NAMES = dict(zip(DIMENSIONS, (
     "理解需求", "内容准确性", "服务闭环", "场景化满足", "直观高效", "有理有据", "引导推荐",
 )))
-ALL_DIMENSIONS = tuple(dict.fromkeys((*DIMENSIONS, *QA_CHAT_DIMENSIONS, *TIMELINESS_DIMENSIONS)))
-DIMENSION_LABELS = {**DIMENSION_NAMES, **QA_CHAT_DIMENSION_NAMES, **TIMELINESS_DIMENSION_NAMES}
+ALL_DIMENSIONS = tuple(dict.fromkeys((*DIMENSIONS, *QA_CHAT_DIMENSIONS, *TIMELINESS_DIMENSIONS, *KNOWLEDGE_QA_DIMENSIONS, *CHITCHAT_FLAT_DIMENSIONS)))
+DIMENSION_LABELS = {**KNOWLEDGE_QA_DIMENSION_NAMES, **DIMENSION_NAMES,
+                    **QA_CHAT_DIMENSION_NAMES, **TIMELINESS_DIMENSION_NAMES,
+                    **CHITCHAT_FLAT_DIMENSION_NAMES}
 
 V02QualityScore: TypeAlias = Literal[1, 2, 3, 4, 5]
 
@@ -214,6 +239,17 @@ class CompareProtocol:
         }
         if self.output_contract != "legacy":
             metadata["output_contract"] = self.output_contract
+        if self.standard_id == KNOWLEDGE_QA_STANDARD_ID:
+            metadata["allowed_scores_by_dimension"] = {
+                key: list(KNOWLEDGE_QA_ALLOWED_SCORES[key]) for key in self.score_dimensions
+            }
+            metadata["has_gates"] = False
+        if self.standard_id == CHITCHAT_FLAT_STANDARD_ID:
+            metadata["allowed_scores_by_dimension"] = {
+                key: [1, 5] if key in CHITCHAT_FLAT_DIMENSIONS[:2] else [1, 2, 3, 4, 5]
+                for key in self.score_dimensions
+            }
+            metadata["has_gates"] = False
         return metadata
 
     def request_metadata(self) -> dict:
@@ -358,6 +394,42 @@ _PROTOCOLS = {
         score_dimensions=QA_CHAT_DIMENSIONS,
         result_schema_version=QA_CHAT_V2_RESULT_SCHEMA_VERSION,
     ),
+    QA_CHAT_V2_CALIBRATED_COMPARE_PROTOCOL_ID: CompareProtocol(
+        id=QA_CHAT_V2_CALIBRATED_COMPARE_PROTOCOL_ID,
+        standard_id=QA_CHAT_STANDARD_ID,
+        standard_version="1.1-demand-calibrated",
+        bundle_revision="1.1.3",
+        display="问答闲聊V2·需求与分档校准·1-5分（候选）",
+        status="experimental",
+        system_template=QA_CHAT_V2_CALIBRATED_SYSTEM,
+        user_template=QA_CHAT_V2_CALIBRATED_USER,
+        observation_model=QAChatV2Observation,
+        require_response_pass=False,
+        score_min=1,
+        score_max=5,
+        dimensions=QA_CHAT_DIMENSIONS,
+        dimension_names=dict(QA_CHAT_DIMENSION_NAMES),
+        score_dimensions=QA_CHAT_DIMENSIONS,
+        result_schema_version=QA_CHAT_V2_RESULT_SCHEMA_VERSION,
+    ),
+    CHITCHAT_FLAT_COMPARE_PROTOCOL_ID: CompareProtocol(
+        id=CHITCHAT_FLAT_COMPARE_PROTOCOL_ID,
+        standard_id=CHITCHAT_FLAT_STANDARD_ID,
+        standard_version="1.1",
+        bundle_revision="1.1.0",
+        display="闲聊七维·证据先行·1-5分（候选）",
+        status="experimental",
+        system_template=CHITCHAT_FLAT_SYSTEM,
+        user_template=CHITCHAT_FLAT_USER,
+        observation_model=ChitchatFlatObservation,
+        require_response_pass=False,
+        score_min=1,
+        score_max=5,
+        dimensions=CHITCHAT_FLAT_DIMENSIONS,
+        dimension_names=dict(CHITCHAT_FLAT_DIMENSION_NAMES),
+        score_dimensions=CHITCHAT_FLAT_DIMENSIONS,
+        result_schema_version=CHITCHAT_FLAT_RESULT_SCHEMA_VERSION,
+    ),
     TIMELINESS_COMPARE_PROTOCOL_ID: CompareProtocol(
         id=TIMELINESS_COMPARE_PROTOCOL_ID,
         standard_id=TIMELINESS_STANDARD_ID,
@@ -375,6 +447,24 @@ _PROTOCOLS = {
         dimension_names=dict(TIMELINESS_DIMENSION_NAMES),
         score_dimensions=TIMELINESS_DIMENSIONS,
         result_schema_version=TIMELINESS_RESULT_SCHEMA_VERSION,
+    ),
+    KNOWLEDGE_QA_COMPARE_PROTOCOL_ID: CompareProtocol(
+        id=KNOWLEDGE_QA_COMPARE_PROTOCOL_ID,
+        standard_id=KNOWLEDGE_QA_STANDARD_ID,
+        standard_version="1.0",
+        bundle_revision="1.0.0",
+        display="知识问答V1·0-2分（候选）",
+        status="experimental",
+        system_template=KNOWLEDGE_QA_SYSTEM,
+        user_template=KNOWLEDGE_QA_USER,
+        observation_model=KnowledgeQAObservation,
+        require_response_pass=False,
+        score_min=0,
+        score_max=2,
+        dimensions=KNOWLEDGE_QA_DIMENSIONS,
+        dimension_names=dict(KNOWLEDGE_QA_DIMENSION_NAMES),
+        score_dimensions=KNOWLEDGE_QA_DIMENSIONS,
+        result_schema_version=KNOWLEDGE_QA_RESULT_SCHEMA_VERSION,
     ),
     V1022_COMPARE_PROTOCOL_ID: CompareProtocol(
         id=V1022_COMPARE_PROTOCOL_ID,
@@ -406,6 +496,25 @@ def resolve_compare_protocol(protocol_id: str | None, bundle_revision: str | Non
     try:
         protocol = _PROTOCOLS[selected]
         if bundle_revision and bundle_revision != protocol.bundle_revision:
+            if selected == QA_CHAT_V2_CALIBRATED_COMPARE_PROTOCOL_ID and bundle_revision == "1.1.1":
+                # Existing calibrated tasks retain their original evidence rules.
+                from .visual_compare_prompt_qa_chat_v2_calibrated_r111 import (
+                    VISUAL_COMPARE_SYSTEM as legacy_system,
+                    VISUAL_COMPARE_USER as legacy_user,
+                )
+                return replace(
+                    protocol, bundle_revision=bundle_revision,
+                    system_template=legacy_system, user_template=legacy_user,
+                )
+            if selected == QA_CHAT_V2_CALIBRATED_COMPARE_PROTOCOL_ID and bundle_revision == "1.1.2":
+                from .visual_compare_prompt_qa_chat_v2_calibrated_r112 import (
+                    VISUAL_COMPARE_SYSTEM as legacy_system,
+                    VISUAL_COMPARE_USER as legacy_user,
+                )
+                return replace(
+                    protocol, bundle_revision=bundle_revision,
+                    system_template=legacy_system, user_template=legacy_user,
+                )
             if selected == V1022_COMPARE_PROTOCOL_ID and bundle_revision == "0.2.5":
                 from .visual_compare_prompt_v02_1022_r025 import (
                     VISUAL_COMPARE_SYSTEM as legacy_system,

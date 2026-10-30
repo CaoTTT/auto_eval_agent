@@ -132,8 +132,8 @@ def _cases(snapshot: dict, aligned_results: list[dict]) -> list[Case]:
     manifest = snapshot.get("protocol_manifest") or {}
     selected = snapshot.get("evaluation_profile") or manifest.get("id") or ""
     records = [snapshot, manifest, snapshot.get("options") or {}, *aligned_results]
-    chat_present = any(record.get("standard_id") in ("qa_chat_compare", "timeliness_compare") or
-                       str(record.get("evaluation_profile") or record.get("id") or "").startswith(("qa_chat_compare@", "timeliness_compare@"))
+    chat_present = any(record.get("standard_id") in ("qa_chat_compare", "timeliness_compare", "knowledge_qa_compare", "chitchat_evidence_first_flat") or
+                       str(record.get("evaluation_profile") or record.get("id") or "").startswith(("qa_chat_compare@", "timeliness_compare@", "knowledge_qa_compare@", "chitchat_evidence_first_flat@"))
                        for record in records)
     recovered = recover_protocol_identity({**snapshot, "results": aligned_results}) if chat_present else None
     if recovered is not None:
@@ -172,7 +172,7 @@ def _cases(snapshot: dict, aligned_results: list[dict]) -> list[Case]:
 
 
 def _policy(standard: str, revision: str, standard_id: str = "qa_competitor_compare") -> CompareProtocol | None:
-    if (standard_id in ("qa_chat_compare", "timeliness_compare") or standard == "0.2-simplified-1022") and revision in ("", "未记录实现版本", None):
+    if (standard_id in ("qa_chat_compare", "timeliness_compare", "knowledge_qa_compare", "chitchat_evidence_first_flat") or standard == "0.2-simplified-1022") and revision in ("", "未记录实现版本", None):
         return None
     try:
         return resolve_compare_standard(
@@ -185,6 +185,14 @@ def _policy(standard: str, revision: str, standard_id: str = "qa_competitor_comp
 
 def product_applicable(case: Case, product: int, dimension: str, protocol: CompareProtocol) -> bool | None:
     """The stored applicability, independent of score availability and gates."""
+    if protocol.standard_id == "chitchat_evidence_first_flat":
+        from .chitchat_flat_statistics import chitchat_flat_score_state
+        state = chitchat_flat_score_state(case, product, dimension, protocol)[0]
+        return True if state in ("scored", "unverifiable") else None
+    if protocol.standard_id == "knowledge_qa_compare":
+        from .knowledge_qa_statistics import knowledge_qa_score_state
+        state = knowledge_qa_score_state(case, product, dimension, protocol)[0]
+        return False if state == "not_applicable" else True if state in ("scored", "insufficient_evidence", "unverifiable") else None
     key = f"answer{product}_{dimension}_applicable" if _chat(protocol) or protocol.standard_id == "timeliness_compare" else f"{dimension}_applicable"
     value = case.result.get(key)
     return value if type(value) is bool else None
@@ -262,6 +270,14 @@ def _compact_1022_score_state(case: Case, product: int, dimension: str, protocol
 
 def score_state(case: Case, product: int, dimension: str, protocol: CompareProtocol) -> tuple[str, float | None]:
     """Mutually exclusive reasons, following the frozen protocol's actual gates."""
+    if protocol.standard_id == "chitchat_evidence_first_flat":
+        from .chitchat_flat_statistics import STATUS_LABELS, chitchat_flat_score_state
+        state, value = chitchat_flat_score_state(case, product, dimension, protocol)
+        return STATUS_LABELS.get(state, state), value
+    if protocol.standard_id == "knowledge_qa_compare":
+        from .knowledge_qa_statistics import STATUS_LABELS, knowledge_qa_score_state
+        state, value = knowledge_qa_score_state(case, product, dimension, protocol)
+        return STATUS_LABELS.get(state, state), value
     if protocol.standard_id == "timeliness_compare":
         from .timeliness_statistics import STATUS_LABELS, timeliness_score_state
         state, value = timeliness_score_state(case, product, dimension, protocol)
@@ -670,6 +686,12 @@ def _subgroups(cases: list[Case]) -> list[tuple[str, list[Case]]]:
 
 def build_compare_statistics(snapshot: dict, aligned_results: list[dict]) -> list[StatisticsTable]:
     """One worksheet, several compact tables; never consume cached summary values."""
+    if recover_protocol_identity({**snapshot, "results": aligned_results}).get("is_flat_chat"):
+        from .chitchat_flat_statistics import chitchat_flat_statistics
+        return chitchat_flat_statistics(snapshot, aligned_results)
+    if recover_protocol_identity({**snapshot, "results": aligned_results}).get("is_knowledge_qa"):
+        from .knowledge_qa_statistics import knowledge_qa_statistics
+        return knowledge_qa_statistics(snapshot, aligned_results)
     if recover_protocol_identity({**snapshot, "results": aligned_results})["is_timeliness"]:
         from .timeliness_statistics import timeliness_statistics
         return timeliness_statistics(snapshot, aligned_results)
@@ -736,6 +758,12 @@ def build_compare_statistics(snapshot: dict, aligned_results: list[dict]) -> lis
 
 
 def conversation_statistics(snapshot: dict, aligned_results: list[dict]) -> list[StatisticsTable]:
+    if recover_protocol_identity({**snapshot, "results": aligned_results}).get("is_flat_chat"):
+        from .chitchat_flat_statistics import chitchat_flat_conversation_statistics
+        return chitchat_flat_conversation_statistics(snapshot, aligned_results)
+    if recover_protocol_identity({**snapshot, "results": aligned_results}).get("is_knowledge_qa"):
+        from .knowledge_qa_statistics import knowledge_qa_conversation_statistics
+        return knowledge_qa_conversation_statistics(snapshot, aligned_results)
     if recover_protocol_identity({**snapshot, "results": aligned_results})["is_timeliness"]:
         from .timeliness_statistics import timeliness_conversation_statistics
         return timeliness_conversation_statistics(snapshot, aligned_results)

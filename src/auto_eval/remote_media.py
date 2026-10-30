@@ -4,6 +4,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import time
 import uuid
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -11,6 +12,7 @@ from urllib.parse import unquote, urlparse
 import httpx
 
 from .paths import RUNS_DIR
+from .preparation import check_preparation
 
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"}
@@ -102,6 +104,13 @@ def _download_remote_media(
         raise ValueError(f"不支持的{kind}网络地址：{url}")
     output_dir.mkdir(parents=True, exist_ok=True)
     timeout_value = _download_timeout(timeout_s)
+    deadline = time.monotonic() + timeout_value
+
+    def check_download() -> None:
+        check_preparation()
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"网络{kind}下载超时")
+
     timeout = httpx.Timeout(
         connect=min(30.0, timeout_value),
         read=timeout_value,
@@ -110,12 +119,14 @@ def _download_remote_media(
     )
     part_path: Path | None = None
     try:
+        check_download()
         with httpx.stream(
             "GET",
             url,
             follow_redirects=True,
             timeout=timeout,
         ) as response:
+            check_download()
             response.raise_for_status()
             suffix = _remote_suffix(
                 str(response.url),
@@ -130,14 +141,16 @@ def _download_remote_media(
             size = 0
             with part_path.open("wb") as output:
                 for chunk in response.iter_bytes():
+                    check_download()
                     if not chunk:
                         continue
                     output.write(chunk)
                     size += len(chunk)
             if size <= 0:
                 raise ValueError(f"下载的{kind}为空：{url}")
-            part_path.replace(final_path)
-            return final_path
+        check_download()
+        part_path.replace(final_path)
+        return final_path
     except httpx.HTTPError as exc:
         raise ValueError(f"下载网络{kind}失败：{url}（{exc}）") from exc
     finally:
@@ -190,7 +203,7 @@ def download_remote_image(
 
 
 def remove_temporary_downloads(paths: list[Path], runs_dir: Path = RUNS_DIR) -> None:
-    root = runs_dir.resolve()
+    root = (runs_dir / "downloads").resolve()
     for path in paths:
         try:
             candidate = path.resolve()

@@ -86,7 +86,7 @@ def case_comparison_tables(report: dict) -> tuple[StatisticsTable, StatisticsTab
                    ("排除原因","exclusion"),("匹配ID","match_id"),("证据引用","evidence"),
                    ("人工适用性","human_applicable"),("模型适用性","model_applicable"),
                    ("人工Gate","human_gates"),("模型Gate","model_gates"),("模型输入状态","model_input_status")]
-    if report["baseline"].get("human_standard_id") in ("qa_chat_compare", "timeliness_compare"):
+    if report["baseline"].get("human_standard_id") in ("qa_chat_compare", "timeliness_compare", "knowledge_qa_compare", "chitchat_evidence_first_flat"):
         detail_fields.extend((("人工输入状态", "human_input_status"), ("人工核验状态", "human_verification_status"),
                               ("模型核验状态", "model_verification_status"), ("模型证据", "model_evidence"),
                               ("模型标准家族", "model_standard_id"), ("模型评分状态", "model_score_status")))
@@ -99,12 +99,20 @@ def case_comparison_tables(report: dict) -> tuple[StatisticsTable, StatisticsTab
         detail_fields.extend((("模型内容冲突理由（同题跨产品）", "model_conflict_reason"),
                               ("模型内容冲突状态（程序判定）", "model_conflict_status"),
                               ("模型内容冲突（不计入数字一致性）", "model_has_conflict")))
-    if result_schema in ("qa-chat-result-2", "timeliness-result-1", "timeliness-result-2", "timeliness-result-3"):
+    if result_schema in ("qa-chat-result-2", "timeliness-result-1", "timeliness-result-2", "timeliness-result-3", "knowledge-qa-result-2", "chitchat-flat-result-1"):
         detail_fields = [("模型理由（维度共享完整原文）" if field == "model_reason" else
                           "模型证据（维度共享，保留产品归属）" if field == "model_evidence" else label, field)
                          for label, field in detail_fields]
         detail_fields.extend((("模型理由归属", "model_reason_scope"), ("模型证据归属", "model_evidence_scope"),
                               ("模型结果Schema", "model_result_schema_version")))
+    if result_schema in ("knowledge-qa-result-2", "chitchat-flat-result-1"):
+        detail_fields = [("模型证据与理由（维度共享完整原文）" if field == "model_reason" else label, field)
+                         for label, field in detail_fields if field not in
+                         ("human_gates", "model_gates", "human_verification_status", "model_verification_status",
+                          "model_evidence", "model_evidence_scope")]
+    if result_schema == "chitchat-flat-result-1":
+        detail_fields = [(label, field) for label, field in detail_fields
+                         if field not in ("human_applicable", "model_applicable")]
     groups=[(task,p["product_id"],dimension,
              f'{dimension_names.get(dimension,dimension)}\n{p["display_name"]} [{p["product_id"]}]\n任务 {task}')
             for dimension in dimensions for p in products for task in tasks]
@@ -140,7 +148,9 @@ def export_report(report: dict) -> bytes:
     protocol = baseline_protocol(baseline)
     dimension_names = baseline.get("dimension_names") or human_dimension_names(protocol)
     timeliness = protocol.standard_id == "timeliness_compare"
-    chat = protocol.standard_id in ("qa_chat_compare", "timeliness_compare")
+    knowledge = protocol.standard_id == "knowledge_qa_compare"
+    flat = protocol.standard_id == "chitchat_evidence_first_flat"
+    chat = protocol.standard_id in ("qa_chat_compare", "timeliness_compare", "knowledge_qa_compare", "chitchat_evidence_first_flat")
     names={p["product_id"]:p["display_name"] for p in baseline["products"]}
     def product(pid):return names.get(pid,pid)
     def dim(d):return dimension_names.get(d,d)
@@ -198,4 +208,19 @@ def export_report(report: dict) -> bytes:
         # Retain the historical worksheet order for existing protocols.
         sheets = {"逐题评分对比":[detail],"对比概览":[summary,coverage,states],"人机评分统计":[score,confusion],
                   "产品差距对比":[pair,ranking],"匹配与排除":[matches],"统计口径":[policy]}
+    if knowledge:
+        policy.rows = [[key, "零分母为 —；空分按不适用、证据不足、无法核验、输入失败等独立状态排除；0与准确性1.5为有效数字，不补0、不取整。"
+                        if key == "空值" else value] for key, value in policy.rows]
+        policy.rows.extend([
+            ["知识问答分制", "准确性：0、1、1.5、2；其他三维：0、1、2；不生成跨维总分，不套用旧1—5分阈值。"],
+            ["知识问答阈值", json.dumps(report["metrics"].get("score_policy", {}), ensure_ascii=False)],
+            ["理由与证据", "模型证据已合并入维度共享理由，保留完整原文，不伪造独立证据数组；本标准无Gate。"],
+        ])
+    if flat:
+        policy.rows = [[key, "空分按证据不足、输入失败等状态排除；不补分；响应/安全低分不级联清空其他维度。"
+                        if key == "空值" else value] for key, value in policy.rows]
+        policy.rows.extend([
+            ["闲聊七维分制", "响应体验/安全稳定仅1、5；其余五维1—5整数。不计算个性化或跨维总分。"],
+            ["理由与证据", "完整证据理由合并保存在DIM_reason；无额外Gate或独立证据数组。"],
+        ])
     return tables_workbook(sheets)

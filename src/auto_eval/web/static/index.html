@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <title>auto_eval 评估台</title>
-  <link rel="stylesheet" href="/static/style.css?v=20261028_history_search">
+  <link rel="stylesheet" href="/static/style.css?v=20261030_chitchat_flat">
   <style>
     .op-cards { display:flex; flex-direction:column; gap:12px; }
     .op-card { border:1px solid #e2e8f0; border-radius:8px; padding:12px; background:#fafbfc; }
@@ -477,6 +477,34 @@
         <tbody><tr v-for="row in timelinessPairedRows(summary)" :key="row.key"><td>{{row.dimension}}</td><td>A：产品{{row.a}} / B：产品{{row.b}}</td><td>{{row.count}}</td><td>{{row.averageA}}</td><td>{{row.averageB}}</td></tr></tbody>
       </table></div>
     </section>
+    <section v-if="taskIsFlatChat && summary" class="timeliness-summary flat-chat-summary">
+      <h3>闲聊七维评估 · 1–5分</h3>
+      <p class="hint">响应体验、安全稳定只取1或5分，其余五维为1–5分。各维独立评分；空分不计入均分，不作0分或5分。</p>
+      <div class="table-scroll"><table class="grid">
+        <thead><tr><th>维度</th><th>产品</th><th>均分</th><th>有效 / 样本数</th><th>覆盖率</th><th>分数分布</th><th>未评分原因</th></tr></thead>
+        <tbody><tr v-for="row in flatChatSummaryRows(summary)" :key="row.key"><td>{{row.dimension}}</td><td>产品{{row.product}}</td><td>{{row.average}}</td><td>{{row.scored}} / {{row.eligible}}</td><td>{{row.coverage}}</td><td>{{row.distribution}}</td><td>{{row.states}}</td></tr></tbody>
+      </table></div>
+      <h4>均分比值与共同有效样本</h4>
+      <p class="hint">分位值 = 产品A维度均分 ÷ 产品B维度均分 × 100%，不代表百分位数。各自有效样本不同会影响比值，因此同时列出双方共同有效样本的均分与比值；无有效分母显示N/A。</p>
+      <div class="table-scroll"><table class="grid">
+        <thead><tr><th>维度</th><th>比较产品 A/B</th><th>分位值（各自有效样本）</th><th>共同有效题数</th><th>A交集均分</th><th>B交集均分</th><th>分位值（共同样本）</th></tr></thead>
+        <tbody><tr v-for="row in flatChatRatios(summary)" :key="row.key"><td>{{row.dimension}}</td><td>产品{{row.a}} / 产品{{row.b}}</td><td>{{row.ratio}}</td><td>{{row.count}}</td><td>{{row.averageA}}</td><td>{{row.averageB}}</td><td>{{row.pairedRatio}}</td></tr></tbody>
+      </table></div>
+    </section>
+    <section v-if="taskIsKnowledgeQA && summary" class="timeliness-summary knowledge-qa-summary">
+      <h3>知识问答评估 · 0–2分</h3>
+      <p class="hint">准确性支持0、1、1.5、2分，其余三维支持0、1、2分。0分是有效评分，空分不作0分；覆盖率保留缺证、采集失败和未完成的缺口，排除明确不适用。</p>
+      <div class="table-scroll"><table class="grid">
+        <thead><tr><th>维度</th><th>产品</th><th>均分</th><th>有效 / 可评分范围</th><th>覆盖率</th><th>分数分布</th><th>未评分原因</th></tr></thead>
+        <tbody><tr v-for="row in knowledgeQASummaryRows(summary)" :key="row.key"><td>{{row.dimension}}</td><td>产品{{row.product}}</td><td>{{row.average}}</td><td>{{row.scored}} / {{row.eligible}}</td><td>{{row.coverage}}</td><td>{{row.distribution}}</td><td>{{row.states}}</td></tr></tbody>
+      </table></div>
+      <h4>同题同维共同可评分样本</h4>
+      <p class="hint">仅比较两个产品均有有效分数的相同题目，结合覆盖率阅读。不同维度不合成总分；共同有效数为0时均分为N/A。</p>
+      <div class="table-scroll"><table class="grid">
+        <thead><tr><th>维度</th><th>比较产品</th><th>共同有效题数</th><th>A交集均分</th><th>B交集均分</th></tr></thead>
+        <tbody><tr v-for="row in timelinessPairedRows(summary)" :key="row.key"><td>{{row.dimension}}</td><td>A：产品{{row.a}} / B：产品{{row.b}}</td><td>{{row.count}}</td><td>{{row.averageA}}</td><td>{{row.averageB}}</td></tr></tbody>
+      </table></div>
+    </section>
     <div ref="resultBrowser" class="result-browser">
       <div v-if="mode!=='compare'" class="skill-tabs">
         <button v-for="s in skillTabs" :key="s.key" :class="{active:activeSkill===s.key}" @click="selectSkill(s.key)">
@@ -509,7 +537,8 @@
           </label>
           <button v-if="scoreRules.length" @click="clearScoreRules">清空评分条件</button>
         </div>
-        <p class="hint">选择维度与产品，可筛选通过 / 不通过、具体分数、低分或两产品分差。分差 = |产品 A 分数 − 产品 B 分数|。</p>
+        <p v-if="taskIsKnowledgeQA" class="hint">选择维度与产品，可筛选0分、1.5分、其他有效分数或两产品分差。1.5分仅适用于准确性，空分不作0分。分差 = |产品 A 分数 − 产品 B 分数|。</p>
+        <p v-else class="hint">选择维度与产品，可筛选通过 / 不通过、具体分数、低分或两产品分差。分差 = |产品 A 分数 − 产品 B 分数|。</p>
         <div v-for="(rule, ruleIndex) in scoreRules" :key="rule.id" class="score-filter-rule">
           <span class="score-rule-number">条件 {{ ruleIndex + 1 }}</span>
           <label>维度
@@ -549,8 +578,16 @@
         <details v-if="summary && summary.by_input_modality">
           <summary>按题型查看汇总（沿用任务统一标准）</summary>
           <div v-for="(sub, key) in summary.by_input_modality" :key="key" class="query-image-panel">
-            <strong>{{ key==='text' ? '文字题' : '图文题' }}</strong> · 样本 {{ sub.total }} · 成功 {{ sub.done }} · 失败 {{ sub.failed }} <span v-if="!taskIsTimeliness">· 可比较 {{ sub.comparable }}</span>
-            <template v-if="taskIsTimeliness">
+            <strong>{{ key==='text' ? '文字题' : '图文题' }}</strong> · 样本 {{ sub.total }} · 成功 {{ sub.done }} · 失败 {{ sub.failed }} <span v-if="!taskIsTimeliness && !taskIsKnowledgeQA && !taskIsFlatChat">· 可比较 {{ sub.comparable }}</span>
+            <template v-if="taskIsFlatChat">
+              <p v-for="row in flatChatSummaryRows(sub)" :key="row.key">{{row.dimension}} · 产品{{row.product}}均分 {{row.average}} · 有效 {{row.scored}} / {{row.eligible}} · 覆盖 {{row.coverage}} · {{row.distribution}} · {{row.states}}</p>
+              <p v-for="row in flatChatRatios(sub)" :key="row.key">{{row.dimension}} · 产品{{row.a}} / 产品{{row.b}}分位值 {{row.ratio}} · 共同有效 {{row.count}} · 交集均分 {{row.averageA}} / {{row.averageB}} · 共同样本分位值 {{row.pairedRatio}}</p>
+            </template>
+            <template v-else-if="taskIsKnowledgeQA">
+              <p v-for="row in knowledgeQASummaryRows(sub)" :key="row.key">{{row.dimension}} · 产品{{row.product}}均分 {{row.average}} · 有效 {{row.scored}} / {{row.eligible}} · 覆盖 {{row.coverage}} · {{row.distribution}} · {{row.states}}</p>
+              <p v-for="row in timelinessPairedRows(sub)" :key="row.key">{{row.dimension}} · 产品{{row.a}} / 产品{{row.b}}共同有效 {{row.count}} · 交集均分 {{row.averageA}} / {{row.averageB}}</p>
+            </template>
+            <template v-else-if="taskIsTimeliness">
               <p v-if="sub.conflict_total!=null">内容冲突 · {{timelinessConflictSummary(sub)}}</p>
               <p v-for="row in timelinessSummaryRows(sub)" :key="row.key">{{row.dimension}} · 产品{{row.product}}均分 {{row.average}} · 有效 {{row.scored}} / {{row.eligible}} · 覆盖 {{row.coverage}} · 适用性待核验 {{row.unknown}} · {{row.states}}</p>
               <p v-for="row in timelinessPairedRows(sub)" :key="row.key">{{row.dimension}} · 产品{{row.a}} / 产品{{row.b}}共同有效 {{row.count}} · 交集均分 {{row.averageA}} / {{row.averageB}}</p>
@@ -592,6 +629,22 @@
                   @mouseenter="c.key !== 'latency_s' && !reasonOnlyColumn(c) && showCellTooltip($event, cell(r, c))"
                   @mouseleave="scheduleHideCellTooltip"
                 >
+                  <div v-if="flatChatColumn(r,c)" class="flat-chat-result timeliness-result">
+                    <div v-if="cellReasons(r,c).length" class="cell-reasons" :class="{'timeliness-evidence-preview':!reasonsExpanded(r,c)}">
+                      <p v-for="(reason,reasonIndex) in cellReasons(r,c)" :key="reasonIndex"><strong>{{reason.label}}</strong><span>{{reason.text}}</span></p>
+                    </div>
+                    <span v-else class="hint">未记录证据与评分理由</span>
+                    <button v-if="cellReasons(r,c).length" class="reason-toggle" :aria-expanded="reasonsExpanded(r,c)" @click="toggleCellReasons(r,c)">{{reasonsExpanded(r,c)?'收起理由':'展开完整证据与理由'}}</button>
+                    <div class="flat-chat-score-list timeliness-score-list"><span v-for="entry in flatChatProductScores(r,c)" :key="entry.product" class="timeliness-score" :class="entry.className">P{{entry.product}}：{{entry.label}}</span></div>
+                  </div>
+                  <div v-if="knowledgeQAColumn(r,c)" class="knowledge-qa-result timeliness-result">
+                    <div v-if="cellReasons(r,c).length" class="cell-reasons" :class="{'timeliness-evidence-preview':!reasonsExpanded(r,c)}">
+                      <p v-for="(reason,reasonIndex) in cellReasons(r,c)" :key="reasonIndex"><strong>{{reason.label}}</strong><span>{{reason.text}}</span></p>
+                    </div>
+                    <span v-else class="hint">未记录证据与评分理由</span>
+                    <button v-if="cellReasons(r,c).length" class="reason-toggle" :aria-expanded="reasonsExpanded(r,c)" @click="toggleCellReasons(r,c)">{{reasonsExpanded(r,c)?'收起理由':'展开完整证据与理由'}}</button>
+                    <div class="knowledge-qa-score-list timeliness-score-list"><span v-for="entry in knowledgeQAProductScores(r,c)" :key="entry.product" class="timeliness-score" :class="entry.className">P{{entry.product}}：{{entry.label}}</span></div>
+                  </div>
                   <div v-if="timelinessColumn(r,c)" class="timeliness-result">
                     <div v-if="cellReasons(r,c).length" class="cell-reasons" :class="{'timeliness-evidence-preview':!reasonsExpanded(r,c)}">
                       <p v-for="(reason,reasonIndex) in cellReasons(r,c)" :key="reasonIndex"><strong>{{reason.label}}</strong><span>{{reason.text}}</span></p>
@@ -608,11 +661,11 @@
                     <div class="timeliness-conflict-verdict"><strong>{{cell(r,c)}}</strong></div>
                   </div>
                   <div
-                    v-if="!reasonOnlyColumn(c) && !timelinessColumn(r,c) && !timelinessConflictColumn(r,c)"
+                    v-if="!reasonOnlyColumn(c) && !flatChatColumn(r,c) && !knowledgeQAColumn(r,c) && !timelinessColumn(r,c) && !timelinessConflictColumn(r,c)"
                     class="cell-clamp"
                     :class="{'cell-center': ['card_presence','superlink_presence','card_count','superlink_count','answer_coverage','needs_review','problem_solved','card_suitability','superlink_suitability','has_conflict','relevance','safety','content_quality','need_closure','personalization','latency_s'].includes(c.key)}"
                   >{{ cell(r, c) }}</div>
-                  <template v-if="!timelinessColumn(r,c) && !timelinessConflictColumn(r,c) && cellReasons(r, c).length">
+                  <template v-if="!flatChatColumn(r,c) && !knowledgeQAColumn(r,c) && !timelinessColumn(r,c) && !timelinessConflictColumn(r,c) && cellReasons(r, c).length">
                     <button class="reason-toggle" :aria-expanded="reasonsExpanded(r, c)" @click="toggleCellReasons(r, c)">{{ reasonsExpanded(r, c) ? '收起理由' : '展开理由' }}</button>
                     <div v-if="reasonsExpanded(r, c)" class="cell-reasons">
                       <p v-for="(reason, reasonIndex) in cellReasons(r, c)" :key="reasonIndex"><strong>{{ reason.label }}</strong><span>{{ reason.text }}</span></p>
@@ -704,6 +757,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20261028_snapshot_product_contexts"></script>
+  <script type="module" src="/static/app.js?v=20261028_snapshot_product_contexts_20261030_chitchat_flat"></script>
 </body>
 </html>

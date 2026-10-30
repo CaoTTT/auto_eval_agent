@@ -25,9 +25,21 @@ from .base import JudgeClient, JudgeOutputEmptyError, JudgeOutputParseError
 from .prompts import parse_json_loose, parse_json_preserving_pairs, scan_recoverable_json_object
 from .query_image_prompt import QUERY_IMAGE_INSTRUCTIONS
 from .qa_chat_schema import QA_CHAT_STANDARD_ID, QAChatObservation, finalize_qa_chat_observation
+from .chitchat_flat_schema import (
+    CHITCHAT_FLAT_RESULT_SCHEMA_VERSION, ChitchatFlatObservation,
+    expected_output_keys as chitchat_flat_output_keys,
+    parse_output as parse_chitchat_flat_output,
+    finalize_chitchat_flat_observation,
+)
 from .qa_chat_v2_schema import (
     QA_CHAT_V2_RESULT_SCHEMA_VERSION, QAChatV2Observation,
     collection_metadata, expected_output_keys, finalize_qa_chat_v2_observation,
+)
+from .knowledge_qa_schema import (
+    KNOWLEDGE_QA_RESULT_SCHEMA_VERSION, KnowledgeQAObservation,
+    expected_output_keys as knowledge_qa_output_keys,
+    parse_output as parse_knowledge_qa_output,
+    finalize_knowledge_qa_observation,
 )
 from .timeliness_schema import (
     TIMELINESS_RESULT_SCHEMA_VERSION, TimelinessObservation,
@@ -308,6 +320,16 @@ def visual_compare_result_fields(
     )
     if selected_protocol.output_contract == OUTPUT_CONTRACT_1022:
         return _compact_1022_result(observation, selected_protocol)
+    if selected_protocol.result_schema_version == CHITCHAT_FLAT_RESULT_SCHEMA_VERSION:
+        if not isinstance(observation, ChitchatFlatObservation):
+            raise ValueError("闲聊七维协议需要独立ChitchatFlatObservation结果模型")
+        return finalize_chitchat_flat_observation(
+            observation, selected_protocol, trusted_collection_metadata=trusted_collection_metadata)
+    if selected_protocol.result_schema_version == KNOWLEDGE_QA_RESULT_SCHEMA_VERSION:
+        if not isinstance(observation, KnowledgeQAObservation):
+            raise ValueError("知识问答协议需要独立KnowledgeQAObservation结果模型")
+        return finalize_knowledge_qa_observation(
+            observation, selected_protocol, trusted_collection_metadata=trusted_collection_metadata)
     if selected_protocol.result_schema_version == TIMELINESS_RESULT_SCHEMA_VERSION:
         if not isinstance(observation, TimelinessObservation):
             raise ValueError("时效性协议需要独立TimelinessObservation结果模型")
@@ -395,15 +417,19 @@ class VisualCompareJudge:
         )
         is_chat_v2 = self.protocol.result_schema_version == QA_CHAT_V2_RESULT_SCHEMA_VERSION
         is_timeliness = self.protocol.standard_id == "timeliness_compare"
-        is_strict_output = is_chat_v2 or is_timeliness
+        is_knowledge_qa = self.protocol.result_schema_version == KNOWLEDGE_QA_RESULT_SCHEMA_VERSION
+        is_flat_chat = self.protocol.result_schema_version == CHITCHAT_FLAT_RESULT_SCHEMA_VERSION
+        is_strict_output = is_chat_v2 or is_timeliness or is_knowledge_qa or is_flat_chat
         timeliness_contracts = {
             TIMELINESS_RESULT_SCHEMA_VERSION: (timeliness_output_keys, timeliness_allowed_keys),
             TIMELINESS_V2_RESULT_SCHEMA_VERSION: (timeliness_v2_output_keys, timeliness_v2_allowed_keys),
             TIMELINESS_V1_RESULT_SCHEMA_VERSION: (timeliness_v1_output_keys, timeliness_v1_output_keys),
+            KNOWLEDGE_QA_RESULT_SCHEMA_VERSION: (knowledge_qa_output_keys, knowledge_qa_output_keys),
+            CHITCHAT_FLAT_RESULT_SCHEMA_VERSION: (chitchat_flat_output_keys, chitchat_flat_output_keys),
         }
         strict_output_keys, allowed_output_keys = timeliness_contracts.get(
             self.protocol.result_schema_version, (expected_output_keys, expected_output_keys))
-        output_label = "时效性评估V1" if is_timeliness else "问答闲聊V2"
+        output_label = "闲聊七维" if is_flat_chat else "知识问答V1" if is_knowledge_qa else "时效性评估V1" if is_timeliness else "问答闲聊V2"
         trusted_collection = collection_metadata(trusted_collection_metadata, actual_product_count) if is_strict_output else None
         compact_1022 = self.protocol.output_contract == OUTPUT_CONTRACT_1022
         product_contexts_only = compact_1022 and self.protocol.bundle_revision in {"0.2.4", "0.2.5", "0.2.6"}
@@ -429,6 +455,8 @@ class VisualCompareJudge:
                     actual_product_count,
                 ),
             }
+        elif is_knowledge_qa or is_flat_chat:
+            output_options = {"require_complete": True}
         if evidence_mode not in ("video_frames", "long_screenshot"):
             raise ValueError("未知视觉证据模式")
         if type(include_prior_knowledge) is not bool:
@@ -528,7 +556,7 @@ class VisualCompareJudge:
                     )
                     for path in frames
                 )
-                if query_metas or is_timeliness:
+                if query_metas or is_timeliness or is_knowledge_qa:
                     for frame_no, (path, encoded) in enumerate(zip(frames, encoded_frames), 1):
                         content_parts.extend([
                             {"type": "text", "text": f"产品{product_no}回答录屏第{frame_no}帧开始"},
@@ -568,7 +596,7 @@ class VisualCompareJudge:
             if conversation_manifest:
                 binding["conversation_input_manifest_sha256"] = conversation_manifest
             else:
-                actual_parts = content_parts if is_screenshot or query_metas or is_timeliness else [
+                actual_parts = content_parts if is_screenshot or query_metas or is_timeliness or is_knowledge_qa else [
                     {"type": "text", "text": user},
                     *({"type": "image_url", "image_url": {"url": url}} for url in user_images),
                 ]
@@ -585,7 +613,7 @@ class VisualCompareJudge:
                                   for turn in conversation_input["turns"]
                                   for n in range(1, actual_product_count + 1)] if conversation_input else
                                  [{"product_no": n, "metadata": meta} for n, meta in enumerate(metas, 1)])
-            request_parts = content_parts if is_screenshot or query_metas or is_timeliness else [
+            request_parts = content_parts if is_screenshot or query_metas or is_timeliness or is_knowledge_qa else [
                 {"type": "text", "text": user},
                 *({"type": "image_url", "image_url": {"url": url}} for url in user_images),
             ]
@@ -610,7 +638,7 @@ class VisualCompareJudge:
             audit["record_status"] = "model_call_started"
             if evidence_callback:
                 evidence_callback(audit)
-        if is_screenshot or query_metas or is_timeliness:
+        if is_screenshot or query_metas or is_timeliness or is_knowledge_qa:
             raw_output = await self.client.complete(
                 system, user, stream_callback=stream_callback,
                 content_parts=content_parts, image_metadata=image_metadata,
@@ -630,7 +658,38 @@ class VisualCompareJudge:
                 evidence_callback(audit)
         repaired = ""
         local_format_recovery_steps: list[str] = []
-        if strict_1022:
+        if is_knowledge_qa or is_flat_chat:
+            # These rubrics have exactly one semantic response. Their
+            # independent parser rejects duplicate keys and invalid numbers;
+            # no repair request can invent a missing reason, status or score.
+            parsed_pairs = None
+            original_parsed_pairs = None
+            repair_parsed_pairs = None
+            try:
+                parsed_pairs = parse_json_preserving_pairs(raw_output) if isinstance(raw_output, str) else None
+                original_parsed_pairs = parsed_pairs
+                parse_independent = parse_chitchat_flat_output if is_flat_chat else parse_knowledge_qa_output
+                data = parse_independent(raw_output, actual_product_count).model_dump()
+            except (ValueError, ValidationError) as exc:
+                category = "empty_response" if not isinstance(raw_output, str) or not raw_output.strip() else "schema"
+                error_cls = JudgeOutputEmptyError if category == "empty_response" else JudgeOutputParseError
+                error = error_cls(
+                    f"{output_label}输出不符合严格JSON合同：{exc}",
+                    raw_output=raw_output or "", repair_output="", judge=self.client.cfg.name,
+                    model=self.client.model, error_category=category,
+                )
+                error.raw_model_output = raw_output or ""
+                error.raw_key_pairs = parsed_pairs["raw_key_pairs"] if parsed_pairs else []
+                error.original_raw_key_pairs = error.raw_key_pairs
+                error.locally_repaired_key_pairs = []
+                error.repair_key_pairs = []
+                error.repair_locally_repaired_key_pairs = []
+                error.duplicate_keys = parsed_pairs["duplicate_keys"] if parsed_pairs else []
+                error.structural_diagnostics = [str(exc)]
+                error.trusted_collection_metadata = trusted_collection
+                error.input_manifest_sha256 = v2_input_manifest
+                raise error from exc
+        elif strict_1022:
             if not isinstance(raw_output, str) or not raw_output.strip():
                 error = JudgeOutputEmptyError(
                     "裁判返回空白响应，未生成最终JSON；不能通过格式修复补写评测结果",
@@ -812,7 +871,7 @@ class VisualCompareJudge:
                           repair_locally_repaired_key_pairs=repair_parsed_pairs["locally_repaired_key_pairs"] if repair_parsed_pairs else [],
                           duplicate_keys=[], structural_diagnostics=parsed_pairs["structural_diagnostics"],
                           locally_repaired_json=parsed_pairs["locally_repaired"])
-            if is_timeliness:
+            if is_timeliness or is_knowledge_qa:
                 # Audit time is never evidence of when a product was tested.
                 result["evaluation_run_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
                 result["test_time_policy"] = "provided_evidence_only"

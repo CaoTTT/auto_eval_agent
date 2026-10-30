@@ -36,7 +36,7 @@ from ..judges.compare_protocols import (
 from ..media import probe_duration
 from ..paths import RUNS_DIR
 from ..query_images import normalize_query_input, PREPARED_FIELDS, prepare_query_images, QueryImageError
-from ..remote_media import is_remote_url
+from ..remote_media import TEMPORARY_DOWNLOAD_PATHS_FIELD, is_remote_url
 from ..conversation import normalize_turn, validate_conversations, is_conversation, DIAGNOSTIC_FIELDS
 from ..preparation import run_preparation
 from .parse_input import Mode, normalize_compare_evidence, parse_csv, parse_jsonl, parse_text
@@ -265,6 +265,10 @@ def _resolve_operation_video_path(raw_path: str) -> Path:
 
 def _validate_eval_request(req: EvalReq, app_cfg, *, previous_items=None) -> None:
     """提交前校验：compare 模式支持完整的2或3产品同类视觉证据。"""
+    # Cleanup ownership is assigned by media preparation, never by a client.
+    # Apply this before the mode-specific return: both modes share teardown.
+    for item in req.items:
+        item.pop(TEMPORARY_DOWNLOAD_PATHS_FIELD, None)
     selected = req.options.get("judges") or (
         [app_cfg.judges[0].name] if app_cfg.judges else []
     )

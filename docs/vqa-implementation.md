@@ -24,7 +24,7 @@
 - `POST /api/upload/query-image` 接收文件。`GET /api/query-images/{image_id}` 只访问已登记图片；`?original=true` 下载原文件。没有任意路径文件预览接口。
 - 本地路径默认限项目目录和 runs。外部题图目录配置在 `config/visual_modes/rich_content.yaml` 的 `query_images.allowed_roots`；回答视频/截图继续沿用 `OPERATION_VIDEO_ROOTS`。
 - HTTP(S) URL 只在评测准备阶段下载，历史记录保留原始 URL。录屏下载到 `runs/downloads/` 并在单题结束后清理；回答长截图按内容 SHA-256 固化为不可变快照；题图固化到 `runs/query_images/`，原始 URL 记录在 `source_url`。仅识别 `http://` 和 `https://`，不把 `data:`、`file:` 等当作远程媒体。
-- 远程下载失败、内容为空或图片无法解码会阻断该题，不静默跳过。下载超时默认 120 秒，可用 `AUTO_EVAL_MEDIA_DOWNLOAD_TIMEOUT_S` 调整；服务部署方应只接受可信数据源，并注意 HTTP(S) URL 下载带来的网络访问风险。
+- 远程下载失败、内容为空或图片无法解码会阻断该题，不静默跳过。下载总时长默认 120 秒，可用 `AUTO_EVAL_MEDIA_DOWNLOAD_TIMEOUT_S` 调整；下载逐块检查准备超时与暂停，异常时清理未完成文件。录屏在正常结束、暂停或取消时均释放临时文件，清理仅接受运行时登记的 `runs/downloads/` 路径，外部提交不能指定清理文件。服务部署方应只接受可信数据源，并注意 HTTP(S) URL 下载带来的网络访问风险。
 - 配置中的数量、尺寸、上下文和请求体预算是本地保守限制，不代表特定厂商的承诺或精确计费；使用真实模型前应按实际网关核实。
 - 补跑重新判断，复用固化题图而不缓存评分。同 ID 更新是整条替换；已有图文题必须显式传 `query_images`，移除用 `[]`，并清除旧结果。运行中的图文任务暂不接受更新，避免不同图片版本并发覆盖。
 - 旧 bundle `0.2.0/0.3.0` 可继续文字题重跑；向旧任务新增题图须新建任务。多题 compare 不注入前题总结。已有 rich_content 多轮链路保持原行为。
