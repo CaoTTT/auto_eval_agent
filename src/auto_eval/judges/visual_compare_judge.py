@@ -32,6 +32,7 @@ from .chitchat_flat_schema import (
     parse_output as parse_chitchat_flat_output,
     finalize_chitchat_flat_observation,
 )
+from .chitchat_flat_recovery import recover_chitchat_flat_output
 from .qa_chat_v2_schema import (
     QA_CHAT_V2_RESULT_SCHEMA_VERSION, QAChatV2Observation,
     collection_metadata, expected_output_keys, finalize_qa_chat_v2_observation,
@@ -735,7 +736,8 @@ class VisualCompareJudge:
         local_format_recovery_steps: list[str] = []
         if is_knowledge_qa or is_flat_chat:
             # These rubrics have exactly one semantic response. Their
-            # independent parser rejects duplicate keys and invalid numbers;
+            # independent parser rejects duplicate keys and invalid numbers.
+            # Flat chat additionally permits a narrow local format recovery;
             # no repair request can invent a missing reason, status or score.
             parsed_pairs = None
             original_parsed_pairs = None
@@ -744,7 +746,23 @@ class VisualCompareJudge:
                 parsed_pairs = parse_json_preserving_pairs(raw_output) if isinstance(raw_output, str) else None
                 original_parsed_pairs = parsed_pairs
                 parse_independent = parse_chitchat_flat_output if is_flat_chat else parse_knowledge_qa_output
-                data = parse_independent(raw_output, actual_product_count).model_dump()
+                try:
+                    data = parse_independent(raw_output, actual_product_count).model_dump()
+                except (ValueError, ValidationError):
+                    if not is_flat_chat:
+                        raise
+                    recovered = recover_chitchat_flat_output(raw_output, actual_product_count)
+                    data = recovered["observation"].model_dump()
+                    local_format_recovery_steps = recovered["local_format_recovery_steps"]
+                    original_parsed_pairs = {
+                        "raw_key_pairs": recovered["raw_key_pairs"],
+                        "locally_repaired_key_pairs": recovered["locally_repaired_key_pairs"],
+                    }
+                    parsed_pairs = {
+                        **original_parsed_pairs,
+                        "locally_repaired": bool(local_format_recovery_steps),
+                        "duplicate_keys": [], "structural_diagnostics": [],
+                    }
             except (ValueError, ValidationError) as exc:
                 category = "empty_response" if not isinstance(raw_output, str) or not raw_output.strip() else "schema"
                 error_cls = JudgeOutputEmptyError if category == "empty_response" else JudgeOutputParseError
@@ -946,6 +964,11 @@ class VisualCompareJudge:
                           repair_locally_repaired_key_pairs=repair_parsed_pairs["locally_repaired_key_pairs"] if repair_parsed_pairs else [],
                           duplicate_keys=[], structural_diagnostics=parsed_pairs["structural_diagnostics"],
                           locally_repaired_json=parsed_pairs["locally_repaired"])
+            if is_flat_chat and local_format_recovery_steps:
+                result.update(
+                    local_format_recovery_version="chitchat-flat-format-recovery-1",
+                    local_format_recovery_steps=local_format_recovery_steps,
+                )
             if is_timeliness or is_knowledge_qa:
                 # Audit time is never evidence of when a product was tested.
                 result["evaluation_run_at"] = datetime.now().astimezone().isoformat(timespec="seconds")

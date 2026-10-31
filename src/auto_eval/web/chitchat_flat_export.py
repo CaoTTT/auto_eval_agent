@@ -49,6 +49,9 @@ def chitchat_flat_export_rows(snapshot: dict, results: list[dict]) -> list[dict]
                            ("prompt_sha256", "Prompt SHA256"), ("input_manifest_sha256", "输入指纹"),
                            ("trusted_collection_metadata", "可信采集元数据"),
                            ("evaluation_run_at", "评估运行时间（非产品测试时间）"),
+                           ("locally_repaired_json", "本地格式恢复"),
+                           ("local_format_recovery_version", "格式恢复版本"),
+                           ("local_format_recovery_steps", "格式恢复步骤"),
                            ("normalization_diagnostics", "状态规范化诊断"), ("structural_diagnostics", "结构诊断")):
             row[label] = result.get(key)
         row["评估运行时间（非产品测试时间）"] = result.get("evaluation_run_at") or result.get("evaluation_datetime")
