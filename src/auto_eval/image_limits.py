@@ -1,4 +1,4 @@
-"""Frozen provider capabilities and durable image/request diagnostics."""
+"""Configured image/request diagnostics independent of the API domain."""
 from __future__ import annotations
 
 import base64
@@ -13,47 +13,54 @@ from .conversation import digest
 from .long_screenshot import data_url_size, MIME_TYPES
 from .query_images import QueryImageError
 
-SOURCE = "https://help.aliyun.com/zh/model-studio/vision"
-PROFILE_VERSION = "bailian-base64-2026-09-18-v1"
+PROFILE_VERSION = "local-config-v1"
 
 
 def resolve_image_limits(judge, profile) -> dict:
     host = (urlparse(judge.base_url or "").hostname or "").lower()
-    model = (judge.model or "").lower()
-    verified = (host in {"dashscope.aliyuncs.com", "dashscope-intl.aliyuncs.com", "dashscope-us.aliyuncs.com"}
-                or host.endswith(".maas.aliyuncs.com")) and model.startswith(("qwen3.5-", "qwen3.6-", "qwen3.7-", "qwen3.8-", "qwen3-vl-"))
-    cap = (16_777_216 if judge.vl_high_resolution_images else 2_621_440) if verified else None
-    result = {"provider": "bailian" if verified else "unverified", "model": judge.model,
+    result = {"provider": "configured", "model": judge.model,
               "endpoint_host": host, "api_family": judge.runner, "transport": "base64",
-              "capability_verified": bool(verified), "effective_pixel_cap": cap,
+              # Kept for compatibility with frozen manifests. "Verified" no longer
+              # gates an endpoint, because custom OpenAI-compatible gateways are valid.
+              "capability_verified": False, "effective_pixel_cap": None,
               "vl_high_resolution_images": judge.vl_high_resolution_images,
-              "official_rules": {"file_bytes": 20_000_000, "data_uri_bytes": 20_000_000,
-                  "min_edge": 11, "aspect_ratio": 200, "request_images": 250} if verified else {},
-              "source_url": SOURCE if verified else None, "verified_at": "2026-09-18" if verified else None,
-              "byte_interpretation": "20 MB; conservative decimal bytes (provider unit unspecified)",
+              "official_rules": {},
+              "source_url": None, "verified_at": None,
+              "byte_interpretation": "local visual profile; provider limits are not asserted",
               "local_guardrails": profile.query_images.model_dump(),
               "answer_guardrails": profile.long_screenshot.model_dump(),
-              "limits_profile_version": PROFILE_VERSION if verified else "unverified-v1"}
+              "limits_profile_version": PROFILE_VERSION}
     result["limits_profile_sha256"] = digest(result)
     return result
 
 
 def effective_profile(profile, limits: dict):
+    """Apply frozen hard rules when present, otherwise use local configuration."""
     cap = limits.get("effective_pixel_cap")
-    if not limits.get("capability_verified") or not cap:
-        raise QueryImageError("image_limits_unverified", "官方图片限制及有效视觉阈值未核验，严格原图多轮评估已阻断")
-    hard = limits["official_rules"]
+    hard = limits.get("official_rules") or {}
+    hard_file_bytes = hard.get("file_bytes")
+    hard_data_uri_bytes = hard.get("data_uri_bytes")
+    hard_request_images = hard.get("request_images")
+    hard_min_edge = hard.get("min_edge")
     q = profile.query_images.model_copy(update={
-        "max_pixels": min(profile.query_images.max_pixels, cap),
-        "max_file_bytes": min(profile.query_images.max_file_bytes, hard["file_bytes"]),
-        "max_data_url_bytes": min(profile.query_images.max_data_url_bytes, hard["data_uri_bytes"] + 1),
-        "max_request_images": min(profile.query_images.max_request_images, hard["request_images"]),
-        "min_edge": max(profile.query_images.min_edge, hard["min_edge"]),
+        "max_pixels": min(profile.query_images.max_pixels, cap) if cap else profile.query_images.max_pixels,
+        "max_file_bytes": min(profile.query_images.max_file_bytes, hard_file_bytes)
+            if hard_file_bytes else profile.query_images.max_file_bytes,
+        "max_data_url_bytes": min(profile.query_images.max_data_url_bytes, hard_data_uri_bytes + 1)
+            if hard_data_uri_bytes else profile.query_images.max_data_url_bytes,
+        "max_request_images": min(profile.query_images.max_request_images, hard_request_images)
+            if hard_request_images else profile.query_images.max_request_images,
+        "min_edge": max(profile.query_images.min_edge, hard_min_edge)
+            if hard_min_edge else profile.query_images.min_edge,
     })
     s = profile.long_screenshot.model_copy(update={
-        "max_pixels": min(profile.long_screenshot.max_pixels, cap),
-        "max_data_url_bytes": min(profile.long_screenshot.max_data_url_bytes, hard["data_uri_bytes"] + 1,
-                                  data_url_size(hard["file_bytes"]) + 1),
+        "max_pixels": min(profile.long_screenshot.max_pixels, cap)
+            if cap else profile.long_screenshot.max_pixels,
+        "max_data_url_bytes": min(
+            profile.long_screenshot.max_data_url_bytes,
+            hard_data_uri_bytes + 1 if hard_data_uri_bytes else profile.long_screenshot.max_data_url_bytes,
+            data_url_size(hard_file_bytes) + 1 if hard_file_bytes else profile.long_screenshot.max_data_url_bytes,
+        ),
     })
     return profile.model_copy(update={"query_images": q, "long_screenshot": s})
 
@@ -70,7 +77,7 @@ def inspect_asset(path, identity: dict, limits: dict) -> tuple[dict, list[dict]]
     observed = {"pixels": width * height, "file_bytes": len(raw), "data_uri_bytes": asset["data_uri_bytes"],
                 "min_edge": min(width, height), "aspect_ratio": max(width, height) / min(width, height)}
     rules = [(key, value, "official_hard", ">=" if key == "min_edge" else "<=")
-             for key, value in limits["official_rules"].items() if key in observed]
+             for key, value in (limits.get("official_rules") or {}).items() if key in observed]
     if limits.get("effective_pixel_cap"):
         rules.append(("pixels", limits["effective_pixel_cap"], "effective_vision", "<="))
     local = limits["local_guardrails"] if identity["image_role"] == "query_image" else limits["answer_guardrails"]
@@ -88,8 +95,8 @@ def inspect_asset(path, identity: dict, limits: dict) -> tuple[dict, list[dict]]
             "observed": value, "limit": limit, "comparator": comparator,
             "unit": "bytes" if "bytes" in metric else "px" if metric in {"pixels", "min_edge"} else "ratio",
             "limit_kind": kind, "severity": "warning", "status": "blocked", "action": "blocked",
-            "source_url": limits["source_url"] if kind != "local_guardrail" else None,
-            "verified_at": limits["verified_at"] if kind != "local_guardrail" else None,
+            "source_url": limits.get("source_url") if kind != "local_guardrail" else None,
+            "verified_at": limits.get("verified_at") if kind != "local_guardrail" else None,
             "client_resized": False, "limits_profile_version": limits["limits_profile_version"]}
         finding["finding_id"] = digest([identity, asset["original_sha256"], limits["limits_profile_sha256"], metric, kind])
         findings.append(finding)
