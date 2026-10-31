@@ -158,13 +158,32 @@ def test_lossless_split_findings_keep_identity_and_pixels(data):
         assert joined.tobytes() == original.tobytes()
 
 
-def test_unknown_provider_not_assigned_bailian_limits(data):
-    data[2].base_url = "https://api.siliconflow.cn/v1"
+def test_any_api_domain_uses_local_image_limits(data):
+    data[2].base_url = "http://10.97.134.88:5162/v1"
     items, service = prepare(data)
-    with pytest.raises(Exception, match="未核验"):
-        service.prepare(items[0])
+    bundle = service.prepare(items[0])
+    request(bundle)
+    assert service.limits["provider"] == "configured"
+    assert service.limits["official_rules"] == {}
     assert service.limits["effective_pixel_cap"] is None
-    assert items[0]["image_findings"][0]["code"] == "image_limits_unverified"
+    assert service.limits["limits_profile_version"] == "local-config-v1"
+    assert not any(f["code"] == "image_limits_unverified" for f in items[0]["image_findings"])
+
+
+def test_legacy_unverified_manifest_falls_back_to_local_limits(data):
+    items, profile, judge = data
+    limits = resolve_image_limits(judge, profile)
+    legacy_limits = {
+        **limits,
+        "provider": "unverified",
+        "capability_verified": False,
+        "effective_pixel_cap": None,
+        "official_rules": {},
+        "limits_profile_version": "unverified-v1",
+    }
+    service = ConversationPreparation(items, "legacy", profile, legacy_limits)
+    request(service.prepare(items[0]))
+    assert items[0]["input_diagnostic_status"] != "blocked"
 
 
 def test_total_request_budget_checked_without_new_query_images(data):

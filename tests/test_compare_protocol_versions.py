@@ -5,6 +5,7 @@ from fastapi import HTTPException
 from auto_eval.judges.compare_protocols import (
     DEFAULT_COMPARE_PROTOCOL_ID,
     V02_PLUS_COMPARE_PROTOCOL_ID,
+    V02_PRIOR_KNOWLEDGE_COMPARE_PROTOCOL_ID,
     V03_COMPARE_PROTOCOL_ID,
     V02_CALIBRATED_COMPARE_PROTOCOL_ID,
     V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID,
@@ -46,6 +47,7 @@ def test_registry_defaults_to_stable_v02_and_exposes_experimental_versions():
     assert {profile.id for profile in list_compare_protocols()} == {
         DEFAULT_COMPARE_PROTOCOL_ID,
         V02_PLUS_COMPARE_PROTOCOL_ID,
+        V02_PRIOR_KNOWLEDGE_COMPARE_PROTOCOL_ID,
         V03_COMPARE_PROTOCOL_ID,
         V02_CALIBRATED_COMPARE_PROTOCOL_ID,
         V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID,
@@ -63,6 +65,14 @@ def test_registry_defaults_to_stable_v02_and_exposes_experimental_versions():
     assert plus.bundle_revision == "0.2.3"
     assert plus.observation_model is VisualCompareObservationV02
     assert plus.require_response_pass is True
+    prior_knowledge = resolve_compare_protocol(V02_PRIOR_KNOWLEDGE_COMPARE_PROTOCOL_ID)
+    assert prior_knowledge.display == "垂域先验知识测试"
+    assert prior_knowledge.status == "experimental"
+    assert prior_knowledge.selectable is True
+    assert prior_knowledge.standard_version == "0.2-simplified-prior-knowledge"
+    assert prior_knowledge.bundle_revision == "0.2.7"
+    assert prior_knowledge.observation_model is VisualCompareObservationV02
+    assert prior_knowledge.require_response_pass is True
     calibrated = resolve_compare_protocol(V02_CALIBRATED_COMPARE_PROTOCOL_ID)
     assert calibrated.status == "experimental"
     assert calibrated.public_metadata()["input_modalities"] == ["text", "text_image"]
@@ -168,10 +178,22 @@ async def test_eval_api_freezes_selected_protocol_on_new_task(monkeypatch):
             ))
         assert error.value.status_code == 422
         assert "暂不可用于新建任务" in error.value.detail
-    assert len(created) == 2
+    prior_knowledge_response = await server_module.api_eval(
+        server_module.EvalReq(
+            mode="compare",
+            items=[item],
+            evaluation_profile=V02_PRIOR_KNOWLEDGE_COMPARE_PROTOCOL_ID,
+        )
+    )
+    assert prior_knowledge_response["evaluation_profile"] == V02_PRIOR_KNOWLEDGE_COMPARE_PROTOCOL_ID
+    assert created[-1].protocol_manifest["display"] == "垂域先验知识测试"
+    assert created[-1].protocol_manifest["bundle_revision"] == "0.2.7"
+    assert len(created) == 3
     public = server_module.api_config()["evaluation_profiles"]
     assert [p["id"] for p in public] == [
-        DEFAULT_COMPARE_PROTOCOL_ID, V02_PLUS_COMPARE_PROTOCOL_ID, V03_COMPARE_PROTOCOL_ID,
+        DEFAULT_COMPARE_PROTOCOL_ID, V02_PLUS_COMPARE_PROTOCOL_ID,
+        V02_PRIOR_KNOWLEDGE_COMPARE_PROTOCOL_ID,
+        V03_COMPARE_PROTOCOL_ID,
         V02_CALIBRATED_COMPARE_PROTOCOL_ID,
         V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID,
         QA_CHAT_COMPARE_PROTOCOL_ID,

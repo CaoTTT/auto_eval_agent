@@ -478,6 +478,7 @@ class VisualCompareJudge:
         frames3: list[str] | None = None,
         product_count: Literal[2, 3] | None = None,
         evidence_mode: str = "video_frames",
+        include_prior_knowledge: bool = False,
         screenshot_metas: list[dict] | None = None,
         query_image_meta: list[dict] | None = None,
         conversation_input: dict | None = None,
@@ -538,6 +539,8 @@ class VisualCompareJudge:
             output_options = {"require_complete": True}
         if evidence_mode not in ("video_frames", "long_screenshot"):
             raise ValueError("未知视觉证据模式")
+        if type(include_prior_knowledge) is not bool:
+            raise ValueError("include_prior_knowledge 必须是布尔值")
         is_screenshot = evidence_mode == "long_screenshot"
         metas = screenshot_metas or []
         if is_screenshot and len(metas) != actual_product_count:
@@ -548,6 +551,7 @@ class VisualCompareJudge:
             persona=self.client.persona,
             product_count=actual_product_count,
             evidence_mode=evidence_mode,
+            include_prior_knowledge=include_prior_knowledge,
         )
         query_metas = query_image_meta or []
         if len(query_metas) > 1 and conversation_input is None:
