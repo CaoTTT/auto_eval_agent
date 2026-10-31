@@ -29,6 +29,7 @@ from typing import Awaitable, Callable
 from ..paths import RUNS_DIR
 from ..preparation import PreparationLimiter
 from .history import save_task
+from .prompt_names import prompt_display_fields
 from .persistence import drain_task_saves, queue_task_save, wait_task_save
 from .tasks import Task, retire_task
 
@@ -705,6 +706,10 @@ class EvalScheduler:
         }
         if task.evaluation_profile:
             entry["evaluation_profile"] = task.evaluation_profile
+            entry.update(prompt_display_fields({
+                "mode": task.mode, "evaluation_profile": task.evaluation_profile,
+                "protocol_manifest": task.protocol_manifest,
+            }))
         if task.judge_runtime:
             entry["judge_runtime"] = task.judge_runtime
         if job.kind == "retry":

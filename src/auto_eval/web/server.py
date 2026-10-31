@@ -69,6 +69,7 @@ from .scheduler import (
     apply_settings, load_persisted_settings, persist_settings,
 )
 from .exports import XlsxExports
+from .prompt_names import prompt_name, prompt_name_catalog, prompt_display_fields
 from .dataset_media import DatasetMedia, file_hash
 from .source_files import prepare_task_sources, source_file_path, store_upload
 from .human_baselines import HumanStore
@@ -186,7 +187,8 @@ def _compare_protocol_or_422(protocol_id: str | None, *, require_selectable: boo
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     if require_selectable and not protocol.selectable:
-        raise HTTPException(422, f"评测标准「{protocol.display}」暂不可用于新建任务，请选择其他版本")
+        label = prompt_name(protocol.id, protocol.bundle_revision, fallback=protocol.display)
+        raise HTTPException(422, f"评测标准「{label}」暂不可用于新建任务，请选择其他版本")
     return protocol
 
 
@@ -404,9 +406,11 @@ def api_config():
             for j in c.judges
         ],
         "evaluation_profiles": [
-            {**profile.public_metadata(), "selectable": profile.selectable}
+            {**profile.public_metadata(), "selectable": profile.selectable,
+             "canonical_name": prompt_name(profile.id, profile.bundle_revision, fallback=profile.display)}
             for profile in list_compare_protocols()
         ],
+        "prompt_name_catalog": prompt_name_catalog(),
     }
 
 
@@ -598,6 +602,8 @@ async def api_eval(req: EvalReq):
         "queue_position": queue_position,
         "evaluation_profile": task.evaluation_profile,
         "protocol_manifest": task.protocol_manifest,
+        **prompt_display_fields({"mode": task.mode, "evaluation_profile": task.evaluation_profile,
+                                 "protocol_manifest": task.protocol_manifest}),
         "judge_runtime": task.judge_runtime,
         **(product_order_metadata(task.options.get("reverse_product_order", False),
                                  max((item.get("product_count", 2) for item in task.items), default=2))
@@ -974,6 +980,8 @@ async def api_eval_items(req: EvalItemsReq):
         "added_ids": added_ids,
         "total_items": len(task.items),
         "evaluation_profile": task.evaluation_profile,
+        **prompt_display_fields({"mode": task.mode, "evaluation_profile": task.evaluation_profile,
+                                 "protocol_manifest": task.protocol_manifest}),
     }
 
 
@@ -1245,6 +1253,10 @@ async def api_dataset(task_id: str):
     fields.update(f"{name}{n}" for name in ("video", "screenshot", "answer", "context", "screenshot_meta", "video_source")
                   for n in range(1, 4))
     return {"task_id": task.id, "dataset_name": task.dataset_name, "created_at": task.created_at,
+            "mode": task.mode, "evaluation_profile": task.evaluation_profile,
+            "protocol_manifest": copy.deepcopy(task.protocol_manifest),
+            **prompt_display_fields({"mode": task.mode, "evaluation_profile": task.evaluation_profile,
+                                     "protocol_manifest": task.protocol_manifest}),
             "source_files": copy.deepcopy(task.source_files),
             "note": task.note, "items": copy.deepcopy([
                 {key: value for key, value in item.items() if key in fields} for item in task.items

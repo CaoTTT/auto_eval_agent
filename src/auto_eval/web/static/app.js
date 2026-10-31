@@ -1,4 +1,4 @@
-import { createApp, ref, computed, onMounted, onUnmounted, nextTick, selectEvidenceMode, isRemoteUrl, productContextValue, missingProductContexts } from "./compare-data.js?v=20261028_snapshot_product_contexts_20261030_chitchat_flat_product_order";
+import { createApp, ref, computed, onMounted, onUnmounted, nextTick, selectEvidenceMode, isRemoteUrl, productContextValue, missingProductContexts } from "./compare-data.js?v=20261031_prompt_names_product_order";
 
 createApp({
   watch: {
@@ -67,8 +67,10 @@ createApp({
       if (profile?.supports_thinking === true && typeof thinking === "boolean") enableThinking.value = thinking;
     }
     const evaluationProfiles = ref([]);
+    const promptNameCatalog = ref([]);
     const selectedEvaluationProfile = ref("");
     const taskEvaluationProfile = ref("");
+    const taskEvaluationProfileDisplay = ref("");
     const taskProtocolManifest = ref({});
     const taskProtocolDiagnostics = ref([]);
     const taskIsChat = computed(() => (taskEvaluationProfile.value || '').startsWith('qa_chat_compare@'));
@@ -258,6 +260,8 @@ createApp({
     function setTaskProtocol(data) {
       taskEvaluationProfile.value = data.evaluation_profile || data.protocol_manifest?.id || (data.mode === 'compare' ? defaultEvaluationProfile() : '');
       taskProtocolManifest.value = data.protocol_manifest || {};
+      taskEvaluationProfileDisplay.value = evaluationProfileLabel({...data,
+        evaluation_profile:taskEvaluationProfile.value, protocol_manifest:taskProtocolManifest.value});
       taskProtocolDiagnostics.value = data.protocol_diagnostics || [];
       taskProductOrderNote.value = data.mode === 'compare'
         ? data.judge_product_order_note || (data.options?.reverse_product_order === true
@@ -1126,13 +1130,26 @@ createApp({
       return id && !evaluationProfileDisabled(id) ? id : defaultEvaluationProfile();
     }
 
-    function evaluationProfileLabel(id) {
+    function evaluationProfileLabel(value, bundleRevision) {
+      const record = value && typeof value === 'object' ? value : {evaluation_profile:value};
+      if (record.evaluation_profile_display) return record.evaluation_profile_display;
+      const manifest = record.protocol_manifest || {};
+      const id = record.evaluation_profile || manifest.id;
       if (!id) return "—";
-      return evaluationProfiles.value.find((profile) => profile.id === id)?.display || id;
+      const revisions = [...new Set([bundleRevision,record.bundle_revision,manifest.bundle_revision].filter(Boolean))];
+      const revision = record.protocol_name_identity_conflict !== true && revisions.length === 1
+        && (!manifest.id || manifest.id === id) ? revisions[0] : null;
+      const named = revision && promptNameCatalog.value.find(entry => entry.evaluation_profile === id
+        && entry.bundle_revision === revision);
+      return named?.canonical_name || manifest.display || record.legacy_evaluation_profile_display || record.legacy_name || record.display
+        || promptNameCatalog.value.find(entry => entry.evaluation_profile === id)?.legacy_name
+        || evaluationProfiles.value.find(profile => profile.id === id)?.display || id;
     }
 
     function evaluationProfileOptionLabel(profile) {
-      return profile.selectable === false ? profile.display.replace('（可用）', '') : profile.display;
+      if (profile.canonical_name) return profile.canonical_name;
+      const label = profile.display || profile.id || "—";
+      return profile.selectable === false ? label.replace('（可用）', '') : label;
     }
 
     function cancelDatasetImport() {
@@ -1204,6 +1221,7 @@ createApp({
       closeActiveStream();taskId.value='';results.value=[];summary.value=null;
       taskJudgeRuntime.value = null;taskJudgeSummary.value = {};
       taskProductOrderNote.value = '';
+      taskEvaluationProfileDisplay.value = '';
       selectedTaskTiming.value = null;
       itemProgress.value={};progressEvents.value={};running.value=false;selectedTaskStatus.value='';
       repairStatus.value='idle';activeRetry.value=null;selectedRetryIndexes.value=[];
@@ -2699,6 +2717,7 @@ createApp({
       selectedJudgeModelProfile.value = defaultJudgeModelProfile.value;
       mediaConcurrency.value = d.media_concurrency || 4;
       evaluationProfiles.value = d.evaluation_profiles || [];
+      promptNameCatalog.value = d.prompt_name_catalog || [];
       selectedEvaluationProfile.value = defaultEvaluationProfile();
       selectedJudges.value = defaultJudgeSelection();
       await loadGlobalSettings();  // 加载全局 并发/在途/等待容量
@@ -2725,8 +2744,8 @@ createApp({
       addScoreRule, changeScoreDimension, removeScoreRule, clearScoreRules, scoreFilterError, resetResultFilters,
       reasonOnlyColumn, cellReasons, reasonsExpanded, toggleCellReasons, allReasonsExpanded, setAllReasonsExpanded,
       datasetSourceFileId, datasetSourceTaskId, datasetRevision, useComparisonDataset,
-      evaluationProfiles, compareProfiles, selectedEvaluationProfile, evaluationProfileLabel, evaluationProfileOptionLabel,
-      taskEvaluationProfile, taskProtocolManifest, taskProtocolDiagnostics, taskIsChat, taskIsTimeliness, taskIsKnowledgeQA, taskIsFlatChat, compact1022, summaryDimensions, setTaskProtocol,
+      evaluationProfiles, promptNameCatalog, compareProfiles, selectedEvaluationProfile, evaluationProfileLabel, evaluationProfileOptionLabel,
+      taskEvaluationProfile, taskEvaluationProfileDisplay, taskProtocolManifest, taskProtocolDiagnostics, taskIsChat, taskIsTimeliness, taskIsKnowledgeQA, taskIsFlatChat, compact1022, summaryDimensions, setTaskProtocol,
       isFlatChatRow, flatChatColumn, flatChatProductScores, flatChatSummaryRows, flatChatRatios,
       isKnowledgeQARow, knowledgeQAColumn, knowledgeQAProductScores, knowledgeQASummaryRows,
       isTimelinessRow, timelinessColumn, timelinessProductScores, timelinessSummaryRows, timelinessPairedRows, summaryPercent,

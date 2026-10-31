@@ -38,9 +38,12 @@ def test_config_keeps_disabled_choices_and_does_not_change_frozen_protocol_metad
     assert {profile["id"] for profile in profiles if not profile["selectable"]} == set(DISABLED_IDS)
     for profile in profiles:
         protocol = resolve_compare_protocol(profile["id"])
-        assert {key: value for key, value in profile.items() if key != "selectable"} == protocol.public_metadata()
+        assert {key: value for key, value in profile.items()
+                if key not in {"selectable", "canonical_name"}} == protocol.public_metadata()
         assert "selectable" not in protocol.public_metadata()
         assert "selectable" not in protocol.request_metadata()
+        assert "canonical_name" not in protocol.public_metadata()
+        assert "canonical_name" not in protocol.request_metadata()
     assert all(profile.selectable for profile in list_compare_protocols() if profile.id not in DISABLED_IDS)
 
 

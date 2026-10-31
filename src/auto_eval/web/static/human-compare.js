@@ -12,7 +12,9 @@ function dimensionsForStandard(standard) {
   return (standard || '').split('@')[0] === 'qa_chat_compare' ? HUMAN_CHAT_DIMENSIONS : HUMAN_DIMENSIONS;
 }
 export const HumanComparePanel = {
-  props:{taskId:{type:String,required:true},evaluationProfile:{type:String,default:''}},
+  props:{taskId:{type:String,required:true},evaluationProfile:{type:String,default:''},
+    evaluationProfileDisplay:{type:String,default:''},protocolManifest:{type:Object,default:()=>({})},
+    promptNameCatalog:{type:Array,default:()=>[]},evaluationProfiles:{type:Array,default:()=>[]}},
   setup(props) {
     const open=ref(false),busy=ref(false),error=ref(''),baselines=ref([]),baselineKey=ref(''),baselineSearch=ref(''),baselinePage=ref(1),baselineTotal=ref(0);
     const imports=ref(null),mapping=ref(null),importPreview=ref(null),name=ref(''),validOnly=ref(false),upgrade=ref(false),mappingJson=ref('');
@@ -35,6 +37,23 @@ export const HumanComparePanel = {
     const visibleScores=computed(()=>scoreRows.value.filter(r=>r.dimension_id===statsDimension.value&&r.scope===statsScope.value));
     const visiblePairs=computed(()=>pairRows.value.filter(r=>r.dimension_id===statsDimension.value&&r.scope===statsScope.value));
     const standards=[['0.2-simplified','V0.2 简化版（1—5）'],['0.2-simplified-plus','V0.2 简化版（稳定plus）（1—5）'],['0.2-simplified-calibrated','V0.2 校准版（1—5）'],['0.2-simplified-thinking-exposure','V0.2 过程泄露实验版（1—5）'],['0.3','V0.3（0—3）'],['qa_chat_compare@1.0','问答闲聊V1（1—5）'],['qa_chat_compare@1.1','问答闲聊V2·1-5分（候选）'],['qa_chat_compare@1.1-demand-calibrated','问答闲聊V2·需求与分档校准·1-5分（候选）'],['timeliness_compare@1.0','时效性评估V1·1-3分（候选）'],['knowledge_qa_compare@1.0','知识问答V1·0-2分（候选）'],['chitchat_evidence_first_flat@1.1','闲聊七维·证据先行·1-5分（候选）']];
+    function frozenProtocolLabel(record={}) {
+      if(record.evaluation_profile_display)return record.evaluation_profile_display;
+      const manifest=record.protocol_manifest||{};
+      const id=record.evaluation_profile||manifest.id||(record.human_standard_version
+        ? `${record.human_standard_id||'qa_competitor_compare'}@${record.human_standard_version}`:'');
+      const revisions=[...new Set([record.bundle_revision,record.human_bundle_revision,manifest.bundle_revision].filter(Boolean))];
+      const revision=record.protocol_name_identity_conflict!==true&&revisions.length===1&&(!manifest.id||manifest.id===id)?revisions[0]:null;
+      const named=revision&&(props.promptNameCatalog||[]).find(entry=>entry.evaluation_profile===id&&entry.bundle_revision===revision);
+      return named?.canonical_name||manifest.display||record.legacy_evaluation_profile_display||record.legacy_name||id||'—';
+    }
+    function standardOptionLabel(standard,forTemplate=false) {
+      const id=standard[0].includes('@')?standard[0]:`qa_competitor_compare@${standard[0]}`;
+      if(forTemplate&&id===props.evaluationProfile)return props.evaluationProfileDisplay
+        ||frozenProtocolLabel({evaluation_profile:id,protocol_manifest:props.protocolManifest});
+      const profile=(props.evaluationProfiles||[]).find(entry=>entry.id===id);
+      return profile?.canonical_name||profile?.display||standard[1];
+    }
     const templateStandard=ref(/^(timeliness_compare|knowledge_qa_compare|chitchat_evidence_first_flat)@/.test(props.evaluationProfile||'')
       || props.evaluationProfile==='qa_chat_compare@1.1-demand-calibrated'
       ? props.evaluationProfile : '0.2-simplified');
@@ -82,7 +101,9 @@ export const HumanComparePanel = {
       const fields=[...new Set(items.flatMap(i=>Object.keys(i).filter(k=>!['source_data'].includes(k)&&typeof i[k]!=='object')))];
       fields.push(...Object.keys(source).map(k=>'source_data.'+k));
       const count=Math.max(2,...items.map(i=>i.product_count||((i.video3||i.screenshot3||i.answer3)?3:2)));
-      tasks.value.push({task_id:id,name:data.dataset_name||id,id_field:fields.includes('id')?'id':fields.includes('source_data.query_id')?'source_data.query_id':fields.includes('query_id')?'query_id':'id',fields,count,product_map:{},caseMapText:'{}'});
+      tasks.value.push({task_id:id,name:data.dataset_name||id,evaluation_profile:data.evaluation_profile,
+        evaluation_profile_display:data.evaluation_profile_display,protocol_manifest:data.protocol_manifest,
+        id_field:fields.includes('id')?'id':fields.includes('source_data.query_id')?'source_data.query_id':fields.includes('query_id')?'query_id':'id',fields,count,product_map:{},caseMapText:'{}'});
       assignProducts();invalidate();
     }
     function assignProducts(){for(const t of tasks.value)for(let n=1;n<=t.count;n++)if(!t.product_map['answer'+n])t.product_map['answer'+n]=baseline.value?.products[n-1]?.product_id||'';}
@@ -144,7 +165,7 @@ export const HumanComparePanel = {
     const countsText=v=>Object.entries(v||{}).map(([k,n])=>statusLabel(k)+' '+n).join(' · ');
     return {open,busy,error,baselines,baselineKey,baseline,baselineDownloadUrl,baselineSearch,baselinePage,baselineTotal,imports,mapping,importPreview,name,validOnly,upgrade,mappingJson,
       tasks,availableTasks,taskSearch,selectedTask,compatibility,preview,previewPage,confirmIdentity,confirmBinding,confirmReason,report,reports,rows,rowTotal,rowPage,rowFilters,evidence,
-      standards,templateStandard,selectedDimensions,scopeText,dimensions,baselineDimensions,selectableBaselineDimensions,mappingDimensions,changeMappingStandard,mappingStandard,visibleScores,visiblePairs,reportIsTimeliness,reportIsKnowledgeQA,reportIsFlatChat,visibleRanks,statsDimension,statsScope,
+      standards,standardOptionLabel,frozenProtocolLabel,templateStandard,selectedDimensions,scopeText,dimensions,baselineDimensions,selectableBaselineDimensions,mappingDimensions,changeMappingStandard,mappingStandard,visibleScores,visiblePairs,reportIsTimeliness,reportIsKnowledgeQA,reportIsFlatChat,visibleRanks,statsDimension,statsScope,
       show,close,run,loadBaselines,searchTasks,addTask,baselineChanged,invalidate,upload,inspect,mappingChanged,reuseMapping,applyJson,addLabel,parse,publish,match,previewRows,generate,viewReport,retry,loadRows,showEvidence,pname,number,percent,time,statusLabel,countsText};
   },
   template:`
@@ -155,16 +176,16 @@ export const HumanComparePanel = {
       <p class="err" role="alert" v-if="error">{{error}}</p><p v-if="busy" role="status">正在处理…</p>
       <fieldset :disabled="busy"><legend>1. 选择或导入人工基准</legend>
         <div class="human-toolbar"><input v-model="baselineSearch" placeholder="搜索人工基准"><button @click="run(()=>loadBaselines(1))">搜索</button>
-          <select v-model="baselineKey" @change="baselineChanged" aria-label="人工基准"><option value="">请选择人工基准</option><option v-for="b in baselines" :value="b.baseline_id+':'+b.version">{{b.name}} · v{{b.version}} · {{b.case_count}} 题 · {{b.human_standard_version}}</option></select>
+          <select v-model="baselineKey" @change="baselineChanged" aria-label="人工基准"><option value="">请选择人工基准</option><option v-for="b in baselines" :value="b.baseline_id+':'+b.version">{{b.name}} · v{{b.version}} · {{b.case_count}} 题 · {{frozenProtocolLabel(b)}}</option></select>
           <a v-if="baselineDownloadUrl" :href="baselineDownloadUrl" download>下载人工基准答案 Excel</a>
           <button v-if="baselinePage>1" @click="run(()=>loadBaselines(baselinePage-1))">上一页</button><button v-if="baselinePage*20<baselineTotal" @click="run(()=>loadBaselines(baselinePage+1))">下一页</button>
           <label class="op-upload-btn">上传人工 Excel<input type="file" accept=".xlsx" @change="upload" hidden></label>
         </div>
-        <div class="human-toolbar"><select v-model="templateStandard" aria-label="模板人工标准"><option v-for="s in standards" :value="s[0]">{{s[1]}}</option></select><a :href="'/api/eval/'+encodeURIComponent(taskId)+'/human-template?standard='+encodeURIComponent(templateStandard)" download>下载当前任务空白标注模板</a></div>
-        <p class="hint" v-if="baseline">人工标准：{{baseline.human_standard_id||'qa_competitor_compare'}}@{{baseline.human_standard_version}} · {{baseline.human_bundle_revision||'历史修订未记录'}} · 人工口径：{{baseline.human_policy_note}} · 用途：{{statusLabel(baseline.purpose)}} · 版本发布后保留</p>
+        <div class="human-toolbar"><select v-model="templateStandard" aria-label="模板人工标准"><option v-for="s in standards" :value="s[0]">{{standardOptionLabel(s,true)}}</option></select><a :href="'/api/eval/'+encodeURIComponent(taskId)+'/human-template?standard='+encodeURIComponent(templateStandard)" download>下载当前任务空白标注模板</a></div>
+        <p class="hint" v-if="baseline">人工标准：{{frozenProtocolLabel(baseline)}} · {{baseline.human_bundle_revision||'历史修订未记录'}} · 人工口径：{{baseline.human_policy_note}} · 用途：{{statusLabel(baseline.purpose)}} · 版本发布后保留</p>
         <div v-if="imports && mapping" class="human-import">
           <div class="human-toolbar"><label>工作表 <select v-model="mapping.sheet_name"><option v-for="s in imports.sheets">{{s}}</option></select></label><label>表头行 <input type="number" min="1" max="30" v-model.number="mapping.header_row"></label><button @click="inspect">重新读取表头</button></div>
-          <div class="human-toolbar"><label>基准名称 <input v-model="name"></label><label>人工标准 <select :value="mappingStandard()" @change="changeMappingStandard($event.target.value)"><option value="">请明确选择</option><option v-for="s in standards" :value="s[0]">{{s[1]}}</option></select></label><label>用途 <select v-model="mapping.purpose" @change="mappingChanged"><option value="regression">回归验证</option><option value="development">开发调参</option><option value="holdout">独立留出集</option></select></label></div>
+          <div class="human-toolbar"><label>基准名称 <input v-model="name"></label><label>人工标准 <select :value="mappingStandard()" @change="changeMappingStandard($event.target.value)"><option value="">请明确选择</option><option v-for="s in standards" :value="s[0]">{{standardOptionLabel(s)}}</option></select></label><label>用途 <select v-model="mapping.purpose" @change="mappingChanged"><option value="regression">回归验证</option><option value="development">开发调参</option><option value="holdout">独立留出集</option></select></label></div>
           <label class="human-wide">评分口径及依据 <input v-model="mapping.policy_note" @input="mappingChanged" placeholder="说明人工实际使用的标准；不能只按分值范围推定"></label>
           <div class="human-toolbar"><label>题号列 <select v-model="mapping.case_id" @change="mappingChanged"><option value="">请选择</option><option v-for="c in imports.columns" :value="c.column">{{c.column}} · {{c.header}}</option></select></label><label>问题列 <select v-model="mapping.query" @change="mappingChanged"><option value="">无</option><option v-for="c in imports.columns" :value="c.column">{{c.column}} · {{c.header}}</option></select></label></div>
           <div class="human-toolbar"><label v-for="p in mapping.products">产品名称 <input v-model="p.display_name" @input="mappingChanged"> 身份 <input v-model="p.product_id" @input="mappingChanged"></label></div>
@@ -196,7 +217,7 @@ export const HumanComparePanel = {
       <section v-if="report" class="human-report"><div class="human-toolbar"><h3>对比报告</h3><span>{{report.baseline_name}} v{{report.version}} · {{report.report_id}}</span><a v-if="report.status==='ready'" :href="'/api/human-comparisons/'+report.report_id+'/download'" download>导出人机对比 Excel</a></div>
         <p v-if="report.status==='ready'" class="hint">Excel 逐题对比每行一个 Case，各产品、各维度的模型评分与人工评分答案并列；同一 Case 的多个测评任务也按列排列，方便校对与统计。</p>
         <p v-if="report.status!=='ready'">{{report.status==='error'?report.error:'正在生成报告…'}} <button v-if="report.status==='error'" @click="retry">从冻结输入重试</button></p>
-        <template v-else><p v-if="report.human_protocol" class="hint">冻结人工标准：{{report.human_protocol.human_standard_id||'qa_competitor_compare'}}@{{report.human_protocol.human_standard_version}} · {{report.human_protocol.human_bundle_revision||'历史修订未记录'}}</p><p class="hint">{{report.compatibility_mode==='regression'?'相对既有人工基准的回归比较':'同标准比较'}} · {{report.warnings.join('；')}}</p>
+        <template v-else><p v-if="report.human_protocol" class="hint">冻结人工标准：{{frozenProtocolLabel(report.human_protocol)}} · {{report.human_protocol.human_bundle_revision||'历史修订未记录'}}</p><p v-for="protocol in report.model_protocols" :key="protocol.task_id" class="hint">模型任务 {{protocol.task_id}}：{{frozenProtocolLabel(protocol)}}</p><p class="hint">{{report.compatibility_mode==='regression'?'相对既有人工基准的回归比较':'同标准比较'}} · {{report.warnings.join('；')}}</p>
           <div class="human-toolbar"><label>维度 <select v-model="statsDimension"><option v-for="d in report.config.dimensions" :value="d">{{dimensions[d]}}</option></select></label><label>样本口径 <select v-model="statsScope"><option value="own">各任务自身有效样本</option><option v-if="report.task_ids.length>1" value="common">所有任务共同有效样本</option></select></label></div>
           <div class="table-scroll"><table class="grid"><thead><tr><th>任务</th><th>产品</th><th>可比 / 人工有效</th><th>覆盖率</th><th>人工 / 模型均分</th><th>完全一致率</th><th>差≤1分</th><th>MAE</th><th>平均偏差</th><th>严重分歧</th><th>较首任务</th></tr></thead><tbody><tr v-for="s in visibleScores"><td>{{s.task_id}}</td><td>{{pname(s.product_id)}}</td><td>{{s.n}} / {{s.human_n}}</td><td>{{percent(s.coverage)}}</td><td>{{number(s.human_mean)}} / {{number(s.model_mean)}}</td><td>{{percent(s.exact)}}</td><td>{{percent(s.within_one)}}</td><td>{{number(s.mae)}}</td><td>{{number(s.bias)}}</td><td>{{percent(s.severe)}}</td><td>{{s.vs_first_task?'一致率 '+percent(s.vs_first_task.exact)+'；MAE '+number(s.vs_first_task.mae):'—'}}</td></tr></tbody></table></div>
           <details><summary>分布、混淆矩阵与排除原因</summary><div v-for="s in visibleScores"><strong>{{s.task_id}} · {{pname(s.product_id)}}</strong><pre>人工分布 {{s.human_distribution}}\n模型分布 {{s.model_distribution}}\n混淆矩阵（人工,模型） {{s.confusion}}\n分差 {{s.difference_counts}}\n排除 {{s.excluded}}</pre></div></details>

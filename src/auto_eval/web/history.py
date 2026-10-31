@@ -29,6 +29,7 @@ from ..judges.compare_protocols import (
 )
 from ..paths import PROJECT_ROOT, RUNS_DIR
 from ..product_order import product_order_metadata
+from .prompt_names import prompt_display_fields
 from .compare_statistics import SHEET_NAME as COMPARE_STATISTICS_SHEET, build_compare_statistics
 from .compare_statistics_xlsx import statistics_cell_styles, statistics_sheet_xml
 from .export_links import ExportLink, screenshot_links
@@ -313,6 +314,7 @@ def _snapshot_meta_row(data: dict, path: Path) -> dict:
         "error": data.get("error"),
         "repair_status": data.get("repair_status") or "idle",
         "evaluation_profile": _snapshot_evaluation_profile(data),
+        **prompt_display_fields({**data, "evaluation_profile": _snapshot_evaluation_profile(data)}),
         "protocol_diagnostics": recover_protocol_identity(data)["diagnostics"],
         "judge_runtime": judge_runtime_display(data),
         **judge_runtime_summary(data),
@@ -364,6 +366,7 @@ def _load_meta_row(path: Path) -> dict | None:
         _write_meta(path, row)
     row.pop("meta_version", None)  # 版本号只落侧车，响应形状与旧实现一致
     row.setdefault("source_files", [])
+    row.update(prompt_display_fields(row))
     status, error = _apply_interrupted_status(row.get("status"), row.get("error"))
     row["status"] = status
     row["error"] = error
@@ -406,6 +409,7 @@ def snapshot_payload(data: dict) -> dict:
         "options": data.get("options") or {},
         **(_snapshot_product_order(data) if data.get("mode") == "compare" else {}),
         "evaluation_profile": _snapshot_evaluation_profile(data),
+        **prompt_display_fields({**data, "evaluation_profile": _snapshot_evaluation_profile(data)}),
         "protocol_manifest": (recovered["manifest"] if recovered["is_chat"] or recovered["is_timeliness"] or (recovered.get("is_knowledge_qa") or recovered.get("is_flat_chat")) else data.get("protocol_manifest") or {}),
         "protocol_diagnostics": recovered["diagnostics"],
         "protocol_executable": recovered["executable"],

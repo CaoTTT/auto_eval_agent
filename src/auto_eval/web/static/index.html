@@ -42,7 +42,7 @@
             <td>{{ entry.dataset_name || entry.task_id }}</td>
             <td>{{ queueKindLabel(entry.kind) }}</td>
             <td>{{ modeLabel(entry.mode) }}</td>
-            <td>{{ evaluationProfileLabel(entry.evaluation_profile) }}</td>
+            <td>{{ evaluationProfileLabel(entry) }}</td>
             <td class="judge-runtime-cell">{{ judgeRuntimeLabel(entry.judge_runtime, entry) }}</td>
             <td><span :class="['queue-status', 'status-' + entry.status]">{{ taskStatusLabel(entry.status) }}</span></td>
             <td>{{ entry.status === 'running' ? '—' : entry.queue_position }}</td>
@@ -80,7 +80,7 @@
       <label>数据集名称<input v-model="historySearchDraft.dataset_name" type="search" placeholder="输入名称关键词" aria-label="历史数据集名称"></label>
       <label>测评标准<select v-model="historySearchDraft.evaluation_profile" aria-label="历史测评标准">
         <option value="">全部标准</option>
-        <option v-for="profile in compareProfiles" :key="profile.id" :value="profile.id">{{ profile.display }}</option>
+        <option v-for="profile in compareProfiles" :key="profile.id" :value="profile.id">{{ evaluationProfileOptionLabel(profile) }}（全部修订）</option>
       </select></label>
       <label>开始时间<input v-model="historySearchDraft.start_time" type="datetime-local" step="1" aria-label="历史开始时间"></label>
       <label>结束时间<input v-model="historySearchDraft.end_time" type="datetime-local" step="1" aria-label="历史结束时间"></label>
@@ -107,7 +107,7 @@
             <td>{{ formatTime(h.updated_at || h.created_at) }}</td>
             <td>{{ h.dataset_name || '未记录' }}</td>
             <td>{{ modeLabel(h.mode) }}</td>
-            <td>{{ evaluationProfileLabel(h.evaluation_profile) }}</td>
+            <td>{{ evaluationProfileLabel(h) }}</td>
             <td class="judge-runtime-cell">{{ judgeRuntimeLabel(h.judge_runtime, h) }}</td>
             <td>{{ taskStatusLabel(h.status) }}<small v-if="retryStatusLabel(h.repair_status)" class="running"> · {{ retryStatusLabel(h.repair_status) }}</small></td>
             <td class="history-progress-cell">{{ h.done }}/{{ h.total }}</td>
@@ -305,7 +305,7 @@
     <span v-else-if="running" class="running">评估中… {{ progress }}/{{ total }}</span>
     <span v-if="queueNotice" class="queue-notice">{{ queueNotice }}</span>
     <p v-if="runError" class="run-error">{{ runError }}</p>
-    <p v-if="taskId && taskEvaluationProfile" class="hint">当前结果标准：{{evaluationProfileLabel(taskEvaluationProfile)}} · {{taskProtocolManifest.bundle_revision || '历史修订未记录'}}</p>
+    <p v-if="taskId && taskEvaluationProfile" class="hint">当前结果标准：{{taskEvaluationProfileDisplay}} · {{taskProtocolManifest.bundle_revision || '历史修订未记录'}}</p>
     <p v-for="diagnostic in taskProtocolDiagnostics" :key="diagnostic" class="run-error">协议恢复诊断：{{diagnostic}}。可查看原始结果；续跑与正式统计不可用。</p>
     <section v-if="conversationPreflight" class="query-image-panel">
       <strong>多轮图片预检查 · {{conversationPreflight.model}}</strong>
@@ -445,7 +445,7 @@
     </h2>
     <label class="export-image-option"><input type="checkbox" v-model="exportIncludeImages" :disabled="!!exportingTaskId">单任务 Excel 包含原图（可选，文件较大）</label>
     <p class="hint">默认不嵌入回答截图和提问图片，评分、统计、图片明细及原图查看链接仍保留。</p>
-    <human-compare-panel v-if="mode==='compare' && taskId && !loadingTaskId" :key="taskId" :task-id="taskId" :evaluation-profile="taskEvaluationProfile"></human-compare-panel>
+    <human-compare-panel v-if="mode==='compare' && taskId && !loadingTaskId" :key="taskId" :task-id="taskId" :evaluation-profile="taskEvaluationProfile" :evaluation-profile-display="taskEvaluationProfileDisplay" :protocol-manifest="taskProtocolManifest" :prompt-name-catalog="promptNameCatalog" :evaluation-profiles="evaluationProfiles"></human-compare-panel>
     <details v-for="group in conversationGroups" :key="group.id" class="query-image-panel">
       <summary>会话 {{group.id}} · {{group.turns.length}} 轮结果</summary>
       <button v-for="turn in group.turns" :key="turn.index" @click="resultQuery=turn.item_id; resetResultPage()">第 {{turn.turn_index}} 轮 · {{turn.error?'失败':'完成'}} · {{turn.image_warning_count || 0}} 项图片诊断</button>
@@ -762,6 +762,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20261028_snapshot_product_contexts_20261030_chitchat_flat_product_order"></script>
+  <script type="module" src="/static/app.js?v=20261028_snapshot_product_contexts_20261031_prompt_names"></script>
 </body>
 </html>
