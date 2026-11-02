@@ -64,9 +64,15 @@ def test_unknown_profile_never_borrows_a_current_name():
 def test_catalog_matches_current_identities_and_reads_availability_from_registry():
     records = prompt_name_catalog()
     assert [(r["evaluation_profile"], r["bundle_revision"], r["canonical_name"]) for r in records] == APPROVED
-    assert {(r["evaluation_profile"], r["bundle_revision"]) for r in records} == {
+    # New experimental protocols can retain their original display name until
+    # an exact identity has an approved name in the presentation catalog.
+    assert {(r["evaluation_profile"], r["bundle_revision"]) for r in records} <= {
         (protocol.id, protocol.bundle_revision) for protocol in list_compare_protocols()
     }
+    approved_ids = {(r["evaluation_profile"], r["bundle_revision"]) for r in records}
+    for protocol in list_compare_protocols():
+        if (protocol.id, protocol.bundle_revision) not in approved_ids:
+            assert prompt_name(protocol.id, protocol.bundle_revision, fallback=protocol.display) == protocol.display
     assert len({r["canonical_name"] for r in records}) == 12
     for record in records:
         protocol = resolve_compare_protocol(record["evaluation_profile"], record["bundle_revision"])
