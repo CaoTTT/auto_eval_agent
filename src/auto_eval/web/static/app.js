@@ -1,4 +1,4 @@
-import { createApp, ref, computed, onMounted, onUnmounted, nextTick, selectEvidenceMode, isRemoteUrl, productContextValue, missingProductContexts } from "./compare-data.js?v=20261102_chitchat_gsb_product_order";
+import { createApp, ref, computed, onMounted, onUnmounted, nextTick, selectEvidenceMode, isRemoteUrl, productContextValue, missingProductContexts } from "./compare-data.js?v=20261102_explicit_evidence_mode_chitchat_gsb_product_order";
 
 createApp({
   watch: {
@@ -1221,7 +1221,7 @@ createApp({
 
     // —— 视频评测：逐题卡片（query + 可选 context + 视频上传 + 可选 answer_text）——
     function newOpItem() {
-      return { _uiKey: ++opItemSequence, id: "", query: "", queryImages: [], queryImageMeta: [], queryUploading: false, queryUploadError: "", evidenceMode: "video_frames", screenshot1Path: "", screenshot2Path: "", screenshot3Path: "", context: "", category: "", productCount: 2, videoName: "", videoPath: "", video1Path: "", video2Path: "", video3Path: "", frames: [], frameCount: 0, duration: 0, answer: "", answer1: "", answer2: "", answer3: "", context1: "", context2: "", context3: "", taskStartTime: null, taskEndTime: null, sourceLine: null, sourceData: null, sessionGroup: null, turnIndex: null, uploading: false, uploadError: "" };
+      return { _uiKey: ++opItemSequence, id: "", query: "", queryImages: [], queryImageMeta: [], queryUploading: false, queryUploadError: "", evidenceMode: "long_screenshot", screenshot1Path: "", screenshot2Path: "", screenshot3Path: "", context: "", category: "", productCount: 2, videoName: "", videoPath: "", video1Path: "", video2Path: "", video3Path: "", frames: [], frameCount: 0, duration: 0, answer: "", answer1: "", answer2: "", answer3: "", context1: "", context2: "", context3: "", taskStartTime: null, taskEndTime: null, sourceLine: null, sourceData: null, sessionGroup: null, turnIndex: null, uploading: false, uploadError: "" };
     }
     function draftFingerprint() {
       const keys = ['id','query','queryImages','context','category','productCount','evidenceMode',
@@ -1231,7 +1231,7 @@ createApp({
     }
     function confirmDatasetReplacement() {
       const changed = datasetBaseline ? draftFingerprint() !== datasetBaseline : opItems.value.length > 1 || opItems.value.some(item =>
-        item.queryImages.length || item.productCount !== 2 || item.evidenceMode !== 'video_frames' ||
+        item.queryImages.length || item.productCount !== 2 || item.evidenceMode !== 'long_screenshot' ||
         ['id','query','context','category','video1Path','video2Path','video3Path','screenshot1Path',
           'screenshot2Path','screenshot3Path','answer1','answer2','answer3','context1','context2','context3'].some(key=>item[key]));
       return !changed || confirm('当前数据有未提交的修改。使用新数据会替换输入区，是否继续？');
@@ -1246,7 +1246,7 @@ createApp({
             item.query_image_meta?.[imageIndex]?.source_url || path),
           queryImageMeta:item.query_image_meta || [],
           productCount:item.product_count || (item.video3 || item.screenshot3 ? 3 : 2),
-          evidenceMode:item.evidence_mode || (item.screenshot1 ? 'long_screenshot' : 'video_frames'),
+          evidenceMode:item.evidence_mode || 'long_screenshot',
           ...Object.fromEntries([1,2,3].flatMap(n => [
             [`video${n}Path`,item[`video${n}`] || ''], [`screenshot${n}Path`,item[`screenshot${n}`] || ''],
             [`answer${n}`,item[`answer${n}`] || ''], [`context${n}`,productContextValue(item, n)],
@@ -1416,7 +1416,7 @@ createApp({
             videoName: String(item.video_path || "").split(/[\\/]/).pop(),
             videoPath: item.video_path || item.video1 || "",
             productCount: item.product_count || (item.video3 || item.screenshot3 ? 3 : 2),
-            evidenceMode: item.evidence_mode || (item.screenshot1 ? "long_screenshot" : "video_frames"),
+            evidenceMode: item.evidence_mode || "long_screenshot",
             screenshot1Path: item.screenshot1 || "",
             screenshot2Path: item.screenshot2 || "",
             screenshot3Path: item.screenshot3 || "",
@@ -2669,7 +2669,7 @@ createApp({
             context: item.context || "", category: item.category || "",
             queryImages: [...(item.query_images || [])], queryImageMeta: item.query_image_meta || [],
             productCount: item.product_count || (item.video3 || item.screenshot3 ? 3 : 2),
-            evidenceMode: item.evidence_mode || (item.screenshot1 ? "long_screenshot" : "video_frames"),
+            evidenceMode: item.evidence_mode || "long_screenshot",
             ...Object.fromEntries([1, 2, 3].flatMap(n => [
               [`video${n}Path`, item[`video${n}`] || ""], [`screenshot${n}Path`, item[`screenshot${n}`] || ""],
               [`answer${n}`, item[`answer${n}`] || ""], [`context${n}`, item[`context${n}`] || ""],

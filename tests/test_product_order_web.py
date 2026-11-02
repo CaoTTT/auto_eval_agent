@@ -20,6 +20,7 @@ from auto_eval.web.tasks import Task, _task_from_snapshot
 
 def case(**overrides):
     return {"id": "case", "query": "问题", "product_count": 2,
+            "evidence_mode": "video_frames",
             "video1": "one.mp4", "video2": "two.mp4",
             "answer1": "原产品1回答", "answer2": "原产品2回答",
             "context1": "原产品1背景", "context2": "原产品2背景", **overrides}

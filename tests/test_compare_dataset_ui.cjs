@@ -55,33 +55,40 @@ async function main(){
   assert.equal(submitted.items[0].screenshot2,'b.png');assert.equal(submitted.items[0].video1,undefined);
   assert.equal(submitted.items[1].video2,'b.mp4');assert.equal(submitted.items[1].screenshot1,undefined);
 
-  // The editing selector never overrides the same complete-layer policy used at import.
+  // The editing selector decides the evidence layer; missing mode defaults to screenshots.
   const shotDraft=app.opItems.value[0];shotDraft.evidenceMode='video_frames';
   await app.submit();
-  assert.equal(submitted.items[0].evidence_mode,'long_screenshot');
-  assert.equal(submitted.items[0].video1,undefined);
-  assert.equal(context.caseMedia(shotDraft)[0].role,'screenshot');
-  shotDraft.screenshot2Path='   ';
-  assert.equal(app.canSubmit.value,true);await app.submit();
   assert.equal(submitted.items[0].evidence_mode,'video_frames');
   assert.equal(submitted.items[0].video1,'a.mp4');
   assert.equal(submitted.items[0].screenshot1,undefined);
   assert.equal(context.caseMedia(shotDraft)[0].role,'video');
+  shotDraft.evidenceMode='long_screenshot';
+  await app.submit();
+  assert.equal(submitted.items[0].evidence_mode,'long_screenshot');
+  assert.equal(submitted.items[0].screenshot1,'a.png');
+  assert.equal(submitted.items[0].video1,undefined);
+  assert.equal(context.caseMedia(shotDraft)[0].role,'screenshot');
+  shotDraft.screenshot2Path='   ';
+  assert.equal(app.canSubmit.value,false,'declared screenshots require every product path');
   shotDraft.video2Path='';
   assert.equal(app.canSubmit.value,false,'cleared draft paths cannot be restored from sourceData');
   submitted=null;await app.submit();assert.equal(submitted,null);
   assert.match(app.runError.value,/不会跳过/);
   assert.equal(context.caseMedia(shotDraft).length,0,'incomplete evidence cannot preview mixed layers');
 
-  // All 2/3-product combinations follow screenshot priority and one shared fallback layer.
+  // Explicit mode selects its own complete layer; absent mode defaults to screenshots.
+  for(const declared of [undefined,'long_screenshot','video_frames'])
   for(const count of [2,3])for(let mask=0;mask<2**(count*2);mask++){
-    const draft={productCount:count,evidenceMode:'video_frames',sourceData:{screenshot1:'ignored.png'}};
+    const draft={productCount:count,sourceData:{screenshot1:'ignored.png'}};
+    if(declared)draft.evidenceMode=declared;
     for(let n=1;n<=count;n++){
       draft[`screenshot${n}Path`]=(mask&(1<<(n-1)))?' shot.png ':'';
       draft[`video${n}Path`]=(mask&(1<<(n-1+count)))?' clip.mp4 ':'';
     }
     const complete=(1<<count)-1;
-    const expected=(mask&complete)===complete?'long_screenshot':((mask>>count)&complete)===complete?'video_frames':'';
+    const mode=declared||'long_screenshot';
+    const selectedMask=mode==='long_screenshot'?mask&complete:(mask>>count)&complete;
+    const expected=selectedMask===complete?mode:'';
     assert.equal(context.selectEvidenceMode(draft),expected);
   }
   assert.equal(context.selectEvidenceMode({productCount:2,screenshot1Path:[],screenshot2Path:'x'}),'');
@@ -90,6 +97,16 @@ async function main(){
   const historical=context.fromDatasetItem({evidence_mode:'video_frames',product_count:2,video1:'a.mp4',video2:'b.mp4',
     source_data:{screenshot1:'a.png',screenshot2:'b.png'}},0);
   assert.equal(context.caseMedia(historical)[0].role,'video','readonly history follows its saved evaluated layer');
+  const legacyVideo=context.fromDatasetItem({product_count:2,video1:'a.mp4',video2:'b.mp4'},0);
+  assert.equal(legacyVideo._savedEvidenceMode,'video_frames','readonly legacy videos retain their inferred layer');
+  assert.equal(context.caseMedia(legacyVideo).length,2);
+  assert.ok(context.caseMedia(legacyVideo).every(file=>file.role==='video'));
+  const explicitShots=context.fromDatasetItem({evidence_mode:'long_screenshot',product_count:2,
+    video1:'a.mp4',video2:'b.mp4'},0);
+  assert.equal(explicitShots._savedEvidenceMode,'long_screenshot');
+  assert.equal(context.caseMedia(explicitShots).length,0,'explicit screenshot history must not fall back to videos');
+  assert.equal(context.selectEvidenceMode({productCount:2,video1Path:'a.mp4',video2Path:'b.mp4'}),'',
+    'new drafts without a mode still require screenshots');
   const boundVideo=context.fromDatasetItem({product_count:2,evidence_mode:'video_frames',video1:'a.mp4',video2:'b.mp4',
     video_source1:{input_path:'a.mp4',path:'C:/data/a.mp4',sha256:'video-sha'}},0);
   assert.equal(context.caseMedia(boundVideo)[0].meta.original_sha256,'video-sha');
@@ -115,7 +132,7 @@ async function main(){
   cases.toggleMedia(remoteQuery,remoteQueryFile);
   assert.equal(caseContext.isRemoteUrl('https://example.test/a.png'),true);
   assert.equal(caseContext.isRemoteUrl('ftp://example.test/a.png'),false);
-  const legacy={id:'legacy',query:'old question',product_count:2,context:'旧版产品1背景',context2:'产品2背景',video1:'a.mp4',video2:'b.mp4',
+  const legacy={id:'legacy',query:'old question',product_count:2,evidence_mode:'video_frames',context:'旧版产品1背景',context2:'产品2背景',video1:'a.mp4',video2:'b.mp4',
     source_data:{session_id:'business-session',turn_index:3}};
   assert.equal(caseContext.mapper(legacy,0).sessionId,'','source metadata must not activate conversations');
   assert.equal(caseContext.mapper(legacy,0).turnIndex,null);
@@ -132,7 +149,7 @@ async function main(){
   cases.toggleMedia(item,file);assert.equal(requests[0].options.signal.aborted,true);
   requests[0].resolve({ok:true,json:async()=>({preview_url:'/stale.png'})});await tick();
   assert.equal(cases.media.value[cases.key(item,file)],undefined,'late preview cannot reopen a collapsed image');
-  const remoteDraft=caseContext.mapper({query:'remote',product_count:2,
+  const remoteDraft=caseContext.mapper({query:'remote',product_count:2,evidence_mode:'video_frames',
     video1:'https://example.test/one.mp4',video2:'https://example.test/two.mp4'},0);
   const remoteFile=cases.caseMedia(remoteDraft)[0];
   cases.toggleMedia(remoteDraft,remoteFile);

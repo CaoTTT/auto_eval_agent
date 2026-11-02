@@ -43,6 +43,7 @@ def request_hash(protocol):
 
 def case():
     return {"id": "case", "query": "合成展示测试", "product_count": 2,
+            "evidence_mode": "video_frames",
             "video1": "one.mp4", "video2": "two.mp4",
             "answer1": "原产品1", "answer2": "原产品2",
             "context1": "原产品1背景", "context2": "原产品2背景"}

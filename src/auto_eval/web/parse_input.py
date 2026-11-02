@@ -111,23 +111,25 @@ def _compare_product_count(obj: dict) -> int:
 
 
 def compare_evidence_mode(obj: dict) -> tuple[int, str]:
-    """Choose one complete evidence layer for every product in the case."""
+    """Use the declared evidence layer, defaulting to long screenshots."""
     normalize_turn(obj)
     count = _compare_product_count(obj)
-    if obj.get("evidence_mode") not in (None, "", "long_screenshot", "video_frames"):
+    declared = obj.get("evidence_mode")
+    if declared not in (None, "", "long_screenshot", "video_frames"):
         raise ValueError("evidence_mode 只能是 long_screenshot 或 video_frames")
-    missing = {}
-    for kind in ("screenshot", "video"):
-        missing[kind] = [f"{kind}{n}" for n in range(1, count + 1)
-                         if not isinstance(obj.get(f"{kind}{n}"), str) or not obj[f"{kind}{n}"].strip()]
-    if not missing["screenshot"]:
-        return count, "long_screenshot"
-    if not missing["video"]:
-        return count, "video_frames"
+    mode = declared or "long_screenshot"
+    kind = "screenshot" if mode == "long_screenshot" else "video"
+    missing = [
+        f"{kind}{n}" for n in range(1, count + 1)
+        if not isinstance(obj.get(f"{kind}{n}"), str)
+        or not obj[f"{kind}{n}"].strip()
+    ]
+    if not missing:
+        return count, mode
     raise ValueError(
-        "拒绝测评：无法为所有产品统一证据层；长截图缺少或路径无效："
-        + "、".join(missing["screenshot"]) + "；回退录屏仍缺少或路径无效："
-        + "、".join(missing["video"]) + "。同一 Case 不能混用视频和长截图"
+        f"拒绝测评：evidence_mode={mode}，但以下证据字段缺少或路径无效："
+        + "、".join(missing)
+        + "。同一 Case 的所有产品必须使用显式声明的证据层；未声明时默认 long_screenshot"
     )
 
 

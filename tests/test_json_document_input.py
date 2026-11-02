@@ -11,7 +11,8 @@ from auto_eval.web.runner import _to_evalitem
 def case(mode, item_id="case-1", **extra):
     row = {"id": item_id, "query": "  测试问题  "}
     row.update(
-        {"video1": "a.mp4", "video2": "b.mp4", "context1": "产品1背景", "context2": "产品2背景"}
+        {"evidence_mode": "video_frames", "video1": "a.mp4", "video2": "b.mp4",
+         "context1": "产品1背景", "context2": "产品2背景"}
         if mode == "compare"
         else {"video_path": "a.mp4"}
     )
@@ -75,8 +76,10 @@ def test_json_array_preserves_compare_screenshot_and_query_image_validation():
     rows = [
         {"query": "图文题", "screenshot1": "one.png", "screenshot2": "two.png",
          "query_images": ["question.png"], "sessionid": "one"},
-        {"query": "混用证据", "video1": "one.mp4", "screenshot2": "two.png"},
-        {"query": "图片类型错误", "video1": "one.mp4", "video2": "two.mp4",
+        {"query": "混用证据", "evidence_mode": "video_frames", "video1": "one.mp4",
+         "screenshot1": "one.png", "screenshot2": "two.png"},
+        {"query": "图片类型错误", "evidence_mode": "video_frames",
+         "video1": "one.mp4", "video2": "two.mp4",
          "query_images": "question.png"},
     ]
     for row in rows:
@@ -87,7 +90,7 @@ def test_json_array_preserves_compare_screenshot_and_query_image_validation():
     assert items[0]["input_modality"] == "text_image"
     assert items[0]["query_images"] == ["question.png"]
     assert errors[0].startswith("第 2 条（JSON 数组）")
-    assert "混用" in errors[0]
+    assert "video2" in errors[0]
     assert errors[1].startswith("第 3 条（JSON 数组）")
 
 

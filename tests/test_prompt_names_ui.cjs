@@ -21,7 +21,8 @@ async function main() {
     bundle_revision:profile.bundle_revision, canonical_name:profile.canonical_name,
     legacy_name:profile.display, selectable:profile.selectable}));
   const requests = [];
-  const base = {id:'case', query:'问题', product_count:2, video1:'one.mp4',video2:'two.mp4',
+  const base = {id:'case', query:'问题', product_count:2, evidence_mode:'video_frames',
+    video1:'one.mp4',video2:'two.mp4',
     context1:'产品1背景',context2:'产品2背景'};
   const sandbox = {
     ref:value=>({value}), computed:fn=>({get value(){return fn();}}),

@@ -14,6 +14,7 @@ from test_timeliness_statistics import dataset
 async def test_timeliness_source_download_restores_compact_scores_and_frozen_protocol(source_api):
     snapshot, rows, protocol = dataset(((3, 2, None),))
     item = snapshot["items"][0]
+    item["evidence_mode"] = "video_frames"
     for product in (1, 2, 3):
         item.update({f"answer{product}": f"产品{product}", f"video{product}": f"{product}.mp4",
                      f"context{product}": f"产品{product}背景"})

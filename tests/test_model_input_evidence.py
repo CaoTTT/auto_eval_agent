@@ -73,13 +73,14 @@ def environment(tmp_path, monkeypatch):
 async def mixed_task(environment, monkeypatch, count=2):
     root, profile, shots = environment
     videos = {f"video{n}": str(root / f"source{n}.mp4") for n in range(1, count + 1)}
+    video_evidence = {**videos, "evidence_mode": "video_frames"}
     screenshots = {f"screenshot{n}": shots[n - 1] for n in range(1, count + 1)}
     objects = [
-        {"id": "video", "query": "video-case", "product_count": count, **videos},
+        {"id": "video", "query": "video-case", "product_count": count, **video_evidence},
         {"id": "shots", "query": "shot-case", "product_count": count, **videos, **screenshots},
         {"id": "query-video", "query": "query-case", "product_count": count,
-         "query_images": [shots[0]], "screenshot1": shots[0], **videos},
-        {"id": "failed", "query": "provider-fails", "product_count": count, **videos},
+         "query_images": [shots[0]], "screenshot1": shots[0], **video_evidence},
+        {"id": "failed", "query": "provider-fails", "product_count": count, **video_evidence},
     ]
     for item in objects:
         item.update({f"context{n}": f"产品{n}测试背景" for n in range(1, count + 1)})

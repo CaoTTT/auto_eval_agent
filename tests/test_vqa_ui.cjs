@@ -7,10 +7,10 @@ const path = require('node:path');
 async function main() {
   let app, submitted;
   const items = [
-    {id:'text-video', query:'text', video1:'a.mp4', video2:'b.mp4'},
-    {id:'image-video', query:'image', query_images:['q.png'], video1:'a.mp4', video2:'b.mp4'},
-    {id:'text-shot', query:'text', screenshot1:'a.png', screenshot2:'b.png'},
-    {id:'image-shot', query:'image', query_images:['q.png'], screenshot1:'a.png', screenshot2:'b.png'},
+    {id:'text-video', query:'text', evidence_mode:'video_frames', video1:'a.mp4', video2:'b.mp4'},
+    {id:'image-video', query:'image', query_images:['q.png'], evidence_mode:'video_frames', video1:'a.mp4', video2:'b.mp4'},
+    {id:'text-shot', query:'text', evidence_mode:'long_screenshot', screenshot1:'a.png', screenshot2:'b.png'},
+    {id:'image-shot', query:'image', query_images:['q.png'], evidence_mode:'long_screenshot', screenshot1:'a.png', screenshot2:'b.png'},
   ].map(item=>({...item,context1:'产品1背景',context2:'产品2背景'}));
   const sandbox = {
     ref: value => ({value}), computed: getter => ({get value() {return getter();}}),
