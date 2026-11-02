@@ -22,7 +22,7 @@ APPROVED = [
     ("qa_competitor_compare@0.2-simplified-calibrated", "0.2.3", "问答对比 | 标准S1.0 | Prompt P04 | Qwen3.8-Flash | 实验"),
     ("qa_competitor_compare@0.2-simplified-thinking-exposure", "0.2.3", "问答对比 | 标准S1.0 | Prompt P05 | Qwen3.8-Flash | 实验"),
     ("qa_chat_compare@1.0", "1.0.0", "闲聊对比 | 标准S1.0 | Prompt P01 | Qwen3.8-Flash | 实验"),
-    ("dialogue_experience_compare@1.0", "1.0.0", "对话体验对比 | 标准S1.0 | Prompt P01 | Qwen3.8-Flash | 实验"),
+    ("dialogue_experience_compare@1.0", "1.0.1", "对话体验对比 | 标准S1.0 | Prompt P01 | Qwen3.8-Flash | 实验"),
 ]
 
 VERSION_CODES = [

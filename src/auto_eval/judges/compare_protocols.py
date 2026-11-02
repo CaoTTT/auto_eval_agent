@@ -262,7 +262,9 @@ class CompareProtocol:
         if self.standard_id == DIALOGUE_EXPERIENCE_STANDARD_ID:
             metadata["allowed_scores_by_dimension"] = {"overall": [1, 2, 3, 4, 5]}
             metadata["has_gates"] = False
-            metadata["model_output_fields"] = ["score", "reason", "suggestion", "domain"]
+            metadata["model_output_fields"] = (
+                ["score", "reason", "suggestion", "domain"] if self.bundle_revision == "1.0.0"
+                else ["reason", "score", "suggestion", "domain"])
         return metadata
 
     def request_metadata(self) -> dict:
@@ -501,7 +503,7 @@ _PROTOCOLS = {
         id=DIALOGUE_EXPERIENCE_COMPARE_PROTOCOL_ID,
         standard_id=DIALOGUE_EXPERIENCE_STANDARD_ID,
         standard_version="1.0",
-        bundle_revision="1.0.0",
+        bundle_revision="1.0.1",
         display="对话体验综合评估·1-5分（候选）",
         status="experimental",
         system_template=DIALOGUE_EXPERIENCE_SYSTEM,
@@ -527,6 +529,15 @@ def resolve_compare_protocol(protocol_id: str | None, bundle_revision: str | Non
     try:
         protocol = _PROTOCOLS[selected]
         if bundle_revision and bundle_revision != protocol.bundle_revision:
+            if selected == DIALOGUE_EXPERIENCE_COMPARE_PROTOCOL_ID and bundle_revision == "1.0.0":
+                from .visual_compare_prompt_dialogue_experience_r100 import (
+                    VISUAL_COMPARE_SYSTEM as legacy_system,
+                    VISUAL_COMPARE_USER as legacy_user,
+                )
+                return replace(
+                    protocol, bundle_revision=bundle_revision,
+                    system_template=legacy_system, user_template=legacy_user,
+                )
             if selected == CHITCHAT_FLAT_COMPARE_PROTOCOL_ID and bundle_revision == "1.1.0":
                 from .visual_compare_prompt_chitchat_flat_r110 import (
                     VISUAL_COMPARE_SYSTEM as legacy_system,

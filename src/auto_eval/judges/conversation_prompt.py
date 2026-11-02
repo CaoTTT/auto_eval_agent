@@ -113,7 +113,10 @@ def assemble_conversation(system: str, bundle: dict, protocol, evaluation_dateti
                 text(f"{asset_id} 结束")
         text(f"产品{n}轨迹结束")
     if is_dialogue_experience:
-        text(f"只输出 target_turn={target} 的逐产品JSON：answer1/answer2以及启用时answer3；每个产品仅score(1—5整数)、reason、suggestion、domain。不输出Gate或各分项分。")
+        if protocol.bundle_revision == "1.0.0":
+            text(f"只输出 target_turn={target} 的逐产品JSON：answer1/answer2以及启用时answer3；每个产品仅score(1—5整数)、reason、suggestion、domain。不输出Gate或各分项分。")
+        else:
+            text(f"只输出 target_turn={target} 的逐产品JSON：answer1/answer2以及启用时answer3；每个产品先生成reason，再生成score(1—5整数)，最后生成suggestion和domain。reason按证据、实际表现及影响、分档依据简短说明。不输出Gate或各分项分。")
     elif is_flat_chat:
         text(f"只输出 target_turn={target} 的七维扁平JSON；每维先合并证据理由DIM_reason，再逐产品answerN_DIM_score；不输出个性化、总分或额外Gate字段。")
     elif is_knowledge_qa:

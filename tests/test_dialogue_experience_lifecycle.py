@@ -59,7 +59,7 @@ def test_frozen_protocol_and_four_output_values_survive_restore():
     assert recovered["is_dialogue_experience"] and recovered["executable"]
     assert require_snapshot_protocol(source).id == PROFILE
     restored = _task_from_snapshot(source, source["task_id"])
-    assert restored.protocol_manifest["bundle_revision"] == "1.0.0"
+    assert restored.protocol_manifest["bundle_revision"] == "1.0.1"
     assert restored.protocol_manifest["result_schema_version"] == SCHEMA
     assert "recovery_source" not in restored.protocol_manifest
     payload = history.snapshot_payload(history.task_to_snapshot(restored))

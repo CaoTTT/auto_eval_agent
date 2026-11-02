@@ -18,11 +18,11 @@
 | qa_competitor_compare@0.2-simplified-calibrated | 0.2.3 | 0.2-simplified-calibrated | V0.2 简化版·评分校准（实验） | QA-S1.0-P04 | 问答对比 \| 标准S1.0 \| Prompt P04 \| Qwen3.8-Flash \| 实验 | 否 |
 | qa_competitor_compare@0.2-simplified-thinking-exposure | 0.2.3 | 0.2-simplified-thinking-exposure | V0.2 简化版·思考暴露优化（可用） | QA-S1.0-P05 | 问答对比 \| 标准S1.0 \| Prompt P05 \| Qwen3.8-Flash \| 实验 | 否 |
 | qa_chat_compare@1.0 | 1.0.0 | 1.0 | 问答闲聊V1·1-5分（候选） | CHAT-S1.0-P01 | 闲聊对比 \| 标准S1.0 \| Prompt P01 \| Qwen3.8-Flash \| 实验 | 否 |
-| dialogue_experience_compare@1.0 | 1.0.0 | 1.0 | 对话体验综合评估·1-5分（候选） | EXP-S1.0-P01 | 对话体验对比 \| 标准S1.0 \| Prompt P01 \| Qwen3.8-Flash \| 实验 | 是 |
+| dialogue_experience_compare@1.0 | 1.0.1 | 1.0 | 对话体验综合评估·1-5分（候选） | EXP-S1.0-P01 | 对话体验对比 \| 标准S1.0 \| Prompt P01 \| Qwen3.8-Flash \| 实验 | 是 |
 
 “生产／实验”是用户批准的展示标签，不决定协议的实际 `status` 或 `selectable`。新建任务的可选项继续以当前 registry 的 `selectable` 为准；例如时效性协议的实际状态仍是 `experimental`，命名为“生产”不会更改该状态。当前不可新建选择的四项仍不可选，历史任务继续可按原有逻辑查看。
 
-只有表中的精确 `(evaluation_profile, bundle_revision)` 命中才使用规范名称。缺少实现版本、旧实现版本或未知协议使用调用方提供的原展示名称；没有原名称时回退协议 ID，不用当前名称推断或覆盖历史版本。
+只有表中的精确 `(evaluation_profile, bundle_revision)` 命中才使用规范名称。对话体验协议的历史修订 `1.0.0` 单独保留原P01标签，不进入当前选择目录；当前 `1.0.1` 只调整为先生成reason再生成score，沿用同一模板方案标签。除此明确历史映射外，缺少实现版本、旧实现版本或未知协议使用调用方提供的原展示名称；没有原名称时回退协议 ID，不用当前名称推断或覆盖历史版本。
 
 新文字标签不再展示日期；日期仍保留在源 Excel 的“日期”列，采用北京时间 `YYMMDD`，表示最近确实改变渲染 prompt 内容的日期。此前核对的日期证据如下，均来自实际 prompt 模板正文的 Git 差异：
 
