@@ -1,29 +1,29 @@
 # Prompt 展示名称映射
 
-本表保留规范展示名称、原展示名称及精确协议身份的对应关系。命名只作用于界面展示；协议 ID、`standard_version`、`bundle_revision`、原 `CompareProtocol.display`、协议状态、公开元数据、请求元数据和 prompt 正文保持原值。
+本表依据用户提供的《评估标准与Prompt版本命名表.xlsx》（2026-11-02）更新，保留版本代号、规范展示名称、原展示名称及精确协议身份的对应关系。界面名称逐字采用 Excel 的“文字标签”列，“版本代号”列保留在本表供查询。命名只作用于界面展示；协议 ID、`standard_version`、`bundle_revision`、原 `CompareProtocol.display`、协议状态、公开元数据、请求元数据和 prompt 正文保持原值。
 
-名称结构为“评估类型-展示版本-P实现版本-prompt更新日期-使用标签”；思考暴露版保留“思考暴露”区分词。日期采用北京时间 `YYMMDD`，表示最近确实改变渲染 prompt 内容的日期。名称中的 `V1` 是批准的展示名称组成部分，不重写原协议的 `standard_version`。
+文字标签结构为“标准名称 | 标准S版本 | Prompt P序号 | 裁判模型 | 状态”，版本代号结构为“类别代码-S标准版本-P两位序号”，例如 `QA-S1.0-P01`。`S1.0`、`S0.3`、Prompt 序号、模型名称及“生产／实验”均为表格规定的展示文字，不据此改写实际标准版本、实现修订、执行模型或协议状态。思考暴露版对应 `QA-S1.0-P05`。
 
-| 协议 ID | bundle_revision | standard_version | 原展示名称 | 规范展示名称 | 当前可新建选择 |
-| --- | --- | --- | --- | --- | --- |
-| qa_competitor_compare@0.2-simplified | 0.2.1 | 0.2-simplified | V0.2 简化版（稳定） | 问答对比-V1-P0.2.1-261022-生产 | 是 |
-| qa_competitor_compare@0.2-simplified-plus | 0.2.3 | 0.2-simplified-plus | V0.2 简化版（稳定plus）·1-5分 | 问答对比-V1-P0.2.3-261030-生产 | 是 |
-| qa_competitor_compare@0.2-simplified-1022 | 0.2.6 | 0.2-simplified-1022 | V0.2简化版（1022优化） | 问答对比-V1-P0.2.6-261023-实验 | 是 |
-| qa_chat_compare@1.1 | 1.1.0 | 1.1 | 问答闲聊V2·1-5分（候选） | 闲聊对比-V1-P1.1.0-261028-实验 | 是 |
-| qa_chat_compare@1.1-demand-calibrated | 1.1.3 | 1.1-demand-calibrated | 问答闲聊V2·需求与分档校准·1-5分（候选） | 闲聊对比-V1-P1.1.3-261030-实验 | 是 |
-| chitchat_evidence_first_flat@1.1 | 1.1.1 | 1.1 | 闲聊七维·证据先行·1-5分（候选） | 闲聊对比-V1-P1.1.1-261030-实验 | 是 |
-| timeliness_compare@1.0 | 1.0.2 | 1.0 | 时效性评估V1·1-3分（候选） | 时效性对比-V1-P1.0.2-261022-生产 | 是 |
-| knowledge_qa_compare@1.0 | 1.0.0 | 1.0 | 知识问答V1·0-2分（候选） | 知识问答对比-V1-P1.0.0-261029-实验 | 是 |
-| qa_competitor_compare@0.3 | 0.3.1 | 0.3 | V0.3（实验） | 问答对比-V0.3-P0.3.1-261022-实验 | 否 |
-| qa_competitor_compare@0.2-simplified-calibrated | 0.2.3 | 0.2-simplified-calibrated | V0.2 简化版·评分校准（实验） | 问答对比-V1-P0.2.3-261022-实验 | 否 |
-| qa_competitor_compare@0.2-simplified-thinking-exposure | 0.2.3 | 0.2-simplified-thinking-exposure | V0.2 简化版·思考暴露优化（可用） | 问答对比-V1-P0.2.3-思考暴露-261022-实验 | 否 |
-| qa_chat_compare@1.0 | 1.0.0 | 1.0 | 问答闲聊V1·1-5分（候选） | 闲聊对比-V1-P1.0.0-261022-实验 | 否 |
+| 协议 ID | bundle_revision | standard_version | 原展示名称 | 版本代号 | 规范展示名称 | 当前可新建选择 |
+| --- | --- | --- | --- | --- | --- | --- |
+| qa_competitor_compare@0.2-simplified | 0.2.1 | 0.2-simplified | V0.2 简化版（稳定） | QA-S1.0-P01 | 问答对比 \| 标准S1.0 \| Prompt P01 \| Qwen3.5-397B-A17B \| 生产 | 是 |
+| qa_competitor_compare@0.2-simplified-plus | 0.2.3 | 0.2-simplified-plus | V0.2 简化版（稳定plus）·1-5分 | QA-S1.0-P02 | 问答对比 \| 标准S1.0 \| Prompt P02 \| Qwen3.8-Flash \| 生产 | 是 |
+| qa_competitor_compare@0.2-simplified-1022 | 0.2.6 | 0.2-simplified-1022 | V0.2简化版（1022优化） | QA-S1.0-P03 | 问答对比 \| 标准S1.0 \| Prompt P03 \| Qwen3.8-Flash \| 实验 | 是 |
+| qa_chat_compare@1.1 | 1.1.0 | 1.1 | 问答闲聊V2·1-5分（候选） | CHAT-S1.0-P02 | 闲聊对比 \| 标准S1.0 \| Prompt P02 \| Qwen3.8-Flash \| 生产 | 是 |
+| qa_chat_compare@1.1-demand-calibrated | 1.1.3 | 1.1-demand-calibrated | 问答闲聊V2·需求与分档校准·1-5分（候选） | CHAT-S1.0-P03 | 闲聊对比 \| 标准S1.0 \| Prompt P03 \| Qwen3.8-Flash \| 实验 | 是 |
+| chitchat_evidence_first_flat@1.1 | 1.1.1 | 1.1 | 闲聊七维·证据先行·1-5分（候选） | CHAT-S1.0-P04 | 闲聊对比 \| 标准S1.0 \| Prompt P04 \| Qwen3.8-Flash \| 实验 | 是 |
+| timeliness_compare@1.0 | 1.0.2 | 1.0 | 时效性评估V1·1-3分（候选） | TIME-S1.0-P01 | 时效性对比 \| 标准S1.0 \| Prompt P01 \| Qwen3.8-Flash \| 生产 | 是 |
+| knowledge_qa_compare@1.0 | 1.0.0 | 1.0 | 知识问答V1·0-2分（候选） | KQA-S1.0-P01 | 知识问答（测试部） \| 标准S1.0 \| Prompt P01 \| Qwen3.8-Flash \| 实验 | 是 |
+| qa_competitor_compare@0.3 | 0.3.1 | 0.3 | V0.3（实验） | QA-S0.3-P01 | 问答对比 \| 标准S0.3 \| Prompt P01 \| Qwen3.8-Flash \| 实验 | 否 |
+| qa_competitor_compare@0.2-simplified-calibrated | 0.2.3 | 0.2-simplified-calibrated | V0.2 简化版·评分校准（实验） | QA-S1.0-P04 | 问答对比 \| 标准S1.0 \| Prompt P04 \| Qwen3.8-Flash \| 实验 | 否 |
+| qa_competitor_compare@0.2-simplified-thinking-exposure | 0.2.3 | 0.2-simplified-thinking-exposure | V0.2 简化版·思考暴露优化（可用） | QA-S1.0-P05 | 问答对比 \| 标准S1.0 \| Prompt P05 \| Qwen3.8-Flash \| 实验 | 否 |
+| qa_chat_compare@1.0 | 1.0.0 | 1.0 | 问答闲聊V1·1-5分（候选） | CHAT-S1.0-P01 | 闲聊对比 \| 标准S1.0 \| Prompt P01 \| Qwen3.8-Flash \| 实验 | 否 |
 
 “生产／实验”是用户批准的展示标签，不决定协议的实际 `status` 或 `selectable`。新建任务的可选项继续以当前 registry 的 `selectable` 为准；例如时效性协议的实际状态仍是 `experimental`，命名为“生产”不会更改该状态。当前不可新建选择的四项仍不可选，历史任务继续可按原有逻辑查看。
 
 只有表中的精确 `(evaluation_profile, bundle_revision)` 命中才使用规范名称。缺少实现版本、旧实现版本或未知协议使用调用方提供的原展示名称；没有原名称时回退协议 ID，不用当前名称推断或覆盖历史版本。
 
-日期证据如下，均来自实际 prompt 模板正文的 Git 差异：
+新文字标签不再展示日期；日期仍保留在源 Excel 的“日期”列，采用北京时间 `YYMMDD`，表示最近确实改变渲染 prompt 内容的日期。此前核对的日期证据如下，均来自实际 prompt 模板正文的 Git 差异：
 
 - `261022`：`fc57fdc` 修改产品背景归属规则及 USER 公共背景段，涉及简化稳定、V0.3、评分校准、思考暴露 r023、问答闲聊 V1 和时效性。
 - 稳定 plus 的 `261030`：`c0bb796` 替换最新评分标准正文。
@@ -55,7 +55,9 @@ CSV、Excel 的原冻结协议名称与评估字段继续保留；本次统一�
 
 ## 回归验证
 
-2026-10-31 完成后端 **2988 passed**、前端 **34 组通过**、真实 Chrome 页面验收。新增测试验证了全部映射、旧修订与缺失修订回退、身份冲突经摘要缓存往返仍保留原名，以及配置、队列、历史、数据复用和新建任务的展示字段。12 个协议的 `request_metadata()` SHA256 基线均与改名前一致。
+本次标签更新（2026-11-02）：后端相关 **59 passed**（`test_prompt_names.py`、`test_prompt_name_surfaces.py`、`test_compare_prompt_selection.py`），全部 **34 组前端脚本通过**；真实 Chrome 验证全部 12 项新标签、4 项停用状态、原提交 ID、当前结果标签及历史修订回退，页面无脚本错误。12 个协议请求元数据的 SHA256 固定基线继续通过。业务代码仅改动展示映射的 12 个字符串；源 Excel 未修改。
+
+既往基线：2026-10-31 完成后端 **2988 passed**、前端 **34 组通过**、真实 Chrome 页面验收。新增测试验证了全部映射、旧修订与缺失修订回退、身份冲突经摘要缓存往返仍保留原名，以及配置、队列、历史、数据复用和新建任务的展示字段。12 个协议的 `request_metadata()` SHA256 基线均与改名前一致。
 
 后端命令为 `C:/workspace/venv/Scripts/python.exe -m pytest -q --basetemp C:/workspace/pnames_full --deselect tests/test_remote_media_inputs.py::test_download_cleanup_cannot_remove_history_or_follow_external_symlinks`，运行时 `PYTHONPATH` 指向当前仓库 `src`，`NO_PROXY=localhost,127.0.0.1,::1`。唯一排除项是此前已确认受本机 Windows 创建符号链接权限限制的既有用例（`WinError 1314`）；相关生产清理逻辑未改动。
 

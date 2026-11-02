@@ -1,6 +1,7 @@
 """Approved UI names must never relabel unknown history or protocol metadata."""
 from copy import deepcopy
 from pathlib import Path
+import re
 
 import pytest
 
@@ -9,18 +10,24 @@ from auto_eval.web.prompt_names import prompt_name, prompt_name_catalog
 
 
 APPROVED = [
-    ("qa_competitor_compare@0.2-simplified", "0.2.1", "问答对比-V1-P0.2.1-261022-生产"),
-    ("qa_competitor_compare@0.2-simplified-plus", "0.2.3", "问答对比-V1-P0.2.3-261030-生产"),
-    ("qa_competitor_compare@0.2-simplified-1022", "0.2.6", "问答对比-V1-P0.2.6-261023-实验"),
-    ("qa_chat_compare@1.1", "1.1.0", "闲聊对比-V1-P1.1.0-261028-实验"),
-    ("qa_chat_compare@1.1-demand-calibrated", "1.1.3", "闲聊对比-V1-P1.1.3-261030-实验"),
-    ("chitchat_evidence_first_flat@1.1", "1.1.1", "闲聊对比-V1-P1.1.1-261030-实验"),
-    ("timeliness_compare@1.0", "1.0.2", "时效性对比-V1-P1.0.2-261022-生产"),
-    ("knowledge_qa_compare@1.0", "1.0.0", "知识问答对比-V1-P1.0.0-261029-实验"),
-    ("qa_competitor_compare@0.3", "0.3.1", "问答对比-V0.3-P0.3.1-261022-实验"),
-    ("qa_competitor_compare@0.2-simplified-calibrated", "0.2.3", "问答对比-V1-P0.2.3-261022-实验"),
-    ("qa_competitor_compare@0.2-simplified-thinking-exposure", "0.2.3", "问答对比-V1-P0.2.3-思考暴露-261022-实验"),
-    ("qa_chat_compare@1.0", "1.0.0", "闲聊对比-V1-P1.0.0-261022-实验"),
+    ("qa_competitor_compare@0.2-simplified", "0.2.1", "问答对比 | 标准S1.0 | Prompt P01 | Qwen3.5-397B-A17B | 生产"),
+    ("qa_competitor_compare@0.2-simplified-plus", "0.2.3", "问答对比 | 标准S1.0 | Prompt P02 | Qwen3.8-Flash | 生产"),
+    ("qa_competitor_compare@0.2-simplified-1022", "0.2.6", "问答对比 | 标准S1.0 | Prompt P03 | Qwen3.8-Flash | 实验"),
+    ("qa_chat_compare@1.1", "1.1.0", "闲聊对比 | 标准S1.0 | Prompt P02 | Qwen3.8-Flash | 生产"),
+    ("qa_chat_compare@1.1-demand-calibrated", "1.1.3", "闲聊对比 | 标准S1.0 | Prompt P03 | Qwen3.8-Flash | 实验"),
+    ("chitchat_evidence_first_flat@1.1", "1.1.1", "闲聊对比 | 标准S1.0 | Prompt P04 | Qwen3.8-Flash | 实验"),
+    ("timeliness_compare@1.0", "1.0.2", "时效性对比 | 标准S1.0 | Prompt P01 | Qwen3.8-Flash | 生产"),
+    ("knowledge_qa_compare@1.0", "1.0.0", "知识问答（测试部） | 标准S1.0 | Prompt P01 | Qwen3.8-Flash | 实验"),
+    ("qa_competitor_compare@0.3", "0.3.1", "问答对比 | 标准S0.3 | Prompt P01 | Qwen3.8-Flash | 实验"),
+    ("qa_competitor_compare@0.2-simplified-calibrated", "0.2.3", "问答对比 | 标准S1.0 | Prompt P04 | Qwen3.8-Flash | 实验"),
+    ("qa_competitor_compare@0.2-simplified-thinking-exposure", "0.2.3", "问答对比 | 标准S1.0 | Prompt P05 | Qwen3.8-Flash | 实验"),
+    ("qa_chat_compare@1.0", "1.0.0", "闲聊对比 | 标准S1.0 | Prompt P01 | Qwen3.8-Flash | 实验"),
+]
+
+VERSION_CODES = [
+    "QA-S1.0-P01", "QA-S1.0-P02", "QA-S1.0-P03", "CHAT-S1.0-P02",
+    "CHAT-S1.0-P03", "CHAT-S1.0-P04", "TIME-S1.0-P01", "KQA-S1.0-P01",
+    "QA-S0.3-P01", "QA-S1.0-P04", "QA-S1.0-P05", "CHAT-S1.0-P01",
 ]
 
 
@@ -72,7 +79,7 @@ def test_catalog_matches_current_identities_and_reads_availability_from_registry
         "qa_competitor_compare@0.2-simplified-thinking-exposure", "qa_chat_compare@1.0",
     }
     timeliness = resolve_compare_protocol("timeliness_compare@1.0")
-    assert prompt_name(timeliness.id, timeliness.bundle_revision).endswith("-生产")
+    assert prompt_name(timeliness.id, timeliness.bundle_revision).endswith(" | 生产")
     assert timeliness.status == "experimental" and timeliness.selectable is True
 
 
@@ -105,9 +112,10 @@ def test_document_mapping_matches_the_complete_runtime_catalog():
     rows = []
     for line in path.read_text(encoding="utf-8").splitlines():
         if line.startswith("| ") and "@" in line:
-            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            cells = [cell.strip().replace(r"\|", "|")
+                     for cell in re.split(r"(?<!\\)\|", line.strip().strip("|"))]
             rows.append(cells)
     expected = [[r["evaluation_profile"], r["bundle_revision"], r["standard_version"],
-                 r["legacy_name"], r["canonical_name"], "是" if r["selectable"] else "否"]
-                for r in prompt_name_catalog()]
+                 r["legacy_name"], code, r["canonical_name"], "是" if r["selectable"] else "否"]
+                for r, code in zip(prompt_name_catalog(), VERSION_CODES, strict=True)]
     assert rows == expected

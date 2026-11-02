@@ -10,29 +10,29 @@ from ..judges.compare_protocols import resolve_compare_protocol
 
 _PROMPT_NAMES = {
     ("qa_competitor_compare@0.2-simplified", "0.2.1"):
-        "问答对比-V1-P0.2.1-261022-生产",
+        "问答对比 | 标准S1.0 | Prompt P01 | Qwen3.5-397B-A17B | 生产",
     ("qa_competitor_compare@0.2-simplified-plus", "0.2.3"):
-        "问答对比-V1-P0.2.3-261030-生产",
+        "问答对比 | 标准S1.0 | Prompt P02 | Qwen3.8-Flash | 生产",
     ("qa_competitor_compare@0.2-simplified-1022", "0.2.6"):
-        "问答对比-V1-P0.2.6-261023-实验",
+        "问答对比 | 标准S1.0 | Prompt P03 | Qwen3.8-Flash | 实验",
     ("qa_chat_compare@1.1", "1.1.0"):
-        "闲聊对比-V1-P1.1.0-261028-实验",
+        "闲聊对比 | 标准S1.0 | Prompt P02 | Qwen3.8-Flash | 生产",
     ("qa_chat_compare@1.1-demand-calibrated", "1.1.3"):
-        "闲聊对比-V1-P1.1.3-261030-实验",
+        "闲聊对比 | 标准S1.0 | Prompt P03 | Qwen3.8-Flash | 实验",
     ("chitchat_evidence_first_flat@1.1", "1.1.1"):
-        "闲聊对比-V1-P1.1.1-261030-实验",
+        "闲聊对比 | 标准S1.0 | Prompt P04 | Qwen3.8-Flash | 实验",
     ("timeliness_compare@1.0", "1.0.2"):
-        "时效性对比-V1-P1.0.2-261022-生产",
+        "时效性对比 | 标准S1.0 | Prompt P01 | Qwen3.8-Flash | 生产",
     ("knowledge_qa_compare@1.0", "1.0.0"):
-        "知识问答对比-V1-P1.0.0-261029-实验",
+        "知识问答（测试部） | 标准S1.0 | Prompt P01 | Qwen3.8-Flash | 实验",
     ("qa_competitor_compare@0.3", "0.3.1"):
-        "问答对比-V0.3-P0.3.1-261022-实验",
+        "问答对比 | 标准S0.3 | Prompt P01 | Qwen3.8-Flash | 实验",
     ("qa_competitor_compare@0.2-simplified-calibrated", "0.2.3"):
-        "问答对比-V1-P0.2.3-261022-实验",
+        "问答对比 | 标准S1.0 | Prompt P04 | Qwen3.8-Flash | 实验",
     ("qa_competitor_compare@0.2-simplified-thinking-exposure", "0.2.3"):
-        "问答对比-V1-P0.2.3-思考暴露-261022-实验",
+        "问答对比 | 标准S1.0 | Prompt P05 | Qwen3.8-Flash | 实验",
     ("qa_chat_compare@1.0", "1.0.0"):
-        "闲聊对比-V1-P1.0.0-261022-实验",
+        "闲聊对比 | 标准S1.0 | Prompt P01 | Qwen3.8-Flash | 实验",
 }
 
 
