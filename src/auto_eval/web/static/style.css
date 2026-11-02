@@ -475,3 +475,7 @@ tr.result-error td, tr.result-error-detail td { background: #fef2f2 !important; 
 
 .export-image-option { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; }
 .export-image-option input { width: auto; margin: 0; }
+.dialogue-experience-product { padding: 10px 0; border-bottom: 1px solid #e2e8f0; }
+.dialogue-experience-product:last-of-type { border-bottom: 0; }
+.dialogue-experience-product p { margin: 7px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.dialogue-experience-reason { color: #334155; line-height: 1.65; }

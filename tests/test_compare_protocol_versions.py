@@ -15,6 +15,7 @@ from auto_eval.judges.compare_protocols import (
     TIMELINESS_COMPARE_PROTOCOL_ID,
     KNOWLEDGE_QA_COMPARE_PROTOCOL_ID,
     CHITCHAT_FLAT_COMPARE_PROTOCOL_ID,
+    DIALOGUE_EXPERIENCE_COMPARE_PROTOCOL_ID,
     V1022_COMPARE_PROTOCOL_ID,
     VisualCompareObservationV02,
     list_compare_protocols,
@@ -58,6 +59,7 @@ def test_registry_defaults_to_stable_v02_and_exposes_experimental_versions():
         TIMELINESS_COMPARE_PROTOCOL_ID,
         KNOWLEDGE_QA_COMPARE_PROTOCOL_ID,
         V1022_COMPARE_PROTOCOL_ID,
+        DIALOGUE_EXPERIENCE_COMPARE_PROTOCOL_ID,
     }
     assert resolve_compare_protocol(V03_COMPARE_PROTOCOL_ID).status == "experimental"
     plus = resolve_compare_protocol(V02_PLUS_COMPARE_PROTOCOL_ID)
@@ -203,6 +205,7 @@ async def test_eval_api_freezes_selected_protocol_on_new_task(monkeypatch):
         TIMELINESS_COMPARE_PROTOCOL_ID,
         KNOWLEDGE_QA_COMPARE_PROTOCOL_ID,
         V1022_COMPARE_PROTOCOL_ID,
+        DIALOGUE_EXPERIENCE_COMPARE_PROTOCOL_ID,
     ]
     assert [p["id"] for p in public if p["status"] == "stable"] == [
         DEFAULT_COMPARE_PROTOCOL_ID, V02_PLUS_COMPARE_PROTOCOL_ID,

@@ -76,6 +76,8 @@ def build_human_statistics(rows: list[dict], task_ids: list[str], products: list
                     row.get("model_standard_id") == "knowledge_qa_compare" for row in rows)
     flat = any(row.get("human_standard_id") == "chitchat_evidence_first_flat" or
                row.get("model_standard_id") == "chitchat_evidence_first_flat" for row in rows)
+    experience = any(row.get("human_standard_id") == "dialogue_experience_compare" or
+                     row.get("model_standard_id") == "dialogue_experience_compare" for row in rows)
     grouped = defaultdict(list)
     for row in rows:
         grouped[row["task_id"], row["product_id"], row["dimension_id"]].append(row)
@@ -130,7 +132,7 @@ def build_human_statistics(rows: list[dict], task_ids: list[str], products: list
                 if timeliness:
                     formal = {"scored", "not_applicable", "insufficient_evidence", "blocked_gate",
                               "blocked_understanding", "input_failed"}
-                elif flat:
+                elif flat or experience:
                     formal = {"scored", "unverifiable", "input_failed"}
                 elif knowledge:
                     formal = {"scored", "not_applicable", "insufficient_evidence", "unverifiable", "input_failed"}
@@ -138,7 +140,7 @@ def build_human_statistics(rows: list[dict], task_ids: list[str], products: list
                           r.get("human_status") in formal and r.get("model_score_status") in formal]
                 states.append(dict(task_id=task, dimension_id=dim, kind="score_status", product_id=product, n=len(values),
                                    agreement=ratio(sum(r["human_status"]==r["model_score_status"] for r in values),len(values))))
-        for product in (() if knowledge or flat else products):
+        for product in (() if knowledge or flat or experience else products):
             for gate in ("response", "safety"):
                 group = {r["case_key"]: r for r in rows if r["task_id"]==task and r["product_id"]==product and
                          r["identity_accepted"] and r.get("compatible", True) and r.get("human_gates",{}).get(gate) in ("pass","fail","unclear") and
@@ -184,4 +186,10 @@ def build_human_statistics(rows: list[dict], task_ids: list[str], products: list
         result["score_policy"] = {"score_range": [1, 5], "response_safety_scores": [1, 5],
                                   "quality_scores": [1, 2, 3, 4, 5],
                                   "null_policy": "缺证或失败不补分；响应/安全低分不影响其他维度"}
+    if experience:
+        result["metric_version"] = "human-statistics-dialogue-experience-1.0"
+        result["states"] = [row for row in states if row["kind"] == "score_status"]
+        result["score_policy"] = {"score_range": [1, 5], "quality_scores": [1, 2, 3, 4, 5],
+                                  "high_score_min": 4, "low_score_max": 2,
+                                  "null_policy": "仅排除无数字或可信采集失败；保留有数字的暂评分，不补0"}
     return result

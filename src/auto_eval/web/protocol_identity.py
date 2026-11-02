@@ -9,7 +9,8 @@ def recover_protocol_identity(snapshot: dict) -> dict:
     if snapshot.get("mode", "compare") != "compare":
         return {"evaluation_profile": snapshot.get("evaluation_profile", ""),
                 "manifest": manifest, "diagnostics": [], "executable": True, "is_chat": False,
-                "is_timeliness": False, "is_knowledge_qa": False, "is_flat_chat": False}
+                "is_timeliness": False, "is_knowledge_qa": False, "is_flat_chat": False,
+                "is_dialogue_experience": False}
     options = snapshot.get("options") or {}
     records = [snapshot, manifest, options, *(snapshot.get("results") or [])]
     profiles, families, versions, revisions, schemas = [], set(), set(), set(), set()
@@ -38,6 +39,8 @@ def recover_protocol_identity(snapshot: dict) -> dict:
                 families.add("knowledge_qa_compare")
             if str(record["result_schema_version"]).startswith("chitchat-flat-result-"):
                 families.add("chitchat_evidence_first_flat")
+            if str(record["result_schema_version"]).startswith("dialogue-experience-result-"):
+                families.add("dialogue_experience_compare")
     if len(set(profiles)) > 1 or len(families) > 1 or len(versions) > 1:
         diagnostics.append("任务、清单或结果的协议身份冲突，禁止续跑和正式评分统计")
     if len(revisions) > 1:
@@ -62,6 +65,7 @@ def recover_protocol_identity(snapshot: dict) -> dict:
     timeliness = "timeliness_compare" in families or profile.startswith("timeliness_compare@")
     knowledge = "knowledge_qa_compare" in families or profile.startswith("knowledge_qa_compare@")
     flat = "chitchat_evidence_first_flat" in families or profile.startswith("chitchat_evidence_first_flat@")
+    experience = "dialogue_experience_compare" in families or profile.startswith("dialogue_experience_compare@")
     revision = next(iter(revisions)) if len(revisions) == 1 else None
     if chat and not revision:
         diagnostics.append("问答闲聊任务缺少冻结的 bundle_revision，不能用当前版本补写历史")
@@ -77,12 +81,16 @@ def recover_protocol_identity(snapshot: dict) -> dict:
         diagnostics.append("闲聊七维任务缺少冻结的 bundle_revision，不能补写历史")
     if flat and not schemas:
         diagnostics.append("闲聊七维任务缺少冻结的结果Schema，不能补写历史")
+    if experience and not revision:
+        diagnostics.append("对话体验任务缺少冻结的 bundle_revision，不能补写历史")
+    if experience and not schemas:
+        diagnostics.append("对话体验任务缺少冻结的结果Schema，不能补写历史")
     try:
         protocol = resolve_compare_protocol(profile, revision)
     except ValueError as exc:
         diagnostics.append(str(exc))
         protocol = None
-    if protocol is not None and (chat or timeliness or knowledge or flat) and schemas and schemas != {protocol.result_schema_version}:
+    if protocol is not None and (chat or timeliness or knowledge or flat or experience) and schemas and schemas != {protocol.result_schema_version}:
         diagnostics.append("记录的结果Schema与冻结协议不一致，禁止续跑和正式评分统计")
     if protocol is not None and not diagnostics:
         # Only restore facts actually recorded for chat. Legacy compatibility
@@ -94,11 +102,12 @@ def recover_protocol_identity(snapshot: dict) -> dict:
             manifest.setdefault("bundle_revision", revision)
         if len(schemas) == 1:
             manifest.setdefault("result_schema_version", next(iter(schemas)))
-        if not (chat or timeliness or knowledge or flat) and not revision:
+        if not (chat or timeliness or knowledge or flat or experience) and not revision:
             manifest.setdefault("recovery_source", "legacy_compatible_inference")
     return {"evaluation_profile": profile, "manifest": manifest,
             "diagnostics": list(dict.fromkeys(diagnostics)), "executable": not diagnostics,
-            "is_chat": chat, "is_timeliness": timeliness, "is_knowledge_qa": knowledge, "is_flat_chat": flat}
+            "is_chat": chat, "is_timeliness": timeliness, "is_knowledge_qa": knowledge,
+            "is_flat_chat": flat, "is_dialogue_experience": experience}
 
 
 def require_snapshot_protocol(snapshot: dict):

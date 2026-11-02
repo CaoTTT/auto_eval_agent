@@ -28,6 +28,13 @@ def profile():
 
 
 def payload(protocol):
+    if protocol.result_schema_version == "dialogue-experience-result-1":
+        return {f"answer{n}": {
+            "score": 2 if n == 1 else 1,
+            "reason": f"【类型：知识型；目标：回答问题；主查：需求满足；证据状态：充分】产品{n}：第{n}位置依据。",
+            "suggestion": "无",
+            "domain": "未定义",
+        } for n in (1, 2)}
     if protocol.output_contract == "compare_1022_v2":
         return example_1022_output(2)
     if protocol.result_schema_version == "chitchat-flat-result-1":
@@ -49,7 +56,11 @@ def payload(protocol):
 async def test_each_protocol_keeps_default_request_and_restores_reversed_scores(protocol):
     raw = payload(protocol)
     dimension = "understanding" if "answer1_understanding_score" in raw else protocol.dimensions[0]
-    raw.update({f"answer1_{dimension}_score": 2, f"answer2_{dimension}_score": 1})
+    experience = protocol.result_schema_version == "dialogue-experience-result-1"
+    if experience:
+        raw["answer1"]["score"], raw["answer2"]["score"] = 2, 1
+    else:
+        raw.update({f"answer1_{dimension}_score": 2, f"answer2_{dimension}_score": 1})
     client = Client(raw)
     judge = VisualCompareJudge(client, profile(), protocol)
     args = dict(question="同一共享问题", product_count=2, evaluation_time=FIXED_TIME,
@@ -71,16 +82,23 @@ async def test_each_protocol_keeps_default_request_and_restores_reversed_scores(
         assert swapped[f"{dimension}_rank_groups"] == [["product2"], ["product1"]]
     reason_key = f"{dimension}_reason" if f"{dimension}_reason" in raw else f"answer1_{dimension}_reason"
     mapped_key = reason_key.replace("answer1_", "answer2_")
-    expected_reason = raw[reason_key].replace("产品1", "ORIGINAL_PRODUCT_2").replace("产品2", "产品1").replace("ORIGINAL_PRODUCT_2", "产品2")
+    source_reason = raw["answer1"]["reason"] if experience else raw[reason_key]
+    expected_reason = source_reason.replace("产品1", "ORIGINAL_PRODUCT_2").replace("产品2", "产品1").replace("ORIGINAL_PRODUCT_2", "产品2")
     if protocol.output_contract == "compare_1022_v2":
         for n in (1, 2):
             assert product_reason_1022(swapped[mapped_key], n) == product_reason_1022(raw[reason_key], 3 - n)
     else:
         assert swapped[mapped_key] == expected_reason
+    if experience:
+        assert swapped["model_product_results"]["answer2"]["score"] == 2
+        assert swapped["model_product_results"]["answer2"]["reason"] == expected_reason
     if "raw_model_output" in swapped:
         assert json.loads(swapped["raw_model_output"]) == raw
     if "raw_key_pairs" in swapped:
-        assert dict(swapped["raw_key_pairs"]) == raw
+        if experience:
+            assert swapped["raw_key_pairs"] == json.loads(json.dumps(raw), object_pairs_hook=list)
+        else:
+            assert dict(swapped["raw_key_pairs"]) == raw
     assert swapped["judge_product_order"] == [2, 1]
 
 

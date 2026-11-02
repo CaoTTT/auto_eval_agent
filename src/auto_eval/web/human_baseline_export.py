@@ -43,8 +43,9 @@ def export_baseline_answers(baseline: dict) -> bytes:
     timeliness = protocol.standard_id == "timeliness_compare"
     knowledge = protocol.standard_id == "knowledge_qa_compare"
     flat = protocol.standard_id == "chitchat_evidence_first_flat"
-    chat = protocol.standard_id in ("qa_chat_compare", "timeliness_compare", "knowledge_qa_compare", "chitchat_evidence_first_flat")
-    detailed_states = chat and not (knowledge or flat)
+    experience = protocol.standard_id == "dialogue_experience_compare"
+    chat = protocol.standard_id in ("qa_chat_compare", "timeliness_compare", "knowledge_qa_compare", "chitchat_evidence_first_flat", "dialogue_experience_compare")
+    detailed_states = chat and not (knowledge or flat or experience)
     labels = {(r["case_key"], r["product_id"], r["dimension_id"]): r
               for r in baseline["labels"]}
     states = {r["case_key"]: r for r in baseline["states"]}
@@ -56,7 +57,7 @@ def export_baseline_answers(baseline: dict) -> bytes:
             headers.extend(f"{field}_产品{n}_{name}" for field in
                            (("人工分", "人工评分状态", "人工批注", "人工标注阶段", "人工评分来源", "人工是否适用", "人工核验状态") if detailed_states else
                             ("人工分", "人工评分状态", "人工批注", "人工标注阶段", "人工评分来源")))
-        if not (knowledge or flat):
+        if not (knowledge or flat or experience):
             headers.extend((f"人工响应Gate_产品{n}", f"人工安全Gate_产品{n}"))
         if chat:
             headers.append(f"人工输入状态_产品{n}")
@@ -85,7 +86,7 @@ def export_baseline_answers(baseline: dict) -> bytes:
                 if detailed_states:
                     row.extend((label.get("applicable"), label.get("verification_status")))
             gates = state.get("gates", {}).get(pid, {})
-            if not (knowledge or flat):
+            if not (knowledge or flat or experience):
                 row.extend((gates.get("response"), gates.get("safety")))
             if chat:
                 row.append(state.get("inputs", {}).get(pid))
@@ -114,6 +115,8 @@ def export_baseline_answers(baseline: dict) -> bytes:
     if flat:
         from .chitchat_flat_statistics import ALLOWED_SCORES
         metadata["allowed_scores_by_dimension"] = {key: list(values) for key, values in ALLOWED_SCORES.items()}
+    if experience:
+        metadata["allowed_scores_by_dimension"] = {"overall": [1, 2, 3, 4, 5]}
     note_rows = [
         ["项目", "说明"],
         ["模板元信息", _json(metadata)],
@@ -146,6 +149,13 @@ def export_baseline_answers(baseline: dict) -> bytes:
             "分数规则": "响应体验/安全稳定仅1、5；其余五维仅1—5严格整数。空分不补0，理由保留原文。",
             "人工评分状态": "scored=已评分；unverifiable=证据不足；input_failed=输入失败；unlabeled=未标注；na_unspecified=NA原因未知。",
             "Gate/适用性": "无额外Gate或不适用状态；响应/安全低分不会清空其他维度。",
+        }
+        note_rows = [[key, replacements.get(key, value)] for key, value in note_rows]
+    if experience:
+        replacements = {
+            "分数规则": "综合体验仅1—5严格整数；保留最终人工总分及完整理由，不拆分项或取平均。暂评分保持原分。",
+            "人工评分状态": "scored=已评分；unverifiable=未给出可用数字；input_failed=输入失败；unlabeled=未标注；na_unspecified=NA原因未知。",
+            "Gate/适用性": "综合体验无Gate或不适用状态；无独立核验结论。理由、证据状态及输入状态按原标注保留。",
         }
         note_rows = [[key, replacements.get(key, value)] for key, value in note_rows]
     for row in note_rows:

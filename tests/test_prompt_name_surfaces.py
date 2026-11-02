@@ -8,6 +8,7 @@ import pytest
 from auto_eval.config import AppConfig, JudgeConfig
 from auto_eval.judges.compare_protocols import (
     CHITCHAT_FLAT_COMPARE_PROTOCOL_ID, DEFAULT_COMPARE_PROTOCOL_ID,
+    DIALOGUE_EXPERIENCE_COMPARE_PROTOCOL_ID,
     TIMELINESS_COMPARE_PROTOCOL_ID, V02_PLUS_COMPARE_PROTOCOL_ID,
     V1022_COMPARE_PROTOCOL_ID, list_compare_protocols, resolve_compare_protocol,
 )
@@ -70,22 +71,31 @@ def app_config(monkeypatch):
 
 def test_configuration_exposes_aliases_separately_from_frozen_protocol_metadata(app_config):
     before = {p.id: deepcopy(p.public_metadata()) for p in list_compare_protocols()}
+    request_before = {p.id: request_hash(p) for p in list_compare_protocols()}
     response = server.api_config()
     catalog = response["prompt_name_catalog"]
     assert catalog == prompt_name_catalog()
     names = {(row["evaluation_profile"], row["bundle_revision"]): row for row in catalog}
-    assert len(names) == len(response["evaluation_profiles"]) == 12
+    assert len(names) == 13
+    assert len(response["evaluation_profiles"]) == 14
     for profile in response["evaluation_profiles"]:
         protocol = resolve_compare_protocol(profile["id"])
-        record = names[(protocol.id, protocol.bundle_revision)]
-        assert profile["canonical_name"] == record["canonical_name"]
-        assert profile["display"] == record["legacy_name"] == before[protocol.id]["display"]
-        assert profile["canonical_name"] != profile["display"]
+        record = names.get((protocol.id, protocol.bundle_revision))
+        if record is not None:
+            assert profile["canonical_name"] == record["canonical_name"]
+            assert profile["display"] == record["legacy_name"] == before[protocol.id]["display"]
+            assert profile["canonical_name"] != profile["display"]
+        else:
+            # A separately added protocol without an approved alias retains
+            # its exact original display name instead of borrowing a label.
+            assert profile["canonical_name"] == profile["display"] == protocol.display
         assert profile["selectable"] is protocol.selectable
         assert protocol.public_metadata() == before[protocol.id]
         assert "canonical_name" not in protocol.public_metadata()
         assert "canonical_name" not in protocol.request_metadata()
-        assert request_hash(protocol) == REQUEST_METADATA_SHA256[protocol.id]
+        assert request_hash(protocol) == request_before[protocol.id]
+        if protocol.id in REQUEST_METADATA_SHA256:
+            assert request_hash(protocol) == REQUEST_METADATA_SHA256[protocol.id]
 
 
 @pytest.mark.parametrize("profile_id,revision", [
@@ -113,6 +123,7 @@ def test_missing_or_unknown_revision_keeps_the_original_label(revision):
     (DEFAULT_COMPARE_PROTOCOL_ID, "current"),
     (V1022_COMPARE_PROTOCOL_ID, "current"),
     (CHITCHAT_FLAT_COMPARE_PROTOCOL_ID, "current"),
+    (DIALOGUE_EXPERIENCE_COMPARE_PROTOCOL_ID, "current"),
     (V02_PLUS_COMPARE_PROTOCOL_ID, "0.2.2"),
     (CHITCHAT_FLAT_COMPARE_PROTOCOL_ID, "1.1.0"),
     (DEFAULT_COMPARE_PROTOCOL_ID, None),
@@ -164,8 +175,9 @@ async def test_dataset_and_history_detail_return_display_metadata_without_rewrit
 
 
 @pytest.mark.asyncio
-async def test_new_task_alias_is_response_only_and_keeps_the_frozen_request_identity(monkeypatch, app_config):
-    protocol = resolve_compare_protocol(CHITCHAT_FLAT_COMPARE_PROTOCOL_ID)
+@pytest.mark.parametrize("profile_id", [CHITCHAT_FLAT_COMPARE_PROTOCOL_ID, DIALOGUE_EXPERIENCE_COMPARE_PROTOCOL_ID])
+async def test_new_task_alias_is_response_only_and_keeps_the_frozen_request_identity(monkeypatch, app_config, profile_id):
+    protocol = resolve_compare_protocol(profile_id)
     original_public, original_request = deepcopy(protocol.public_metadata()), deepcopy(protocol.request_metadata())
     created = []
 
@@ -191,7 +203,11 @@ async def test_new_task_alias_is_response_only_and_keeps_the_frozen_request_iden
     assert "prompt_name_catalog" not in task.protocol_manifest
     assert protocol.public_metadata() == original_public
     assert protocol.request_metadata() == original_request
-    assert request_hash(protocol) == REQUEST_METADATA_SHA256[protocol.id]
+    assert request_hash(protocol) == hashlib.sha256(json.dumps(
+        original_request, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+    if protocol.id in REQUEST_METADATA_SHA256:
+        assert request_hash(protocol) == REQUEST_METADATA_SHA256[protocol.id]
 
 
 def test_old_summary_cache_keeps_legacy_label_without_reading_or_rewriting_snapshot(tmp_path, monkeypatch):

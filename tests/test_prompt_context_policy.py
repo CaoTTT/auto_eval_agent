@@ -27,6 +27,13 @@ EVALUATION_TIME = datetime(2026, 10, 22, tzinfo=timezone.utc)
 
 
 def response_data(protocol, count):
+    if protocol.standard_id == "dialogue_experience_compare":
+        return {f"answer{n}": {
+            "score": 5,
+            "reason": f"【类型：知识型；目标：回答本轮问题；主查：需求满足；证据状态：充分】产品{n}本轮表现符合标准。",
+            "suggestion": "无",
+            "domain": "未定义",
+        } for n in range(1, count + 1)}
     if protocol.standard_id == "chitchat_evidence_first_flat":
         data = {}
         for dimension in protocol.dimensions:

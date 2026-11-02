@@ -12,6 +12,15 @@ from jinja2 import Template
 from pydantic import BaseModel, create_model, model_validator
 
 from ..schema import VisualCompareObservation
+from .dialogue_experience_schema import (
+    DIALOGUE_EXPERIENCE_STANDARD_ID, DIALOGUE_EXPERIENCE_COMPARE_PROTOCOL_ID,
+    DIALOGUE_EXPERIENCE_RESULT_SCHEMA_VERSION, DIALOGUE_EXPERIENCE_DIMENSIONS,
+    DIALOGUE_EXPERIENCE_DIMENSION_NAMES, DialogueExperienceObservation,
+)
+from .visual_compare_prompt_dialogue_experience import (
+    VISUAL_COMPARE_SYSTEM as DIALOGUE_EXPERIENCE_SYSTEM,
+    VISUAL_COMPARE_USER as DIALOGUE_EXPERIENCE_USER,
+)
 from .compare_1022_contract import (
     OUTPUT_CONTRACT_1022, STANDARD_VERSION_1022, DIMENSIONS_1022, Compare1022DualOutput,
 )
@@ -111,10 +120,10 @@ DIMENSIONS = (
 DIMENSION_NAMES = dict(zip(DIMENSIONS, (
     "理解需求", "内容准确性", "服务闭环", "场景化满足", "直观高效", "有理有据", "引导推荐",
 )))
-ALL_DIMENSIONS = tuple(dict.fromkeys((*DIMENSIONS, *QA_CHAT_DIMENSIONS, *TIMELINESS_DIMENSIONS, *KNOWLEDGE_QA_DIMENSIONS, *CHITCHAT_FLAT_DIMENSIONS)))
+ALL_DIMENSIONS = tuple(dict.fromkeys((*DIMENSIONS, *QA_CHAT_DIMENSIONS, *TIMELINESS_DIMENSIONS, *KNOWLEDGE_QA_DIMENSIONS, *CHITCHAT_FLAT_DIMENSIONS, *DIALOGUE_EXPERIENCE_DIMENSIONS)))
 DIMENSION_LABELS = {**KNOWLEDGE_QA_DIMENSION_NAMES, **DIMENSION_NAMES,
                     **QA_CHAT_DIMENSION_NAMES, **TIMELINESS_DIMENSION_NAMES,
-                    **CHITCHAT_FLAT_DIMENSION_NAMES}
+                    **CHITCHAT_FLAT_DIMENSION_NAMES, **DIALOGUE_EXPERIENCE_DIMENSION_NAMES}
 
 V02QualityScore: TypeAlias = Literal[1, 2, 3, 4, 5]
 
@@ -250,6 +259,10 @@ class CompareProtocol:
                 for key in self.score_dimensions
             }
             metadata["has_gates"] = False
+        if self.standard_id == DIALOGUE_EXPERIENCE_STANDARD_ID:
+            metadata["allowed_scores_by_dimension"] = {"overall": [1, 2, 3, 4, 5]}
+            metadata["has_gates"] = False
+            metadata["model_output_fields"] = ["score", "reason", "suggestion", "domain"]
         return metadata
 
     def request_metadata(self) -> dict:
@@ -483,6 +496,24 @@ _PROTOCOLS = {
         dimension_names={d: DIMENSION_NAMES[d] for d in DIMENSIONS_1022},
         score_dimensions=DIMENSIONS_1022,
         output_contract=OUTPUT_CONTRACT_1022,
+    ),
+    DIALOGUE_EXPERIENCE_COMPARE_PROTOCOL_ID: CompareProtocol(
+        id=DIALOGUE_EXPERIENCE_COMPARE_PROTOCOL_ID,
+        standard_id=DIALOGUE_EXPERIENCE_STANDARD_ID,
+        standard_version="1.0",
+        bundle_revision="1.0.0",
+        display="对话体验综合评估·1-5分（候选）",
+        status="experimental",
+        system_template=DIALOGUE_EXPERIENCE_SYSTEM,
+        user_template=DIALOGUE_EXPERIENCE_USER,
+        observation_model=DialogueExperienceObservation,
+        require_response_pass=False,
+        score_min=1,
+        score_max=5,
+        dimensions=DIALOGUE_EXPERIENCE_DIMENSIONS,
+        dimension_names=dict(DIALOGUE_EXPERIENCE_DIMENSION_NAMES),
+        score_dimensions=DIALOGUE_EXPERIENCE_DIMENSIONS,
+        result_schema_version=DIALOGUE_EXPERIENCE_RESULT_SCHEMA_VERSION,
     ),
 }
 

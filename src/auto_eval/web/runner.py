@@ -787,7 +787,7 @@ def _make_item_evaluator(
                 }
             if task.mode == "compare":
                 res.update(product_order_metadata(reverse_product_order, _compare_product_count(item_dict)))
-                if task.evaluation_profile in {"timeliness_compare@1.0", "knowledge_qa_compare@1.0"}:
+                if task.evaluation_profile in {"timeliness_compare@1.0", "knowledge_qa_compare@1.0", "dialogue_experience_compare@1.0"}:
                     # This is audit metadata, never the product's test date.
                     res.setdefault("evaluation_run_at", datetime.now().astimezone().isoformat(timespec="seconds"))
                 else:
@@ -1056,7 +1056,7 @@ async def run_retry(task: Task, cfg: AppConfig, retry_id: str) -> None:
     """执行人工失败补跑；候选成功才写回原任务，失败仅进入 attempt 审计。"""
     retry = task.retry_runs[retry_id]
     shared_chat_output = (task.evaluation_profile in {"qa_chat_compare@1.1", "qa_chat_compare@1.1-demand-calibrated", "timeliness_compare@1.0", "knowledge_qa_compare@1.0"} or
-                          task.protocol_manifest.get("result_schema_version") in {"qa-chat-result-2", "timeliness-result-1", "timeliness-result-2", "timeliness-result-3", "knowledge-qa-result-2", "chitchat-flat-result-1"})
+                          task.protocol_manifest.get("result_schema_version") in {"qa-chat-result-2", "timeliness-result-1", "timeliness-result-2", "timeliness-result-3", "knowledge-qa-result-2", "chitchat-flat-result-1", "dialogue-experience-result-1"})
     retry["status"] = "running"
     retry["started_at"] = time.time()
     task.repair_status = "running"
@@ -1551,7 +1551,7 @@ async def _eval_one(
             # columns, copied answers, and successful decoding do not prove it.
             **({"trusted_collection_metadata": trusted_collection_metadata}
                if trusted_collection_metadata is not None and
-               getattr(getattr(compare_judges[0], "protocol", None), "result_schema_version", None) in {"qa-chat-result-2", "timeliness-result-1", "timeliness-result-2", "timeliness-result-3", "knowledge-qa-result-2", "chitchat-flat-result-1"} else {}),
+               getattr(getattr(compare_judges[0], "protocol", None), "result_schema_version", None) in {"qa-chat-result-2", "timeliness-result-1", "timeliness-result-2", "timeliness-result-3", "knowledge-qa-result-2", "chitchat-flat-result-1", "dialogue-experience-result-1"} else {}),
             **({"conversation_input": conversation_input} if conversation_input else {}),
             **({"evaluation_time": evaluation_time} if evaluation_time is not None else {}),
             **({"query_image_meta": item_dict["query_image_meta"]} if item.query_images else {}),
@@ -1587,14 +1587,14 @@ async def _eval_one(
                 "产品数": product_count,
                 **({f"{result_protocol.dimension_names[dimension]}排名": compare_result.get(f"{dimension}_rank_groups")
                     for dimension in result_protocol.score_dimensions}
-                   if result_protocol.standard_id not in {"timeliness_compare", "knowledge_qa_compare", "chitchat_evidence_first_flat"} else
+                   if result_protocol.standard_id not in {"timeliness_compare", "knowledge_qa_compare", "chitchat_evidence_first_flat", "dialogue_experience_compare"} else
                    {f"产品{product_no}{result_protocol.dimension_names[dimension]}分": compare_result.get(f"answer{product_no}_{dimension}_score")
                     for product_no in range(1, product_count + 1)
                     for dimension in result_protocol.score_dimensions}),
                 **({"需要复核": compare_result.get("needs_human_review")}
                    if result_protocol.output_contract != "compare_1022_v2" else {}),
                 **({"内容冲突": compare_result.get("has_conflict")}
-                   if result_protocol.result_schema_version not in {"qa-chat-result-2", "timeliness-result-1", "timeliness-result-2", "knowledge-qa-result-2", "chitchat-flat-result-1"} else {}),
+                   if result_protocol.result_schema_version not in {"qa-chat-result-2", "timeliness-result-1", "timeliness-result-2", "knowledge-qa-result-2", "chitchat-flat-result-1", "dialogue-experience-result-1"} else {}),
             },
             progress=90,
             progress_message="垂域视觉对比评测完成",
@@ -1616,6 +1616,9 @@ def _summarize(task: Task, *, include_subsets: bool = True) -> dict:
     from .protocol_identity import recover_protocol_identity
     recovered = recover_protocol_identity({"mode": task.mode, "evaluation_profile": task.evaluation_profile,
         "protocol_manifest": task.protocol_manifest, "results": task.results, "options": task.options})
+    if recovered.get("is_dialogue_experience"):
+        from .dialogue_experience_summary import summarize_dialogue_experience
+        return summarize_dialogue_experience(task, include_subsets=include_subsets)
     if recovered.get("is_flat_chat"):
         from .chitchat_flat_summary import summarize_chitchat_flat
         return summarize_chitchat_flat(task, include_subsets=include_subsets)

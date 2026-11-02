@@ -89,6 +89,7 @@ def _is_explanation(key: str) -> bool:
 
 def remap_judge_result(result: dict[str, Any]) -> dict[str, Any]:
     """Restore slot-owned scores and explanations to original product identities."""
+    dialogue_experience = result.get("result_schema_version") == "dialogue-experience-result-1"
     def convert(value: Any, *, explain: bool = False, field: str = "") -> Any:
         if isinstance(value, dict):
             converted = {}
@@ -103,7 +104,9 @@ def remap_judge_result(result: dict[str, Any]) -> dict[str, Any]:
                         for product, record in item.items()
                     }
                     continue
-                converted[mapped] = convert(item, explain=explain or _is_explanation(key), field=key)
+                converted[mapped] = convert(
+                    item, explain=explain or _is_explanation(key) or (
+                        dialogue_experience and (key == "suggestion" or key.endswith("_suggestion"))), field=key)
             return converted
         if isinstance(value, (list, tuple)):
             items = [convert(item, explain=explain, field=field) for item in value]

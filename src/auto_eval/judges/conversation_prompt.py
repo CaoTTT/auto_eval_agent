@@ -33,6 +33,9 @@ def assemble_conversation(system: str, bundle: dict, protocol, evaluation_dateti
     is_timeliness = protocol.standard_id == "timeliness_compare"
     is_knowledge_qa = protocol.standard_id == "knowledge_qa_compare"
     is_flat_chat = protocol.standard_id == "chitchat_evidence_first_flat"
+    is_dialogue_experience = protocol.standard_id == "dialogue_experience_compare"
+    if is_dialogue_experience:
+        turns = [turn for turn in turns if turn["turn_index"] <= target]
     product_contexts_only = (
         protocol.output_contract == OUTPUT_CONTRACT_1022
         and protocol.bundle_revision in {"0.2.4", "0.2.5", "0.2.6"}
@@ -44,9 +47,13 @@ def assemble_conversation(system: str, bundle: dict, protocol, evaluation_dateti
             for turn in turns
         ]
     instructions = INSTRUCTIONS
-    if is_knowledge_qa:
+    if is_knowledge_qa or is_dialogue_experience:
         instructions = instructions.replace("“回答”“展示”“证据”“Gate”及评分", "“回答”“展示”“证据”及评分").replace(
             "不继承前轮评分、Gate、胜负或总结", "不继承前轮评分、胜负或总结")
+    if is_dialogue_experience:
+        instructions = instructions.replace(
+            "不新增记忆分、自定义总分或历史重评分。",
+            "按本协议逐产品给综合体验总分，不新增记忆分、分项分或历史重评分。")
     if protocol.output_contract == OUTPUT_CONTRACT_1022 and protocol.bundle_revision == "0.2.5":
         instructions = instructions.replace(
             "先分别绝对评分，再比较。",
@@ -74,7 +81,7 @@ def assemble_conversation(system: str, bundle: dict, protocol, evaluation_dateti
     if is_timeliness:
         text("时间依据：仅采用各产品各轮材料中的明确测试条件和用户目标时间。"
              "未提供测试时间时保留未知；任务创建时间和审核时间不是产品测试时间。")
-    elif is_knowledge_qa:
+    elif is_knowledge_qa or is_dialogue_experience:
         text("本次评估调用时间 evaluation_datetime：" + (evaluation_datetime or datetime.now().astimezone().isoformat(timespec="seconds")))
         text("该时间不是产品实际测试时间；只采用原始材料中明确的测试条件，缺少决定性时点时保留未知。")
     elif not product_contexts_only:
@@ -105,7 +112,9 @@ def assemble_conversation(system: str, bundle: dict, protocol, evaluation_dateti
                        "image_role": "product_answer", "request_role": role, "ref_path": part["path"]})
                 text(f"{asset_id} 结束")
         text(f"产品{n}轨迹结束")
-    if is_flat_chat:
+    if is_dialogue_experience:
+        text(f"只输出 target_turn={target} 的逐产品JSON：answer1/answer2以及启用时answer3；每个产品仅score(1—5整数)、reason、suggestion、domain。不输出Gate或各分项分。")
+    elif is_flat_chat:
         text(f"只输出 target_turn={target} 的七维扁平JSON；每维先合并证据理由DIM_reason，再逐产品answerN_DIM_score；不输出个性化、总分或额外Gate字段。")
     elif is_knowledge_qa:
         text(f"只输出 target_turn={target} 的四维评分；使用上述协议的合并理由、逐产品status/score及允许分值，不输出Gate。")
