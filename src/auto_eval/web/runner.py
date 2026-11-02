@@ -1570,6 +1570,7 @@ async def _eval_one(
                 else None
             ),
             product_count=product_count,
+            include_prior_knowledge=item_dict.get("include_prior_knowledge", False),
             **({"evidence_callback": evidence_callback} if evidence_callback else {}),
             **({
                 "evidence_mode": "long_screenshot",

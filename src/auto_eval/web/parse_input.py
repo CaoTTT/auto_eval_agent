@@ -25,6 +25,28 @@ Mode = Literal[
     "rich_content",
 ]
 
+_TRUE_VALUES = {"是", "true", "1"}
+_FALSE_VALUES = {"否", "false", "0"}
+
+
+def parse_prior_bool(value: object, field: str) -> bool:
+    """Parse a controlled compare option without relying on Python truthiness."""
+    if value is None:
+        return False
+    if type(value) is bool:
+        return value
+    if type(value) is int and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if not normalized:
+            return False
+        if normalized in _TRUE_VALUES:
+            return True
+        if normalized in _FALSE_VALUES:
+            return False
+    raise ValueError(f"{field} 只能是 是/否、True/False、1/0")
+
 
 def _json_safe_source(value):
     """保留原始 JSONL 字段，同时把 NaN/Infinity 归一为空值。"""
@@ -125,7 +147,14 @@ def normalize_compare_evidence(obj: dict) -> dict:
                 normalized[field] = obj[field].strip()
             else:
                 normalized.pop(field, None)
-    normalized.update(product_count=count, evidence_mode=mode)
+    normalized.update(
+        product_count=count,
+        evidence_mode=mode,
+        include_prior_knowledge=parse_prior_bool(
+            obj.get("include_prior_knowledge"),
+            "include_prior_knowledge",
+        ),
+    )
     return normalized
 
 
@@ -262,11 +291,16 @@ def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
                 item.update(normalize_query_input(obj))
                 product_count, evidence_mode = compare_evidence_mode(obj)
                 item.update(normalize_product_contexts(obj, product_count))
+                include_prior_knowledge = parse_prior_bool(
+                    obj.get("include_prior_knowledge"),
+                    "include_prior_knowledge",
+                )
             except ValueError as exc:
                 errors.append(f"{location} {exc}")
                 continue
             item["product_count"] = product_count
             item["evidence_mode"] = evidence_mode
+            item["include_prior_knowledge"] = include_prior_knowledge
             invalid = False
             for product_no in range(1, product_count + 1):
                 field = f"{'screenshot' if evidence_mode == 'long_screenshot' else 'video'}{product_no}"

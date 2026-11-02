@@ -66,7 +66,7 @@ class ConversationPreparation:
                 findings.append({"finding_id": digest([prefix.session_id, prefix.target_turn, str(exc)]),
                     "code": getattr(exc, "code", "conversation_evidence_missing"), "status": "blocked",
                     "severity": "error", "session_id": prefix.session_id, "source_turn": prefix.target_turn,
-                    "message": str(exc), "limit_kind": "unverified" if not self.limits["capability_verified"] else "input_integrity"})
+                    "message": str(exc), "limit_kind": "input_integrity"})
             raise
         finally:
             target["image_findings"] = findings

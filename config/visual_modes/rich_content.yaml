@@ -1,7 +1,7 @@
 name: rich_content
 display: 垂域视觉评测
 
-# 百炼单图限制；实际部署还需在裁判配置开启 vl_high_resolution_images。
+# 本地视觉发送保护，不是厂商能力声明；实际部署需按所用模型和网关调整。
 long_screenshot:
   max_pixels: 16777216
   max_data_url_bytes: 10485760
