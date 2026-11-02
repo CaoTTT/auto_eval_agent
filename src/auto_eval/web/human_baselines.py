@@ -30,9 +30,9 @@ def human_protocol(version: str, standard_id: str = "", revision: str | None = N
 def baseline_protocol(baseline: dict):
     protocol = human_protocol(baseline["human_standard_version"], baseline.get("human_standard_id", ""),
                               baseline.get("human_bundle_revision"))
-    if protocol.standard_id in ("qa_chat_compare", "timeliness_compare", "knowledge_qa_compare", "chitchat_evidence_first_flat", "dialogue_experience_compare") and not baseline.get("human_bundle_revision"):
+    if protocol.standard_id in ("qa_chat_compare", "timeliness_compare", "knowledge_qa_compare", "chitchat_evidence_first_flat", "dialogue_experience_compare", "chitchat_gsb_compare") and not baseline.get("human_bundle_revision"):
         raise HumanError("人工基准缺少冻结修订号，不能用当前标准补写历史")
-    if protocol.standard_id in ("timeliness_compare", "knowledge_qa_compare", "chitchat_evidence_first_flat", "dialogue_experience_compare") and not baseline.get("human_result_schema_version"):
+    if protocol.standard_id in ("timeliness_compare", "knowledge_qa_compare", "chitchat_evidence_first_flat", "dialogue_experience_compare", "chitchat_gsb_compare") and not baseline.get("human_result_schema_version"):
         raise HumanError("人工基准缺少冻结结果Schema")
     if baseline.get("human_result_schema_version") and baseline["human_result_schema_version"] != protocol.result_schema_version:
         raise HumanError("人工基准结果Schema与冻结标准冲突")
@@ -106,6 +106,22 @@ class LabelColumn(StrictModel):
         return self
 
 
+class PairLabelColumn(StrictModel):
+    product_a: str
+    product_b: str
+    gsb: str = ""
+    review: str = ""
+    status: str = ""
+    reason: str = ""
+    serious_issue: str = ""
+
+    @model_validator(mode="after")
+    def validate_pair(self):
+        if self.product_a == self.product_b or not (self.gsb or self.review or self.status):
+            raise ValueError("GSB必须映射两个不同产品与结论或状态列")
+        return self
+
+
 class ImportMapping(StrictModel):
     sheet_name: str
     header_row: int = Field(default=1, ge=1, le=30)
@@ -118,7 +134,8 @@ class ImportMapping(StrictModel):
     history_prefix_sha256: str = ""
     turn_index: str = ""
     products: list[Product] = Field(min_length=2, max_length=3)
-    labels: list[LabelColumn] = Field(min_length=1, max_length=21)
+    labels: list[LabelColumn] = Field(default_factory=list, max_length=21)
+    pair_labels: list[PairLabelColumn] = Field(default_factory=list, max_length=3)
     # Product -> field -> physical column (answer, context, response_id, sha256, evidence).
     responses: dict[str, dict[str, str]] = Field(default_factory=dict)
     applicability: dict[str, str] = Field(default_factory=dict)
@@ -138,6 +155,9 @@ class ImportMapping(StrictModel):
 
     @model_validator(mode="after")
     def validate_mapping(self):
+        gsb_requested = self.human_standard_id == "chitchat_gsb_compare" or self.human_standard_version.startswith("chitchat_gsb_compare@")
+        if gsb_requested and (not self.human_bundle_revision or not self.human_result_schema_version):
+            raise ValueError("GSB人工映射必须提供冻结修订号和结果Schema")
         protocol = human_protocol(self.human_standard_version, self.human_standard_id, self.human_bundle_revision or None)
         self.human_standard_id = protocol.standard_id
         self.human_standard_version = protocol.standard_version
@@ -145,6 +165,15 @@ class ImportMapping(StrictModel):
         if self.human_result_schema_version and self.human_result_schema_version != protocol.result_schema_version:
             raise ValueError("人工结果Schema与标准冲突")
         self.human_result_schema_version = protocol.result_schema_version or ""
+        if protocol.standard_id == "chitchat_gsb_compare":
+            ids = [p.product_id for p in self.products]
+            pairs = [frozenset((p.product_a, p.product_b)) for p in self.pair_labels]
+            if self.labels or not self.pair_labels or any(self.gates.values()) or self.applicability or self.inputs:
+                raise ValueError("GSB仅使用独立pair_labels，不接受数字分、Gate、适用性或产品评分状态")
+            if len(set(pairs)) != len(pairs) or any(not pair <= set(ids) for pair in pairs):
+                raise ValueError("GSB产品对重复或包含未知产品")
+        elif not self.labels or self.pair_labels:
+            raise ValueError("数字评分标准必须提供labels，且不能映射GSB产品对")
         if protocol.standard_id == "timeliness_compare":
             if self.na_status in ("unverifiable", "gate_blocked"):
                 raise ValueError("时效性请使用 insufficient_evidence / blocked_gate / blocked_understanding 状态")
@@ -271,8 +300,9 @@ class HumanStore:
             version = latest + 1
             cases = preview["cases"]
             labels = [r for r in preview["labels"] if r["resolution"] == "accepted"]
-            if not any(r["score_status"] == "scored" for r in labels):
-                raise HumanError("至少需要一条有效人工数字评分")
+            gsb = mapping.get("human_standard_id") == "chitchat_gsb_compare"
+            if not any((r.get("status") == "evaluated" and r.get("gsb") in ("G", "S", "B")) if gsb else r.get("score_status") == "scored" for r in labels):
+                raise HumanError("至少需要一条有效人工GSB结论" if gsb else "至少需要一条有效人工数字评分")
             folder = self.path("baselines", baseline_id, f"v{version}")
             protocol = human_protocol(mapping["human_standard_version"], mapping.get("human_standard_id", ""), mapping.get("human_bundle_revision") or None)
             manifest = dict(schema_version="human-baseline-1.0", baseline_id=baseline_id, version=version,
@@ -296,6 +326,9 @@ class HumanStore:
                 manifest["allowed_scores_by_dimension"] = {key: list(values) for key, values in ALLOWED_SCORES.items()}
             if protocol.standard_id == "dialogue_experience_compare":
                 manifest["allowed_scores_by_dimension"] = {"overall": [1, 2, 3, 4, 5]}
+            if gsb:
+                manifest.update(schema_version="human-baseline-gsb-1.0", score_range=None,
+                                score_dimensions=[], comparison_kind="gsb", allowed_outcomes=["G", "S", "B"])
             for key, value in (("cases", cases), ("labels", labels), ("states", preview["states"])):
                 atomic_json(folder / f"{key}.json", value)
             folder.mkdir(parents=True, exist_ok=True)

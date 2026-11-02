@@ -69,6 +69,9 @@ def _pair(a, b, keys):
 
 
 def build_human_statistics(rows: list[dict], task_ids: list[str], products: list[str], dimensions=None) -> dict:
+    if any(row.get("comparison_kind") == "gsb" for row in rows):
+        from .chitchat_gsb_human import gsb_human_statistics
+        return gsb_human_statistics(rows, task_ids)
     dimensions = list(dimensions or SCORE_DIMENSIONS)
     timeliness = any(row.get("human_standard_id") == "timeliness_compare" or row.get("model_standard_id") == "timeliness_compare" or
                      row.get("model_result_schema_version") in ("timeliness-result-1", "timeliness-result-2", "timeliness-result-3") for row in rows)

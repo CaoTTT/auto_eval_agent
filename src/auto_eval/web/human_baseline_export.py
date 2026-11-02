@@ -34,6 +34,10 @@ def _json(value) -> str:
 
 def export_baseline_answers(baseline: dict) -> bytes:
     """Build a wide answer sheet from saved cases, labels and human states."""
+    protocol = baseline_protocol(baseline)
+    if protocol.standard_id == "chitchat_gsb_compare":
+        from .chitchat_gsb_human import build_gsb_template
+        return build_gsb_template({}, protocol, baseline)
     wb = Workbook()
     ws = wb.active
     ws.title = "人工基准答案"

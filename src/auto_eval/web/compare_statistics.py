@@ -132,8 +132,8 @@ def _cases(snapshot: dict, aligned_results: list[dict]) -> list[Case]:
     manifest = snapshot.get("protocol_manifest") or {}
     selected = snapshot.get("evaluation_profile") or manifest.get("id") or ""
     records = [snapshot, manifest, snapshot.get("options") or {}, *aligned_results]
-    chat_present = any(record.get("standard_id") in ("qa_chat_compare", "timeliness_compare", "knowledge_qa_compare", "chitchat_evidence_first_flat", "dialogue_experience_compare") or
-                       str(record.get("evaluation_profile") or record.get("id") or "").startswith(("qa_chat_compare@", "timeliness_compare@", "knowledge_qa_compare@", "chitchat_evidence_first_flat@", "dialogue_experience_compare@"))
+    chat_present = any(record.get("standard_id") in ("qa_chat_compare", "timeliness_compare", "knowledge_qa_compare", "chitchat_evidence_first_flat", "dialogue_experience_compare", "chitchat_gsb_compare") or
+                       str(record.get("evaluation_profile") or record.get("id") or "").startswith(("qa_chat_compare@", "timeliness_compare@", "knowledge_qa_compare@", "chitchat_evidence_first_flat@", "dialogue_experience_compare@", "chitchat_gsb_compare@"))
                        for record in records)
     recovered = recover_protocol_identity({**snapshot, "results": aligned_results}) if chat_present else None
     if recovered is not None:
@@ -172,7 +172,7 @@ def _cases(snapshot: dict, aligned_results: list[dict]) -> list[Case]:
 
 
 def _policy(standard: str, revision: str, standard_id: str = "qa_competitor_compare") -> CompareProtocol | None:
-    if (standard_id in ("qa_chat_compare", "timeliness_compare", "knowledge_qa_compare", "chitchat_evidence_first_flat", "dialogue_experience_compare") or standard == "0.2-simplified-1022") and revision in ("", "未记录实现版本", None):
+    if (standard_id in ("qa_chat_compare", "timeliness_compare", "knowledge_qa_compare", "chitchat_evidence_first_flat", "dialogue_experience_compare", "chitchat_gsb_compare") or standard == "0.2-simplified-1022") and revision in ("", "未记录实现版本", None):
         return None
     try:
         return resolve_compare_standard(
@@ -694,6 +694,9 @@ def _subgroups(cases: list[Case]) -> list[tuple[str, list[Case]]]:
 
 def build_compare_statistics(snapshot: dict, aligned_results: list[dict]) -> list[StatisticsTable]:
     """One worksheet, several compact tables; never consume cached summary values."""
+    if recover_protocol_identity({**snapshot, "results": aligned_results}).get("is_chitchat_gsb"):
+        from .chitchat_gsb_statistics import chitchat_gsb_statistics
+        return chitchat_gsb_statistics(snapshot, aligned_results)
     if recover_protocol_identity({**snapshot, "results": aligned_results}).get("is_dialogue_experience"):
         from .dialogue_experience_statistics import dialogue_experience_statistics
         return dialogue_experience_statistics(snapshot, aligned_results)
@@ -769,6 +772,9 @@ def build_compare_statistics(snapshot: dict, aligned_results: list[dict]) -> lis
 
 
 def conversation_statistics(snapshot: dict, aligned_results: list[dict]) -> list[StatisticsTable]:
+    if recover_protocol_identity({**snapshot, "results": aligned_results}).get("is_chitchat_gsb"):
+        from .chitchat_gsb_statistics import chitchat_gsb_conversation_statistics
+        return chitchat_gsb_conversation_statistics(snapshot, aligned_results)
     if recover_protocol_identity({**snapshot, "results": aligned_results}).get("is_dialogue_experience"):
         from .dialogue_experience_statistics import dialogue_experience_conversation_statistics
         return dialogue_experience_conversation_statistics(snapshot, aligned_results)

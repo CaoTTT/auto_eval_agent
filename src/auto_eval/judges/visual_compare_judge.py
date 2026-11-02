@@ -26,6 +26,12 @@ from .base import JudgeClient, JudgeOutputEmptyError, JudgeOutputParseError
 from .prompts import parse_json_loose, parse_json_preserving_pairs, scan_recoverable_json_object
 from .query_image_prompt import QUERY_IMAGE_INSTRUCTIONS
 from .qa_chat_schema import QA_CHAT_STANDARD_ID, QAChatObservation, finalize_qa_chat_observation
+from .chitchat_gsb_schema import (
+    CHITCHAT_GSB_RESULT_SCHEMA_VERSION, ChitchatGSBObservation,
+    expected_output_keys as chitchat_gsb_output_keys,
+    parse_output as parse_chitchat_gsb_output,
+    finalize_chitchat_gsb_observation,
+)
 from .dialogue_experience_schema import (
     DIALOGUE_EXPERIENCE_RESULT_SCHEMA_VERSION, DialogueExperienceObservation,
     expected_output_keys as dialogue_experience_output_keys,
@@ -329,6 +335,11 @@ def visual_compare_result_fields(
     )
     if selected_protocol.output_contract == OUTPUT_CONTRACT_1022:
         return _compact_1022_result(observation, selected_protocol)
+    if selected_protocol.result_schema_version == CHITCHAT_GSB_RESULT_SCHEMA_VERSION:
+        if not isinstance(observation, ChitchatGSBObservation):
+            raise ValueError("闲聊GSB协议需要独立ChitchatGSBObservation结果模型")
+        return finalize_chitchat_gsb_observation(
+            observation, selected_protocol, trusted_collection_metadata=trusted_collection_metadata)
     if selected_protocol.result_schema_version == DIALOGUE_EXPERIENCE_RESULT_SCHEMA_VERSION:
         if not isinstance(observation, DialogueExperienceObservation):
             raise ValueError("对话体验协议需要独立DialogueExperienceObservation结果模型")
@@ -456,8 +467,9 @@ class VisualCompareJudge:
                     contexts["context1"] = context1
                 arguments.update(normalize_product_contexts(contexts, 2))
             elif context1 is _CONTEXT_NOT_PROVIDED:
-                arguments["context1"] = (context if self.protocol.result_schema_version ==
-                                         DIALOGUE_EXPERIENCE_RESULT_SCHEMA_VERSION else "")
+                arguments["context1"] = (context if self.protocol.result_schema_version in {
+                    DIALOGUE_EXPERIENCE_RESULT_SCHEMA_VERSION, CHITCHAT_GSB_RESULT_SCHEMA_VERSION,
+                } else "")
             arguments["context"] = ""
             arguments = swap_judge_inputs(arguments, normalize_legacy_context=product_contexts_only)
             if evidence_callback:
@@ -514,7 +526,8 @@ class VisualCompareJudge:
         is_knowledge_qa = self.protocol.result_schema_version == KNOWLEDGE_QA_RESULT_SCHEMA_VERSION
         is_flat_chat = self.protocol.result_schema_version == CHITCHAT_FLAT_RESULT_SCHEMA_VERSION
         is_dialogue_experience = self.protocol.result_schema_version == DIALOGUE_EXPERIENCE_RESULT_SCHEMA_VERSION
-        is_strict_output = is_chat_v2 or is_timeliness or is_knowledge_qa or is_flat_chat or is_dialogue_experience
+        is_gsb = self.protocol.result_schema_version == CHITCHAT_GSB_RESULT_SCHEMA_VERSION
+        is_strict_output = is_chat_v2 or is_timeliness or is_knowledge_qa or is_flat_chat or is_dialogue_experience or is_gsb
         timeliness_contracts = {
             TIMELINESS_RESULT_SCHEMA_VERSION: (timeliness_output_keys, timeliness_allowed_keys),
             TIMELINESS_V2_RESULT_SCHEMA_VERSION: (timeliness_v2_output_keys, timeliness_v2_allowed_keys),
@@ -522,10 +535,11 @@ class VisualCompareJudge:
             KNOWLEDGE_QA_RESULT_SCHEMA_VERSION: (knowledge_qa_output_keys, knowledge_qa_output_keys),
             CHITCHAT_FLAT_RESULT_SCHEMA_VERSION: (chitchat_flat_output_keys, chitchat_flat_output_keys),
             DIALOGUE_EXPERIENCE_RESULT_SCHEMA_VERSION: (dialogue_experience_output_keys, dialogue_experience_output_keys),
+            CHITCHAT_GSB_RESULT_SCHEMA_VERSION: (chitchat_gsb_output_keys, chitchat_gsb_output_keys),
         }
         strict_output_keys, allowed_output_keys = timeliness_contracts.get(
             self.protocol.result_schema_version, (expected_output_keys, expected_output_keys))
-        output_label = "对话体验综合评估" if is_dialogue_experience else "闲聊七维" if is_flat_chat else "知识问答V1" if is_knowledge_qa else "时效性评估V1" if is_timeliness else "问答闲聊V2"
+        output_label = "闲聊GSB" if is_gsb else "对话体验综合评估" if is_dialogue_experience else "闲聊七维" if is_flat_chat else "知识问答V1" if is_knowledge_qa else "时效性评估V1" if is_timeliness else "问答闲聊V2"
         trusted_collection = collection_metadata(trusted_collection_metadata, actual_product_count) if is_strict_output else None
         compact_1022 = self.protocol.output_contract == OUTPUT_CONTRACT_1022
         product_contexts_only = compact_1022 and self.protocol.bundle_revision in {"0.2.4", "0.2.5", "0.2.6"}
@@ -537,7 +551,7 @@ class VisualCompareJudge:
             context1, context2 = contexts["context1"], contexts["context2"]
             context3 = contexts.get("context3", "")
         elif context1 is _CONTEXT_NOT_PROVIDED:
-            context1 = context if is_dialogue_experience else ""
+            context1 = context if is_dialogue_experience or is_gsb else ""
         strict_1022 = self.protocol.output_contract in {OUTPUT_CONTRACT_1022, OUTPUT_CONTRACT_1022_R021}
         compact_r022 = compact_1022 and self.protocol.bundle_revision == "0.2.2"
         parse_compact = parse_1022_output_r022 if compact_r022 else parse_1022_output
@@ -551,7 +565,7 @@ class VisualCompareJudge:
                     actual_product_count,
                 ),
             }
-        elif is_knowledge_qa or is_flat_chat or is_dialogue_experience:
+        elif is_knowledge_qa or is_flat_chat or is_dialogue_experience or is_gsb:
             output_options = {"require_complete": True}
         if evidence_mode not in ("video_frames", "long_screenshot"):
             raise ValueError("未知视觉证据模式")
@@ -577,7 +591,8 @@ class VisualCompareJudge:
                 raise ValueError("旧实现版本不支持提问图片，请新建任务")
             system += QUERY_IMAGE_INSTRUCTIONS
         user = user_template.render(
-            **({"include_prior_knowledge": include_prior_knowledge} if is_dialogue_experience else {}),
+            **({"include_prior_knowledge": include_prior_knowledge} if is_dialogue_experience or is_gsb else {}),
+            **({"trusted_collection_metadata": trusted_collection} if is_gsb else {}),
             **({} if product_contexts_only else {
                 "evaluation_datetime": evaluation_datetime,
             }),
@@ -653,7 +668,7 @@ class VisualCompareJudge:
                     )
                     for path in frames
                 )
-                if query_metas or is_timeliness or is_knowledge_qa or is_dialogue_experience:
+                if query_metas or is_timeliness or is_knowledge_qa or is_dialogue_experience or is_gsb:
                     for frame_no, (path, encoded) in enumerate(zip(frames, encoded_frames), 1):
                         content_parts.extend([
                             {"type": "text", "text": f"产品{product_no}回答录屏第{frame_no}帧开始"},
@@ -675,7 +690,9 @@ class VisualCompareJudge:
         if conversation_input is not None:
             from .conversation_prompt import assemble_conversation
             system, content_parts, image_metadata, user_image_refs, conversation_manifest = await run_preparation(
-                assemble_conversation, system, conversation_input, self.protocol, evaluation_datetime=evaluation_datetime, timeout=60)
+                assemble_conversation, system, conversation_input, self.protocol,
+                evaluation_datetime=evaluation_datetime,
+                **({"trusted_collection_metadata": trusted_collection} if is_gsb else {}), timeout=60)
             user_images = []
             user = content_parts[0]["text"]
         else:
@@ -693,7 +710,7 @@ class VisualCompareJudge:
             if conversation_manifest:
                 binding["conversation_input_manifest_sha256"] = conversation_manifest
             else:
-                actual_parts = content_parts if is_screenshot or query_metas or is_timeliness or is_knowledge_qa or is_dialogue_experience else [
+                actual_parts = content_parts if is_screenshot or query_metas or is_timeliness or is_knowledge_qa or is_dialogue_experience or is_gsb else [
                     {"type": "text", "text": user},
                     *({"type": "image_url", "image_url": {"url": url}} for url in user_images),
                 ]
@@ -705,12 +722,17 @@ class VisualCompareJudge:
             from ..evidence_audit import capture_request
             preprocessing = []
             if is_screenshot:
+                audit_turns = (
+                    [turn for turn in conversation_input["turns"]
+                     if not is_gsb or turn["turn_index"] <= conversation_input["target_turn"]]
+                    if conversation_input else []
+                )
                 preprocessing = ([{"product_no": n, "source_turn": turn["turn_index"],
                                    "metadata": turn[f"screenshot_meta{n}"]}
-                                  for turn in conversation_input["turns"]
+                                  for turn in audit_turns
                                   for n in range(1, actual_product_count + 1)] if conversation_input else
                                  [{"product_no": n, "metadata": meta} for n, meta in enumerate(metas, 1)])
-            request_parts = content_parts if is_screenshot or query_metas or is_timeliness or is_knowledge_qa or is_dialogue_experience else [
+            request_parts = content_parts if is_screenshot or query_metas or is_timeliness or is_knowledge_qa or is_dialogue_experience or is_gsb else [
                 {"type": "text", "text": user},
                 *({"type": "image_url", "image_url": {"url": url}} for url in user_images),
             ]
@@ -735,7 +757,7 @@ class VisualCompareJudge:
             audit["record_status"] = "model_call_started"
             if evidence_callback:
                 evidence_callback(audit)
-        if is_screenshot or query_metas or is_timeliness or is_knowledge_qa or is_dialogue_experience:
+        if is_screenshot or query_metas or is_timeliness or is_knowledge_qa or is_dialogue_experience or is_gsb:
             raw_output = await self.client.complete(
                 system, user, stream_callback=stream_callback,
                 content_parts=content_parts, image_metadata=image_metadata,
@@ -755,7 +777,7 @@ class VisualCompareJudge:
                 evidence_callback(audit)
         repaired = ""
         local_format_recovery_steps: list[str] = []
-        if is_knowledge_qa or is_flat_chat or is_dialogue_experience:
+        if is_knowledge_qa or is_flat_chat or is_dialogue_experience or is_gsb:
             # These rubrics have exactly one semantic response. Their
             # independent parser rejects duplicate keys and invalid numbers.
             # Flat chat additionally permits a narrow local format recovery;
@@ -766,7 +788,8 @@ class VisualCompareJudge:
             try:
                 parsed_pairs = parse_json_preserving_pairs(raw_output) if isinstance(raw_output, str) else None
                 original_parsed_pairs = parsed_pairs
-                parse_independent = (parse_dialogue_experience_output if is_dialogue_experience else
+                parse_independent = (parse_chitchat_gsb_output if is_gsb else
+                                     parse_dialogue_experience_output if is_dialogue_experience else
                                      parse_chitchat_flat_output if is_flat_chat else parse_knowledge_qa_output)
                 try:
                     data = parse_independent(raw_output, actual_product_count).model_dump()
@@ -991,7 +1014,7 @@ class VisualCompareJudge:
                     local_format_recovery_version="chitchat-flat-format-recovery-1",
                     local_format_recovery_steps=local_format_recovery_steps,
                 )
-            if is_timeliness or is_knowledge_qa or is_dialogue_experience:
+            if is_timeliness or is_knowledge_qa or is_dialogue_experience or is_gsb:
                 # Audit time is never evidence of when a product was tested.
                 result["evaluation_run_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
                 result["test_time_policy"] = "provided_evidence_only"

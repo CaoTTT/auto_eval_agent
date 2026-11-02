@@ -127,6 +127,18 @@ def remap_judge_result(result: dict[str, Any]) -> dict[str, Any]:
         return value
 
     mapped = convert(result)
+    if result.get("result_schema_version") == "chitchat-gsb-result-1":
+        # Only dual-product requests are swappable. Restore the comparison
+        # direction as well as the product labels; raw model output stays in
+        # judge-slot order for traceability.
+        for pair in mapped.get("gsb_pairs", {}).values():
+            pair["gsb"] = {"G": "B", "B": "G"}.get(pair.get("gsb"), pair.get("gsb"))
+            pair["serious_issue"] = {"A": "B", "B": "A"}.get(
+                pair.get("serious_issue"), pair.get("serious_issue"))
+        for pair in mapped.get("model_pair_results", {}).values():
+            pair["gsb"] = {"G": "B", "B": "G"}.get(pair.get("gsb"), pair.get("gsb"))
+            pair["serious_issue"] = {"A": "B", "B": "A"}.get(
+                pair.get("serious_issue"), pair.get("serious_issue"))
     if result.get("output_contract") == OUTPUT_CONTRACT_1022:
         # The compact contract's consumers require product sections in numeric
         # order, including when extracting an explicit NA explanation. Reuse

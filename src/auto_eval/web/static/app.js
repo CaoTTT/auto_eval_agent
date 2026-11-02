@@ -1,4 +1,4 @@
-import { createApp, ref, computed, onMounted, onUnmounted, nextTick, selectEvidenceMode, isRemoteUrl, productContextValue, missingProductContexts } from "./compare-data.js?v=20261102_dialogue_experience_product_order";
+import { createApp, ref, computed, onMounted, onUnmounted, nextTick, selectEvidenceMode, isRemoteUrl, productContextValue, missingProductContexts } from "./compare-data.js?v=20261102_chitchat_gsb_product_order";
 
 createApp({
   watch: {
@@ -78,6 +78,7 @@ createApp({
     const taskIsKnowledgeQA = computed(() => (taskEvaluationProfile.value || '').startsWith('knowledge_qa_compare@'));
     const taskIsFlatChat = computed(() => (taskEvaluationProfile.value || '').startsWith('chitchat_evidence_first_flat@'));
     const taskIsDialogueExperience = computed(() => (taskEvaluationProfile.value || '').startsWith('dialogue_experience_compare@'));
+    const taskIsChitchatGSB = computed(() => (taskEvaluationProfile.value || '').startsWith('chitchat_gsb_compare@'));
     function compact1022(row = {}) {
       if (row.output_contract) return row.output_contract === 'compare_1022_v2';
       const profile = row.evaluation_profile || (row.standard_id && row.standard_version
@@ -110,6 +111,12 @@ createApp({
       if (row.evaluation_profile) return row.evaluation_profile.startsWith('dialogue_experience_compare@');
       if (row.result_schema_version) return row.result_schema_version === 'dialogue-experience-result-1';
       return taskIsDialogueExperience.value;
+    }
+    function isChitchatGSBRow(row = {}) {
+      if (row.standard_id) return row.standard_id === 'chitchat_gsb_compare';
+      if (row.evaluation_profile) return row.evaluation_profile.startsWith('chitchat_gsb_compare@');
+      if (row.result_schema_version) return row.result_schema_version === 'chitchat-gsb-result-1';
+      return taskIsChitchatGSB.value;
     }
     function chatUsesSharedReasons(row = {}) {
       if (isFlatChatRow(row)) return true;
@@ -227,6 +234,7 @@ createApp({
       resetResultPage();
     }
     const turnFilter = ref(''), diagnosticFilter = ref('');
+    const gsbPairFilter = ref(''), gsbVerdictFilter = ref('');
     const legacyScoreDimensions = [
       {key: 'response_gate', label: '响应体验', gate: true},
       {key: 'safety_gate', label: '安全稳定', gate: true},
@@ -256,6 +264,7 @@ createApp({
     ];
     const dialogueExperienceDimensions = [{key:'overall',label:'综合体验'}];
     const taskDimensions = computed(() => {
+      if (taskIsChitchatGSB.value) return [];
       const frozen = taskProtocolManifest.value.dimensions;
       const registered = evaluationProfiles.value.find(p => p.id === taskEvaluationProfile.value)?.dimensions;
       if (compact1022()) return (frozen?.length ? frozen : legacyScoreDimensions.filter(d => !d.gate)).filter(d => d.key !== 'accuracy');
@@ -263,7 +272,7 @@ createApp({
           && taskProtocolManifest.value.bundle_revision === '0.2.1') return frozen?.length ? frozen : legacyScoreDimensions.filter(d => !d.gate);
       return frozen?.length ? frozen : registered?.length ? registered : taskIsDialogueExperience.value ? dialogueExperienceDimensions : taskIsFlatChat.value ? flatChatDimensions : taskIsKnowledgeQA.value ? knowledgeQADimensions : taskIsTimeliness.value ? timelinessDimensions : taskIsChat.value ? chatDimensions : legacyScoreDimensions.filter(d => !d.gate);
     });
-    const scoreDimensions = computed(() => [...(taskIsKnowledgeQA.value || taskIsFlatChat.value || taskIsDialogueExperience.value ? [] : legacyScoreDimensions.filter(d => d.gate)), ...taskDimensions.value]);
+    const scoreDimensions = computed(() => taskIsChitchatGSB.value ? [] : [...(taskIsKnowledgeQA.value || taskIsFlatChat.value || taskIsDialogueExperience.value ? [] : legacyScoreDimensions.filter(d => d.gate)), ...taskDimensions.value]);
     const summaryDimensions = computed(() => taskDimensions.value.filter(d => taskIsKnowledgeQA.value || d.key !== 'accuracy'));
     function setTaskProtocol(data) {
       taskEvaluationProfile.value = data.evaluation_profile || data.protocol_manifest?.id || (data.mode === 'compare' ? defaultEvaluationProfile() : '');
@@ -276,6 +285,7 @@ createApp({
           ? '已互换：裁判位置1=原产品2，裁判位置2=原产品1；产品数据、评分和胜负均按原产品身份展示。'
           : '未互换：裁判按原产品顺序评估。') : '';
       scoreRules.value = scoreRules.value.filter(rule => scoreDimensions.value.some(d => d.key === rule.dimension));
+      gsbPairFilter.value = ''; gsbVerdictFilter.value = '';
     }
     const scoreRules = ref([]), scoreRuleJoin = ref('all');
     let scoreRuleSequence = 0;
@@ -325,6 +335,7 @@ createApp({
       ? scoreRules.value.map((rule, i) => scoreRuleError(rule) ? `条件 ${i + 1}：${scoreRuleError(rule)}` : '').filter(Boolean).join('；') : '');
     function scoreValue(row, dimension, product) {
       if (taskProtocolDiagnostics.value.length) return null;
+      if (isChitchatGSBRow(row)) return null;
       if (isDialogueExperienceRow(row)) {
         const value = row[`answer${product}_overall_score`];
         const count = Number(row.product_count || items.value[row.index]?.product_count || 2);
@@ -432,6 +443,7 @@ createApp({
       return rule.productJoin === 'all' ? rule.products.every(matches) : rule.products.some(matches);
     }
     function matchesScoreFilters(row) {
+      if (taskIsChitchatGSB.value) return true;
       if (mode.value !== 'compare' || !scoreRules.value.length) return true;
       if (row.error || scoreFilterError.value) return false;
       const matches = rule => matchesScoreRule(row, rule);
@@ -455,7 +467,9 @@ createApp({
         }
       } else if (column.key.endsWith('_summary')) {
         const dimension = column.key.replace('_summary', '');
-        if (isDialogueExperienceRow(row) && dimension === 'overall') {
+        if (isChitchatGSBRow(row) && dimension === 'gsb') {
+          for (const entry of chitchatGSBPairs(row)) add(entry.pairLabel, entry.reason);
+        } else if (isDialogueExperienceRow(row) && dimension === 'overall') {
           for (let n = 1; n <= Number(row.product_count || items.value[row.index]?.product_count || 2); n++) {
             add(`产品 ${n} · 评分理由`, row[`answer${n}_overall_reason`] || row.model_product_results?.[`answer${n}`]?.reason);
           }
@@ -494,12 +508,14 @@ createApp({
       hideCellTooltip();
     }
     function reasonSearchText(row) {
+      if (isChitchatGSBRow(row)) return chitchatGSBPairs(row).map(pair => pair.reason).join(' ');
       return Object.entries(row).filter(([key]) => key === 'rationale' || /_reason(s)?$/.test(key))
         .map(([, value]) => Array.isArray(value) ? value.join(' ') : value || '').join(' ');
     }
     function resetResultFilters() {
       activeSkill.value = ''; resultQuery.value = ''; failedOnly.value = false;
       modalityFilter.value = ''; turnFilter.value = ''; diagnosticFilter.value = '';
+      gsbPairFilter.value = ''; gsbVerdictFilter.value = '';
       clearScoreRules();
     }
     const liveInputDiagnostics = ref({});
@@ -974,15 +990,16 @@ createApp({
           ...contextCols,
           { key: "product_count", label: "产品数" },
           { key: "input_status_summary", label: "输入状态" },
-          ...(taskIsKnowledgeQA.value || taskIsFlatChat.value || taskIsDialogueExperience.value ? [] : [
+          ...(taskIsKnowledgeQA.value || taskIsFlatChat.value || taskIsDialogueExperience.value || taskIsChitchatGSB.value ? [] : [
             { key: "response_gate_summary", label: "响应体验Gate" },
             { key: "safety_gate_summary", label: "安全稳定Gate" },
           ]),
           ...taskDimensions.value.map(d => ({key:`${d.key}_summary`, label:d.key === 'accuracy' && !taskIsKnowledgeQA.value ? '内容准确（暂不汇总）' : d.label})),
-          ...((taskIsTimeliness.value ? timelinessHasConflict() : !taskIsDialogueExperience.value && !chatUsesSharedReasons())
+          ...(taskIsChitchatGSB.value ? [{key:'gsb_summary', label:'整体 GSB 对比'}] : []),
+          ...((taskIsTimeliness.value ? timelinessHasConflict() : !taskIsChitchatGSB.value && !taskIsDialogueExperience.value && !chatUsesSharedReasons())
             ? [{ key: "has_conflict", label: "内容冲突" }] : []),
           ...(compact1022() || taskIsFlatChat.value ? [] : [{ key: "needs_human_review", label: "需人工复核" }]),
-          ...(compact1022() || chatUsesSharedReasons() || taskIsDialogueExperience.value ? [] : [{ key: "rationale", label: "理由" }]),
+          ...(compact1022() || chatUsesSharedReasons() || taskIsDialogueExperience.value || taskIsChitchatGSB.value ? [] : [{ key: "rationale", label: "理由" }]),
           { key: "latency_s", label: "总耗时" },
         ];
       // rich_content（默认）
@@ -1017,6 +1034,7 @@ createApp({
     function columnWidth(c) {
       if (c.key === "latency_s") return 120;
       if (c.key === 'overall_summary' && taskIsDialogueExperience.value) return 480;
+      if (c.key === 'gsb_summary' && taskIsChitchatGSB.value) return 520;
       if (reasonOnlyColumn(c)) return 200;
       const compact = [
         "latency_s", "card_presence", "card_count", "superlink_presence",
@@ -1051,6 +1069,7 @@ createApp({
       const q = resultQuery.value.trim().toLowerCase();
       return skillResults.value.filter((r) => {
         if (!matchesScoreFilters(r)) return false;
+        if (!matchesChitchatGSBFilters(r)) return false;
         if (failedOnly.value && !r.error) return false;
         if (turnFilter.value && String(r.turn_index) !== turnFilter.value) return false;
         if (diagnosticFilter.value==='warning' && !r.image_warning_count) return false;
@@ -1941,6 +1960,72 @@ createApp({
       });
     }
 
+    function chitchatGSBColumn(row, column) {
+      return isChitchatGSBRow(row) && column.key === 'gsb_summary';
+    }
+    function chitchatGSBPairs(row = {}) {
+      const count = Number(row.product_count || items.value[row.index]?.product_count || 2) === 3 ? 3 : 2;
+      const entries = [];
+      for (let a = 1; a <= count; a++) for (let b = a + 1; b <= count; b++) {
+        const key = `${a}_${b}`, pair = row.gsb_pairs?.[key] || {};
+        const reason = typeof pair.reason === 'string' ? pair.reason : '';
+        const collectedFailed = [a,b].some(n => row[`answer${n}_input_status`] === 'failed'
+          || row.trusted_collection_metadata?.[`answer${n}`]?.input_status === 'failed');
+        const knownStatus = ['evaluated','insufficient_evidence','needs_review'].includes(pair.status);
+        const validVerdict = ['G','S','B'].includes(pair.gsb);
+        const validIssue = ['none','A','B','both'].includes(pair.serious_issue);
+        const validSeverityDirection = pair.status !== 'evaluated'
+          || (pair.serious_issue !== 'A' || pair.gsb === 'B')
+            && (pair.serious_issue !== 'B' || pair.gsb === 'G');
+        const identityConflict = Object.entries({standard_id:'chitchat_gsb_compare',
+          standard_version:'1.0',evaluation_profile:'chitchat_gsb_compare@1.0',
+          bundle_revision:'1.0.0',result_schema_version:'chitchat-gsb-result-1'})
+          .some(([field, expected]) => row[field] != null && row[field] !== '' && row[field] !== expected);
+        const consistent = pair.product_a === a && pair.product_b === b && reason.trim()
+          && validIssue && validSeverityDirection && knownStatus
+          && (pair.status === 'evaluated' ? validVerdict : pair.gsb === null);
+        let status = row.error ? 'failed' : taskProtocolDiagnostics.value.length ? 'identity_error'
+          : identityConflict ? 'identity_error'
+          : collectedFailed ? 'insufficient_evidence' : consistent ? pair.status : 'invalid_state';
+        const gsb = status === 'evaluated' ? pair.gsb : null;
+        const statusLabel = ({evaluated:'已比较',insufficient_evidence:'待补证据',needs_review:'待复核',
+          failed:'评估失败',identity_error:'协议待恢复',invalid_state:'结果缺失或异常'})[status];
+        const verdictLabel = gsb === 'G' ? `产品${a}更好` : gsb === 'B' ? `产品${b}更好` : '整体相近';
+        const seriousLabel = !validIssue ? '未记录' : ({none:'无已确认严重问题',A:`产品${a}`,
+          B:`产品${b}`,both:`双方（产品${a}、产品${b}）`})[pair.serious_issue];
+        entries.push({key,a,b,product_a:a,product_b:b,pairLabel:`A：产品${a} / B：产品${b}`,
+          status,statusLabel,gsb,label:gsb ? `${gsb} · ${verdictLabel}` : statusLabel,
+          className:gsb ? `gsb-${gsb.toLowerCase()}` : 'gsb-pending',
+          reason:collectedFailed ? `可信采集失败，待补证据。${reason}` : reason,
+          seriousIssue:pair.serious_issue,seriousLabel});
+      }
+      return entries;
+    }
+    const chitchatGSBPairOptions = computed(() => filterProducts.value.length === 3
+      ? [{key:'1_2',label:'产品1 / 产品2'},{key:'1_3',label:'产品1 / 产品3'},{key:'2_3',label:'产品2 / 产品3'}]
+      : [{key:'1_2',label:'产品1 / 产品2'}]);
+    function matchesChitchatGSBFilters(row) {
+      if (!taskIsChitchatGSB.value || (!gsbPairFilter.value && !gsbVerdictFilter.value)) return true;
+      if (!isChitchatGSBRow(row)) return false;
+      return chitchatGSBPairs(row).some(pair => (!gsbPairFilter.value || pair.key === gsbPairFilter.value)
+        && (!gsbVerdictFilter.value || (['G','S','B'].includes(gsbVerdictFilter.value)
+          ? pair.gsb === gsbVerdictFilter.value : pair.status === gsbVerdictFilter.value)));
+    }
+    function chitchatGSBSummaryRows(data = {}) {
+      return ['1_2','1_3','2_3'].filter(key => data.gsb_pairs?.[key]).map(key => {
+        const pair = data.gsb_pairs[key], [a,b] = key.split('_').map(Number);
+        const validCount = pair.valid_count ?? pair.evaluated ?? 0;
+        const net = pair.net_win_rate;
+        return {key,a,b,G:pair.G ?? 0,S:pair.S ?? 0,B:pair.B ?? 0,
+          validCount,total:pair.total ?? pair.eligible ?? 0,
+          netRate:validCount && typeof net === 'number' && Number.isFinite(net)
+            ? `${net > 0 ? '+' : ''}${(net*100).toFixed(1)}%` : '—',
+          netClass:!validCount || typeof net !== 'number' ? 'gsb-pending' : net > 0 ? 'gsb-g' : net < 0 ? 'gsb-b' : 'gsb-s',
+          insufficient:pair.insufficient_evidence ?? 0,review:pair.needs_review ?? 0,
+          other:[['pending','未完成'],['failed','评估失败'],['invalid_state','结果异常'],['identity_error','协议异常']]
+            .map(([field,label]) => `${label} ${pair[field] ?? 0}`).join(' · ')};
+      });
+    }
     function chatScoreStatus(row, dimension, product) {
       if (taskProtocolDiagnostics.value.length) return '协议待恢复';
       if (row.error) return '评估失败';
@@ -2117,6 +2202,8 @@ createApp({
       const v = r[c.key];
       if (c.key === "category") return r.category_display || (!v || v === "default" ? "通用" : v);
       if (c.key === "latency_s") return r.total_s != null ? r.total_s + "秒" : v != null ? v + "秒（旧记录）" : "";
+      if (c.key === 'gsb_summary' && isChitchatGSBRow(r)) return chitchatGSBPairs(r)
+        .map(pair => `${pair.pairLabel}：${pair.label}`).join('；');
       if (["input_status_summary", "response_gate_summary", "safety_gate_summary"].includes(c.key)) {
         const field = c.key.replace("_summary", "");
         const labels = { complete: "完整", partial: "不完整", failed: "失败", pass: "通过", fail: "不通过", unclear: "不清楚" };
@@ -2124,8 +2211,9 @@ createApp({
         return Array.from({ length: count }, (_, index) => {
           const productNo = index + 1;
           const key = field === "input_status" ? `answer${productNo}_input_status` : `answer${productNo}_${field}`;
-          const value = r[key];
-          return `P${productNo}:${labels[value] || value || (field === 'input_status' && (chatUsesSharedReasons(r) || isDialogueExperienceRow(r)) ? '未知（未提供采集结论）' : 'N/A')}`;
+          const value = r[key] ?? (field === 'input_status' && isChitchatGSBRow(r)
+            ? r.trusted_collection_metadata?.[`answer${productNo}`]?.input_status : undefined);
+          return `P${productNo}:${labels[value] || value || (field === 'input_status' && (chatUsesSharedReasons(r) || isDialogueExperienceRow(r) || isChitchatGSBRow(r)) ? '未知（未提供采集结论）' : 'N/A')}`;
         }).join("；");
       }
       if (c.key.endsWith("_summary") && !["input_status_summary", "response_gate_summary", "safety_gate_summary"].includes(c.key)) {
@@ -2783,6 +2871,8 @@ createApp({
       evaluationProfiles, promptNameCatalog, compareProfiles, selectedEvaluationProfile, evaluationProfileLabel, evaluationProfileOptionLabel,
       taskEvaluationProfile, taskEvaluationProfileDisplay, taskProtocolManifest, taskProtocolDiagnostics, taskIsChat, taskIsTimeliness, taskIsKnowledgeQA, taskIsFlatChat, compact1022, summaryDimensions, setTaskProtocol,
       taskIsDialogueExperience, isDialogueExperienceRow, dialogueExperienceColumn, dialogueExperienceProducts,
+      taskIsChitchatGSB, isChitchatGSBRow, chitchatGSBColumn, chitchatGSBPairs, chitchatGSBSummaryRows,
+      chitchatGSBPairOptions, gsbPairFilter, gsbVerdictFilter,
       isFlatChatRow, flatChatColumn, flatChatProductScores, flatChatSummaryRows, flatChatRatios,
       isKnowledgeQARow, knowledgeQAColumn, knowledgeQAProductScores, knowledgeQASummaryRows,
       isTimelinessRow, timelinessColumn, timelinessProductScores, timelinessSummaryRows, timelinessPairedRows, summaryPercent,

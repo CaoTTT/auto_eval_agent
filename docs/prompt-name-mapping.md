@@ -19,6 +19,7 @@
 | qa_competitor_compare@0.2-simplified-thinking-exposure | 0.2.3 | 0.2-simplified-thinking-exposure | V0.2 简化版·思考暴露优化（可用） | QA-S1.0-P05 | 问答对比 \| 标准S1.0 \| Prompt P05 \| Qwen3.8-Flash \| 实验 | 否 |
 | qa_chat_compare@1.0 | 1.0.0 | 1.0 | 问答闲聊V1·1-5分（候选） | CHAT-S1.0-P01 | 闲聊对比 \| 标准S1.0 \| Prompt P01 \| Qwen3.8-Flash \| 实验 | 否 |
 | dialogue_experience_compare@1.0 | 1.0.1 | 1.0 | 对话体验综合评估·1-5分（候选） | EXP-S1.0-P01 | 对话体验对比 \| 标准S1.0 \| Prompt P01 \| Qwen3.8-Flash \| 实验 | 是 |
+| chitchat_gsb_compare@1.0 | 1.0.0 | 1.0 | 闲聊GSB对比 | CHATGSB-S1.0-P01 | 闲聊GSB对比 \| 标准S1.0 \| Prompt P01 \| Qwen3.8-Flash \| 实验 | 是 |
 
 “生产／实验”是用户批准的展示标签，不决定协议的实际 `status` 或 `selectable`。新建任务的可选项继续以当前 registry 的 `selectable` 为准；例如时效性协议的实际状态仍是 `experimental`，命名为“生产”不会更改该状态。当前不可新建选择的四项仍不可选，历史任务继续可按原有逻辑查看。
 

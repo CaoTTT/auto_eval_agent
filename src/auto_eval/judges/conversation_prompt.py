@@ -25,7 +25,8 @@ INSTRUCTIONS = """
 """
 
 
-def assemble_conversation(system: str, bundle: dict, protocol, evaluation_datetime: str | None = None):
+def assemble_conversation(system: str, bundle: dict, protocol, evaluation_datetime: str | None = None,
+                          trusted_collection_metadata: dict | None = None):
     if protocol.public_metadata().get("conversation_adapter_version") != VERSION:
         raise QueryImageError("conversation_protocol_unsupported", "旧评分实现不支持多轮，请新建任务")
     target, turns = bundle["target_turn"], bundle["turns"]
@@ -34,7 +35,8 @@ def assemble_conversation(system: str, bundle: dict, protocol, evaluation_dateti
     is_knowledge_qa = protocol.standard_id == "knowledge_qa_compare"
     is_flat_chat = protocol.standard_id == "chitchat_evidence_first_flat"
     is_dialogue_experience = protocol.standard_id == "dialogue_experience_compare"
-    if is_dialogue_experience:
+    is_gsb = protocol.standard_id == "chitchat_gsb_compare"
+    if is_dialogue_experience or is_gsb:
         turns = [turn for turn in turns if turn["turn_index"] <= target]
     product_contexts_only = (
         protocol.output_contract == OUTPUT_CONTRACT_1022
@@ -47,6 +49,12 @@ def assemble_conversation(system: str, bundle: dict, protocol, evaluation_dateti
             for turn in turns
         ]
     instructions = INSTRUCTIONS
+    if is_gsb:
+        instructions = instructions.replace(
+            "“回答”“展示”“证据”“Gate”及评分", "“回答”“展示”“证据”及GSB比较").replace(
+            "不继承前轮评分、Gate、胜负或总结", "不继承前轮评分、GSB、胜负或总结").replace(
+            "先分别绝对评分，再比较。", "按本轮诉求进行整体成对比较；不生成逐产品绝对分数或Gate。").replace(
+            "不新增记忆分、自定义总分或历史重评分。", "只输出本轮各产品对的GSB，不新增分数、排名或历史重评分。")
     if is_knowledge_qa or is_dialogue_experience:
         instructions = instructions.replace("“回答”“展示”“证据”“Gate”及评分", "“回答”“展示”“证据”及评分").replace(
             "不继承前轮评分、Gate、胜负或总结", "不继承前轮评分、胜负或总结")
@@ -81,7 +89,7 @@ def assemble_conversation(system: str, bundle: dict, protocol, evaluation_dateti
     if is_timeliness:
         text("时间依据：仅采用各产品各轮材料中的明确测试条件和用户目标时间。"
              "未提供测试时间时保留未知；任务创建时间和审核时间不是产品测试时间。")
-    elif is_knowledge_qa or is_dialogue_experience:
+    elif is_knowledge_qa or is_dialogue_experience or is_gsb:
         text("本次评估调用时间 evaluation_datetime：" + (evaluation_datetime or datetime.now().astimezone().isoformat(timespec="seconds")))
         text("该时间不是产品实际测试时间；只采用原始材料中明确的测试条件，缺少决定性时点时保留未知。")
     elif not product_contexts_only:
@@ -112,7 +120,14 @@ def assemble_conversation(system: str, bundle: dict, protocol, evaluation_dateti
                        "image_role": "product_answer", "request_role": role, "ref_path": part["path"]})
                 text(f"{asset_id} 结束")
         text(f"产品{n}轨迹结束")
-    if is_dialogue_experience:
+    if is_gsb:
+        import json
+        text("程序记录的当前轮可信采集状态（未知字段为空；采集失败不同于产品实际生成失败）：" +
+             json.dumps(trusted_collection_metadata or {}, ensure_ascii=False))
+        text(f"只输出 target_turn={target} 的整体GSB JSON：两产品仅pair_1_2；三产品增加pair_1_3和pair_2_3。"
+             "每对仅status、gsb、reason、serious_issue。该对A为编号较小产品、B为编号较大产品。"
+             "证据不足或需复核时gsb为null，不计S。不输出Gate、绝对分数或强制总排名。")
+    elif is_dialogue_experience:
         if protocol.bundle_revision == "1.0.0":
             text(f"只输出 target_turn={target} 的逐产品JSON：answer1/answer2以及启用时answer3；每个产品仅score(1—5整数)、reason、suggestion、domain。不输出Gate或各分项分。")
         else:

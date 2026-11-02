@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <title>auto_eval 评估台</title>
-  <link rel="stylesheet" href="/static/style.css?v=20261102_dialogue_experience">
+  <link rel="stylesheet" href="/static/style.css?v=20261102_chitchat_gsb">
   <style>
     .op-cards { display:flex; flex-direction:column; gap:12px; }
     .op-card { border:1px solid #e2e8f0; border-radius:8px; padding:12px; background:#fafbfc; }
@@ -254,7 +254,7 @@
       <span class="lbl">评测标准：</span>
       <select v-model="selectedEvaluationProfile">
         <option v-for="profile in compareProfiles" :key="profile.id" :value="profile.id" :disabled="profile.selectable === false">
-          {{ evaluationProfileOptionLabel(profile) }} · {{ profile.score_range[0] }}–{{ profile.score_range[1] }}分{{ profile.selectable === false ? '（暂不可选）' : '' }}
+          {{ evaluationProfileOptionLabel(profile) }} · {{ profile.result_type === 'pairwise_gsb' ? '整体 G/S/B' : (profile.score_range?.[0] ?? '—') + '–' + (profile.score_range?.[1] ?? '—') + '分' }}{{ profile.selectable === false ? '（暂不可选）' : '' }}
         </option>
       </select>
       <span class="hint">任务创建后版本冻结；失败补跑沿用原版本。</span>
@@ -482,6 +482,15 @@
         <tbody><tr v-for="row in timelinessPairedRows(summary)" :key="row.key"><td>{{row.dimension}}</td><td>A：产品{{row.a}} / B：产品{{row.b}}</td><td>{{row.count}}</td><td>{{row.averageA}}</td><td>{{row.averageB}}</td></tr></tbody>
       </table></div>
     </section>
+    <section v-if="taskIsChitchatGSB && summary" class="timeliness-summary chitchat-gsb-summary">
+      <h3>闲聊整体 GSB 对比</h3>
+      <p class="hint">每个产品对独立比较。G 表示 A 更好，B 表示 B 更好，S 表示整体相近；待补证据和待复核不计入有效分母。净胜率 = (G − B) / (G + S + B)，无有效结果时显示“—”。</p>
+      <p v-if="summary.statistic_unit === 'turn' && conversationGroups.length" class="hint">当前统计单位为轮次；会话明细只展示逐轮分布，不生成或推断整段会话的 GSB。</p>
+      <table class="grid">
+        <thead><tr><th>比较方向</th><th>G</th><th>S</th><th>B</th><th>有效 / 总数</th><th>净胜率</th><th>待补证据</th><th>待复核</th><th>其他状态</th></tr></thead>
+        <tbody><tr v-for="row in chitchatGSBSummaryRows(summary)" :key="row.key"><td>A：产品{{row.a}} / B：产品{{row.b}}</td><td>{{row.G}}</td><td>{{row.S}}</td><td>{{row.B}}</td><td>{{row.validCount}} / {{row.total}}</td><td :class="row.netClass">{{row.netRate}}</td><td>{{row.insufficient}}</td><td>{{row.review}}</td><td>{{row.other}}</td></tr></tbody>
+      </table>
+    </section>
     <section v-if="taskIsDialogueExperience && summary" class="timeliness-summary dialogue-experience-summary">
       <h3>对话体验对比 · 综合体验 1–5分</h3>
       <p class="hint">按本轮需求给出每个产品的综合体验总分，保留各自评分理由、提升建议和垂域。空分不作0分；请结合覆盖率与共同有效样本阅读均分。</p>
@@ -545,7 +554,19 @@
           <button @click="setPageEvidenceExpanded(true)">全部展开图片</button>
         </template>
       </div>
-      <div v-if="mode==='compare'" class="score-filter-panel">
+      <div v-if="mode==='compare' && taskIsChitchatGSB" class="score-filter-panel gsb-filter-panel">
+        <div class="score-filter-toolbar">
+          <strong>按整体 GSB 筛选 Case</strong>
+          <label>产品对
+            <select v-model="gsbPairFilter" @change="resetResultPage" aria-label="GSB 产品对"><option value="">任一产品对</option><option v-for="pair in chitchatGSBPairOptions" :key="pair.key" :value="pair.key">{{pair.label}}</option></select>
+          </label>
+          <label>结论或状态
+            <select v-model="gsbVerdictFilter" @change="resetResultPage" aria-label="GSB 结论或状态"><option value="">全部结论与状态</option><option value="G">G · A 更好</option><option value="S">S · 整体相近</option><option value="B">B · B 更好</option><option value="insufficient_evidence">待补证据</option><option value="needs_review">待复核</option><option value="invalid_state">结果缺失或异常</option><option value="identity_error">协议待恢复</option></select>
+          </label>
+        </div>
+        <p class="hint">A/B 为所选产品对前者/后者，均按原产品身份展示。三产品选择“任一产品对”时，存在一个符合条件的产品对即可命中；未判结果不会作为 S。</p>
+      </div>
+      <div v-if="mode==='compare' && !taskIsChitchatGSB" class="score-filter-panel">
         <div class="score-filter-toolbar">
           <strong>按评分筛选 Case</strong>
           <button @click="addScoreRule">添加评分条件</button>
@@ -587,10 +608,10 @@
         <p v-if="scoreRules.length" class="hint">仅比较有效分数，N/A 不作 0 分；无评分项可用“N/A”筛选。评测失败的 Case 不参与评分筛选。</p>
       </div>
       <div class="result-reason-toolbar">
-        <span>评分理由</span>
+        <span>{{taskIsChitchatGSB ? '对比理由' : '评分理由'}}</span>
         <button @click="setAllReasonsExpanded(true)">展开全部理由</button>
         <button @click="setAllReasonsExpanded(false)">收起全部理由</button>
-        <span class="hint">各维度可单独展开；筛选仅影响页面，统计和导出保留完整任务结果。</span>
+        <span class="hint">{{taskIsChitchatGSB ? '各产品对的决定性理由可展开查看' : '各维度可单独展开'}}；筛选仅影响页面，统计和导出保留完整任务结果。</span>
       </div>
       <p v-if="!filteredResults.length" class="result-empty" role="status">{{ scoreFilterError ? '请先完成评分筛选条件。' : '没有符合条件的 Case，可调整条件或重置全部筛选。' }}</p>
       <div class="result-table-wrap">
@@ -598,8 +619,11 @@
         <details v-if="summary && summary.by_input_modality">
           <summary>按题型查看汇总（沿用任务统一标准）</summary>
           <div v-for="(sub, key) in summary.by_input_modality" :key="key" class="query-image-panel">
-            <strong>{{ key==='text' ? '文字题' : '图文题' }}</strong> · 样本 {{ sub.total }} · 成功 {{ sub.done }} · 失败 {{ sub.failed }} <span v-if="!taskIsTimeliness && !taskIsKnowledgeQA && !taskIsFlatChat && !taskIsDialogueExperience">· 可比较 {{ sub.comparable }}</span>
-            <template v-if="taskIsDialogueExperience">
+            <strong>{{ key==='text' ? '文字题' : '图文题' }}</strong> · 样本 {{ sub.total }} · 成功 {{ sub.done }} · 失败 {{ sub.failed }} <span v-if="!taskIsTimeliness && !taskIsKnowledgeQA && !taskIsFlatChat && !taskIsDialogueExperience && !taskIsChitchatGSB">· 可比较 {{ sub.comparable }}</span>
+            <template v-if="taskIsChitchatGSB">
+              <p v-for="row in chitchatGSBSummaryRows(sub)" :key="row.key">A：产品{{row.a}} / B：产品{{row.b}} · G {{row.G}} / S {{row.S}} / B {{row.B}} · 有效 {{row.validCount}} / {{row.total}} · 净胜率 {{row.netRate}} · 待补证据 {{row.insufficient}} · 待复核 {{row.review}}</p>
+            </template>
+            <template v-else-if="taskIsDialogueExperience">
               <p v-for="row in flatChatSummaryRows(sub)" :key="row.key">{{row.dimension}} · 产品{{row.product}}均分 {{row.average}} · 有效 {{row.scored}} / {{row.eligible}} · 覆盖 {{row.coverage}} · {{row.distribution}} · {{row.states}}</p>
               <p v-for="row in flatChatRatios(sub)" :key="row.key">产品{{row.a}} / 产品{{row.b}}分位值 {{row.ratio}} · 共同有效 {{row.count}} · 交集均分 {{row.averageA}} / {{row.averageB}} · 共同样本分位值 {{row.pairedRatio}}</p>
             </template>
@@ -653,6 +677,15 @@
                   @mouseenter="c.key !== 'latency_s' && !reasonOnlyColumn(c) && showCellTooltip($event, cell(r, c))"
                   @mouseleave="scheduleHideCellTooltip"
                 >
+                  <div v-if="chitchatGSBColumn(r,c)" class="chitchat-gsb-result timeliness-result">
+                    <section v-for="entry in chitchatGSBPairs(r)" :key="entry.key" class="gsb-pair-result">
+                      <strong>{{entry.pairLabel}}</strong>
+                      <p><span class="gsb-verdict" :class="entry.className">{{entry.label}}</span><span v-if="entry.gsb" class="hint"> · {{entry.statusLabel}}</span></p>
+                      <p class="gsb-reason" :class="{'timeliness-evidence-preview':!reasonsExpanded(r,c)}">{{entry.reason || '未记录决定性理由'}}</p>
+                      <p class="gsb-serious"><strong>严重问题：</strong>{{entry.seriousLabel}}</p>
+                    </section>
+                    <button v-if="cellReasons(r,c).length" class="reason-toggle" :aria-expanded="reasonsExpanded(r,c)" @click="toggleCellReasons(r,c)">{{reasonsExpanded(r,c)?'收起理由':'展开全部决定性理由'}}</button>
+                  </div>
                   <div v-if="dialogueExperienceColumn(r,c)" class="dialogue-experience-result flat-chat-result timeliness-result">
                     <section v-for="entry in dialogueExperienceProducts(r)" :key="entry.product" class="dialogue-experience-product">
                       <strong>产品{{entry.product}}</strong>
@@ -695,11 +728,11 @@
                     <div class="timeliness-conflict-verdict"><strong>{{cell(r,c)}}</strong></div>
                   </div>
                   <div
-                    v-if="!reasonOnlyColumn(c) && !flatChatColumn(r,c) && !knowledgeQAColumn(r,c) && !timelinessColumn(r,c) && !timelinessConflictColumn(r,c) && !dialogueExperienceColumn(r,c)"
+                    v-if="!reasonOnlyColumn(c) && !flatChatColumn(r,c) && !knowledgeQAColumn(r,c) && !timelinessColumn(r,c) && !timelinessConflictColumn(r,c) && !dialogueExperienceColumn(r,c) && !chitchatGSBColumn(r,c)"
                     class="cell-clamp"
                     :class="{'cell-center': ['card_presence','superlink_presence','card_count','superlink_count','answer_coverage','needs_review','problem_solved','card_suitability','superlink_suitability','has_conflict','relevance','safety','content_quality','need_closure','personalization','latency_s'].includes(c.key)}"
                   >{{ cell(r, c) }}</div>
-                  <template v-if="!flatChatColumn(r,c) && !knowledgeQAColumn(r,c) && !timelinessColumn(r,c) && !timelinessConflictColumn(r,c) && !dialogueExperienceColumn(r,c) && cellReasons(r, c).length">
+                  <template v-if="!flatChatColumn(r,c) && !knowledgeQAColumn(r,c) && !timelinessColumn(r,c) && !timelinessConflictColumn(r,c) && !dialogueExperienceColumn(r,c) && !chitchatGSBColumn(r,c) && cellReasons(r, c).length">
                     <button class="reason-toggle" :aria-expanded="reasonsExpanded(r, c)" @click="toggleCellReasons(r, c)">{{ reasonsExpanded(r, c) ? '收起理由' : '展开理由' }}</button>
                     <div v-if="reasonsExpanded(r, c)" class="cell-reasons">
                       <p v-for="(reason, reasonIndex) in cellReasons(r, c)" :key="reasonIndex"><strong>{{ reason.label }}</strong><span>{{ reason.text }}</span></p>
@@ -791,6 +824,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20261028_snapshot_product_contexts_20261102_dialogue_experience"></script>
+  <script type="module" src="/static/app.js?v=20261028_snapshot_product_contexts_20261102_chitchat_gsb"></script>
 </body>
 </html>

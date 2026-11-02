@@ -52,7 +52,8 @@ def payload(protocol):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("protocol", list_compare_protocols(), ids=lambda p: p.id)
+@pytest.mark.parametrize("protocol", [p for p in list_compare_protocols()
+                                    if p.standard_id != "chitchat_gsb_compare"], ids=lambda p: p.id)
 async def test_each_protocol_keeps_default_request_and_restores_reversed_scores(protocol):
     raw = payload(protocol)
     dimension = "understanding" if "answer1_understanding_score" in raw else protocol.dimensions[0]

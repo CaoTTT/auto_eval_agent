@@ -12,6 +12,15 @@ from jinja2 import Template
 from pydantic import BaseModel, create_model, model_validator
 
 from ..schema import VisualCompareObservation
+from .chitchat_gsb_schema import (
+    CHITCHAT_GSB_STANDARD_ID, CHITCHAT_GSB_COMPARE_PROTOCOL_ID,
+    CHITCHAT_GSB_RESULT_SCHEMA_VERSION, CHITCHAT_GSB_DIMENSIONS,
+    CHITCHAT_GSB_DIMENSION_NAMES, ChitchatGSBObservation,
+)
+from .visual_compare_prompt_chitchat_gsb import (
+    VISUAL_COMPARE_SYSTEM as CHITCHAT_GSB_SYSTEM,
+    VISUAL_COMPARE_USER as CHITCHAT_GSB_USER,
+)
 from .dialogue_experience_schema import (
     DIALOGUE_EXPERIENCE_STANDARD_ID, DIALOGUE_EXPERIENCE_COMPARE_PROTOCOL_ID,
     DIALOGUE_EXPERIENCE_RESULT_SCHEMA_VERSION, DIALOGUE_EXPERIENCE_DIMENSIONS,
@@ -265,6 +274,12 @@ class CompareProtocol:
             metadata["model_output_fields"] = (
                 ["score", "reason", "suggestion", "domain"] if self.bundle_revision == "1.0.0"
                 else ["reason", "score", "suggestion", "domain"])
+        if self.standard_id == CHITCHAT_GSB_STANDARD_ID:
+            metadata["score_range"] = None
+            metadata["has_gates"] = False
+            metadata["result_type"] = "pairwise_gsb"
+            metadata["model_output_fields"] = ["status", "gsb", "reason", "serious_issue"]
+            metadata["comparison_labels"] = ["G", "S", "B"]
         return metadata
 
     def request_metadata(self) -> dict:
@@ -516,6 +531,24 @@ _PROTOCOLS = {
         dimension_names=dict(DIALOGUE_EXPERIENCE_DIMENSION_NAMES),
         score_dimensions=DIALOGUE_EXPERIENCE_DIMENSIONS,
         result_schema_version=DIALOGUE_EXPERIENCE_RESULT_SCHEMA_VERSION,
+    ),
+    CHITCHAT_GSB_COMPARE_PROTOCOL_ID: CompareProtocol(
+        id=CHITCHAT_GSB_COMPARE_PROTOCOL_ID,
+        standard_id=CHITCHAT_GSB_STANDARD_ID,
+        standard_version="1.0",
+        bundle_revision="1.0.0",
+        display="闲聊GSB对比",
+        status="experimental",
+        system_template=CHITCHAT_GSB_SYSTEM,
+        user_template=CHITCHAT_GSB_USER,
+        observation_model=ChitchatGSBObservation,
+        require_response_pass=False,
+        score_min=0,
+        score_max=0,
+        dimensions=CHITCHAT_GSB_DIMENSIONS,
+        dimension_names=dict(CHITCHAT_GSB_DIMENSION_NAMES),
+        score_dimensions=(),
+        result_schema_version=CHITCHAT_GSB_RESULT_SCHEMA_VERSION,
     ),
 }
 

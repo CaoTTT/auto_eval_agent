@@ -23,6 +23,7 @@ APPROVED = [
     ("qa_competitor_compare@0.2-simplified-thinking-exposure", "0.2.3", "问答对比 | 标准S1.0 | Prompt P05 | Qwen3.8-Flash | 实验"),
     ("qa_chat_compare@1.0", "1.0.0", "闲聊对比 | 标准S1.0 | Prompt P01 | Qwen3.8-Flash | 实验"),
     ("dialogue_experience_compare@1.0", "1.0.1", "对话体验对比 | 标准S1.0 | Prompt P01 | Qwen3.8-Flash | 实验"),
+    ("chitchat_gsb_compare@1.0", "1.0.0", "闲聊GSB对比 | 标准S1.0 | Prompt P01 | Qwen3.8-Flash | 实验"),
 ]
 
 VERSION_CODES = [
@@ -30,6 +31,7 @@ VERSION_CODES = [
     "CHAT-S1.0-P03", "CHAT-S1.0-P04", "TIME-S1.0-P01", "KQA-S1.0-P01",
     "QA-S0.3-P01", "QA-S1.0-P04", "QA-S1.0-P05", "CHAT-S1.0-P01",
     "EXP-S1.0-P01",
+    "CHATGSB-S1.0-P01",
 ]
 
 
@@ -75,7 +77,7 @@ def test_catalog_matches_current_identities_and_reads_availability_from_registry
     for protocol in list_compare_protocols():
         if (protocol.id, protocol.bundle_revision) not in approved_ids:
             assert prompt_name(protocol.id, protocol.bundle_revision, fallback=protocol.display) == protocol.display
-    assert len({r["canonical_name"] for r in records}) == 13
+    assert len({r["canonical_name"] for r in records}) == 14
     for record in records:
         protocol = resolve_compare_protocol(record["evaluation_profile"], record["bundle_revision"])
         assert record["legacy_name"] == protocol.display

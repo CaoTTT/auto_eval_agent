@@ -35,6 +35,8 @@ _PROMPT_NAMES = {
         "闲聊对比 | 标准S1.0 | Prompt P01 | Qwen3.8-Flash | 实验",
     ("dialogue_experience_compare@1.0", "1.0.1"):
         "对话体验对比 | 标准S1.0 | Prompt P01 | Qwen3.8-Flash | 实验",
+    ("chitchat_gsb_compare@1.0", "1.0.0"):
+        "闲聊GSB对比 | 标准S1.0 | Prompt P01 | Qwen3.8-Flash | 实验",
 }
 
 

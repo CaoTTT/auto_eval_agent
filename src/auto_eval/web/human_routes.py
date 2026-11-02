@@ -168,6 +168,18 @@ def install_human_routes(app, service_getter, peek):
             values=data.get("rows",[])
             filters=dict(task_id=task_id,product_id=product_id,dimension_id=dimension_id,category=category,input_modality=input_modality,evidence_mode=evidence_mode)
             values=[r for r in values if all(not v or r[k]==v for k,v in filters.items())]
+            if data.get("baseline", {}).get("human_standard_id") == "chitchat_gsb_compare":
+                if direction in ("agreement", "disagreement", "reversal"):
+                    values = [r for r in values if r.get("comparable") and (
+                        r.get("agreement") is True if direction == "agreement" else
+                        r.get("agreement") is False if direction == "disagreement" else r.get("reversal") is True)]
+                if min_difference or direction in ("higher", "lower"):
+                    values = []
+                if state_mismatch:
+                    values = [r for r in values if r.get("human_status") in ("evaluated", "insufficient_evidence", "needs_review")
+                              and r.get("model_score_status") in ("evaluated", "insufficient_evidence", "needs_review")
+                              and r["human_status"] != r["model_score_status"]]
+                return dict(total=len(values), items=values[(page-1)*page_size:page*page_size])
             if min_difference:
                 values=[r for r in values if r["difference"] is not None and abs(r["difference"])>=min_difference]
             if direction in ("higher","lower"):

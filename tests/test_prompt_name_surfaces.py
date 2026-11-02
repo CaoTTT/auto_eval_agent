@@ -76,8 +76,8 @@ def test_configuration_exposes_aliases_separately_from_frozen_protocol_metadata(
     catalog = response["prompt_name_catalog"]
     assert catalog == prompt_name_catalog()
     names = {(row["evaluation_profile"], row["bundle_revision"]): row for row in catalog}
-    assert len(names) == 13
-    assert len(response["evaluation_profiles"]) == 14
+    assert len(names) == 14
+    assert len(response["evaluation_profiles"]) == 15
     for profile in response["evaluation_profiles"]:
         protocol = resolve_compare_protocol(profile["id"])
         record = names.get((protocol.id, protocol.bundle_revision))

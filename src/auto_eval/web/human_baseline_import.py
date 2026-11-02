@@ -78,6 +78,9 @@ def _workbook_metadata(workbook) -> dict:
 def suggest_mapping(headers: list[str], sheet_name: str, header_row: int = 1, metadata: dict | None = None) -> dict:
     metadata = metadata or {}
     protocol = human_protocol(metadata.get("human_standard_version") or "0.2-simplified", metadata.get("human_standard_id", ""), metadata.get("human_bundle_revision") or None)
+    if protocol.standard_id == "chitchat_gsb_compare":
+        from .chitchat_gsb_human import suggest_gsb_mapping
+        return suggest_gsb_mapping(headers, sheet_name, header_row, metadata)
     dimension_names = human_dimension_names(protocol)
     if not metadata.get("human_standard_version"):
         dimension_names = {**dimension_names, **CHAT_NAMES}
@@ -179,6 +182,9 @@ def _knowledge_number(value, dimension: str) -> int | float:
 
 def parse_human_labels(path: Path, mapping: ImportMapping) -> dict:
     protocol = human_protocol(mapping.human_standard_version, mapping.human_standard_id, mapping.human_bundle_revision or None)
+    if protocol.standard_id == "chitchat_gsb_compare":
+        from .chitchat_gsb_human import parse_gsb_labels
+        return parse_gsb_labels(path, mapping)
     timeliness = protocol.standard_id == "timeliness_compare"
     knowledge = protocol.standard_id == "knowledge_qa_compare"
     flat = protocol.standard_id == "chitchat_evidence_first_flat"
@@ -452,13 +458,16 @@ def build_human_template(snapshot: dict, standard: str) -> bytes:
     from .human_report_export import tables_workbook
     from .compare_statistics import StatisticsTable
     protocol = human_protocol(standard)
-    if protocol.standard_id in ("timeliness_compare", "knowledge_qa_compare", "chitchat_evidence_first_flat", "dialogue_experience_compare"):
+    if protocol.standard_id in ("timeliness_compare", "knowledge_qa_compare", "chitchat_evidence_first_flat", "dialogue_experience_compare", "chitchat_gsb_compare"):
         from .protocol_identity import recover_protocol_identity, require_snapshot_protocol
         recovered = recover_protocol_identity(snapshot)
         if recovered["executable"] and recovered["evaluation_profile"] == protocol.id:
             # A template downloaded from a historical task must still align
             # with that task's frozen model result contract.
             protocol = require_snapshot_protocol(snapshot)
+    if protocol.standard_id == "chitchat_gsb_compare":
+        from .chitchat_gsb_human import build_gsb_template
+        return build_gsb_template(snapshot, protocol)
     dimensions = human_dimensions(protocol, scores=True)
     names_by_dimension = human_dimension_names(protocol)
     timeliness = protocol.standard_id == "timeliness_compare"

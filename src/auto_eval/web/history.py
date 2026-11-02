@@ -245,7 +245,7 @@ def _apply_interrupted_status(status, error):
 def _snapshot_evaluation_profile(data: dict) -> str:
     """恢复任务冻结的协议；无版本旧记录沿用原有 V0.2/V0.3 回退。"""
     recovered = recover_protocol_identity(data)
-    if recovered["is_chat"] or recovered["is_timeliness"] or (recovered.get("is_knowledge_qa") or recovered.get("is_flat_chat") or recovered.get("is_dialogue_experience")):
+    if recovered["is_chat"] or recovered["is_timeliness"] or (recovered.get("is_knowledge_qa") or recovered.get("is_flat_chat") or recovered.get("is_dialogue_experience") or recovered.get("is_chitchat_gsb")):
         return recovered["evaluation_profile"]
     explicit = data.get("evaluation_profile") or (data.get("options") or {}).get(
         "evaluation_profile"
@@ -410,7 +410,7 @@ def snapshot_payload(data: dict) -> dict:
         **(_snapshot_product_order(data) if data.get("mode") == "compare" else {}),
         "evaluation_profile": _snapshot_evaluation_profile(data),
         **prompt_display_fields({**data, "evaluation_profile": _snapshot_evaluation_profile(data)}),
-        "protocol_manifest": (recovered["manifest"] if recovered["is_chat"] or recovered["is_timeliness"] or (recovered.get("is_knowledge_qa") or recovered.get("is_flat_chat") or recovered.get("is_dialogue_experience")) else data.get("protocol_manifest") or {}),
+        "protocol_manifest": (recovered["manifest"] if recovered["is_chat"] or recovered["is_timeliness"] or (recovered.get("is_knowledge_qa") or recovered.get("is_flat_chat") or recovered.get("is_dialogue_experience") or recovered.get("is_chitchat_gsb")) else data.get("protocol_manifest") or {}),
         "protocol_diagnostics": recovered["diagnostics"],
         "protocol_executable": recovered["executable"],
         "judge_runtime": data.get("judge_runtime") or {},
@@ -420,7 +420,7 @@ def snapshot_payload(data: dict) -> dict:
         "item_progress": data.get("item_progress") or {},
         "progress_events": data.get("progress_events") or {},
         "summary": _readable_summary(data, recovered),
-        **({"raw_summary": data.get("summary") or {}} if (recovered["is_chat"] or recovered["is_timeliness"] or (recovered.get("is_knowledge_qa") or recovered.get("is_flat_chat") or recovered.get("is_dialogue_experience"))) and not recovered["executable"] else {}),
+        **({"raw_summary": data.get("summary") or {}} if (recovered["is_chat"] or recovered["is_timeliness"] or (recovered.get("is_knowledge_qa") or recovered.get("is_flat_chat") or recovered.get("is_dialogue_experience") or recovered.get("is_chitchat_gsb"))) and not recovered["executable"] else {}),
         "created_at": data.get("created_at"),
         "task_timing": snapshot_task_timing(data),
         "updated_at": data.get("updated_at"),
@@ -435,7 +435,7 @@ def snapshot_payload(data: dict) -> dict:
 def _readable_summary(data: dict, recovered: dict | None = None) -> dict:
     recovered = recovered or recover_protocol_identity(data)
     summary = data.get("summary") or {}
-    if not (recovered["is_chat"] or recovered["is_timeliness"] or (recovered.get("is_knowledge_qa") or recovered.get("is_flat_chat") or recovered.get("is_dialogue_experience"))) or recovered["executable"]:
+    if not (recovered["is_chat"] or recovered["is_timeliness"] or (recovered.get("is_knowledge_qa") or recovered.get("is_flat_chat") or recovered.get("is_dialogue_experience") or recovered.get("is_chitchat_gsb"))) or recovered["executable"]:
         return summary
     return {**{key: summary[key] for key in ("total", "done", "failed", "unfinished", "mode") if key in summary},
             "protocol_diagnostics": recovered["diagnostics"]}
@@ -558,7 +558,10 @@ def export_rows(snapshot: dict) -> dict[str, list[dict]]:
         result_rows = _rich_content_export_rows(aligned_results)
     elif mode == "compare":
         recovered = recover_protocol_identity(snapshot)
-        if recovered.get("is_dialogue_experience"):
+        if recovered.get("is_chitchat_gsb"):
+            from .chitchat_gsb_export import chitchat_gsb_export_rows
+            result_rows = chitchat_gsb_export_rows(snapshot, aligned_results)
+        elif recovered.get("is_dialogue_experience"):
             from .dialogue_experience_export import dialogue_experience_export_rows
             result_rows = dialogue_experience_export_rows(snapshot, aligned_results)
         elif recovered.get("is_flat_chat"):
@@ -599,13 +602,13 @@ def export_rows(snapshot: dict) -> dict[str, list[dict]]:
                                "提问图片": item.get("query_images", []),
                                "提问图片元数据": item.get("query_image_meta", []),
                                "输入指纹": (aligned_results[index].get("input_manifest_sha256") or item.get("input_manifest_sha256", ""))
-                               if recovery["evaluation_profile"] in ("qa_chat_compare@1.1", "qa_chat_compare@1.1-demand-calibrated") or recovery["is_timeliness"] or (recovery.get("is_knowledge_qa") or recovery.get("is_flat_chat") or recovery.get("is_dialogue_experience"))
+                               if recovery["evaluation_profile"] in ("qa_chat_compare@1.1", "qa_chat_compare@1.1-demand-calibrated") or recovery["is_timeliness"] or (recovery.get("is_knowledge_qa") or recovery.get("is_flat_chat") or recovery.get("is_dialogue_experience") or recovery.get("is_chitchat_gsb"))
                                else item.get("input_manifest_sha256", "")})
     if frame_rows:
         has_screenshots = any(item.get("evidence_mode") == "long_screenshot" for item in snapshot.get("items", []))
         rows["视觉证据清单" if has_screenshots else "抽帧清单"] = frame_rows
     rows["运行信息"] = [_run_info(snapshot)]
-    if (recovery["is_chat"] or recovery["is_timeliness"] or (recovery.get("is_knowledge_qa") or recovery.get("is_flat_chat") or recovery.get("is_dialogue_experience"))) and not recovery["executable"]:
+    if (recovery["is_chat"] or recovery["is_timeliness"] or (recovery.get("is_knowledge_qa") or recovery.get("is_flat_chat") or recovery.get("is_dialogue_experience") or recovery.get("is_chitchat_gsb"))) and not recovery["executable"]:
         rows["原始汇总（协议待恢复）"] = [{"协议恢复诊断": recovery["diagnostics"], "原始记录（不作正式统计解释）": snapshot.get("summary") or {}}]
     if summary:
         rows["汇总指标"] = [_flatten_dict(summary, skip_keys={"by_category"})]
@@ -1370,7 +1373,10 @@ def result_export_row(mode: str, result: dict, index: int, items: list[dict],
     snapshot = {"mode": mode, "items": items, "evaluation_profile": evaluation_profile,
                 "protocol_manifest": protocol_manifest or {}, "options": options or {},
                 "results": task_results if task_results is not None else [row]}
-    if mode == "compare" and recover_protocol_identity(snapshot).get("is_dialogue_experience"):
+    if mode == "compare" and recover_protocol_identity(snapshot).get("is_chitchat_gsb"):
+        from .chitchat_gsb_export import chitchat_gsb_export_rows
+        export = chitchat_gsb_export_rows(snapshot, [dict(row, index=index)])[0]
+    elif mode == "compare" and recover_protocol_identity(snapshot).get("is_dialogue_experience"):
         from .dialogue_experience_export import dialogue_experience_export_rows
         export = dialogue_experience_export_rows(snapshot, [dict(row, index=index)])[0]
     elif mode == "compare" and recover_protocol_identity(snapshot).get("is_flat_chat"):

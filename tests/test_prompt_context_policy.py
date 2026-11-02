@@ -27,6 +27,11 @@ EVALUATION_TIME = datetime(2026, 10, 22, tzinfo=timezone.utc)
 
 
 def response_data(protocol, count):
+    if protocol.standard_id == "chitchat_gsb_compare":
+        return {f"pair_{a}_{b}": {
+            "status": "evaluated", "gsb": "S", "reason": "双方都回应本轮需求，实际体验相近。",
+            "serious_issue": "none",
+        } for a in range(1, count + 1) for b in range(a + 1, count + 1)}
     if protocol.standard_id == "dialogue_experience_compare":
         return {f"answer{n}": {
             "score": 5,

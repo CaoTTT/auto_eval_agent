@@ -164,7 +164,7 @@ def _policy(snapshot: dict, row: dict, recovered_identity: dict | None = None):
     recovered = recovered_identity if recovered_identity is not None else recover_protocol_identity(
         {**snapshot, "results": snapshot.get("results") or [row]})
     if (recovered["is_chat"] or recovered["is_timeliness"] or recovered.get("is_knowledge_qa")
-            or recovered.get("is_flat_chat") or recovered.get("is_dialogue_experience")):
+            or recovered.get("is_flat_chat") or recovered.get("is_dialogue_experience") or recovered.get("is_chitchat_gsb")):
         if not recovered["executable"]:
             return None
         frozen = recovered["manifest"]
@@ -201,6 +201,9 @@ def _policy(snapshot: dict, row: dict, recovered_identity: dict | None = None):
 
 def align_baseline_to_run(baseline: dict, snapshot: dict, mapping: TaskMapping, scope: list[str], dimensions: list[str], mode: str) -> list[dict]:
     human_policy = baseline_protocol(baseline)
+    if human_policy.standard_id == "chitchat_gsb_compare":
+        from .chitchat_gsb_human import align_gsb_baseline
+        return align_gsb_baseline(baseline, snapshot, mapping, scope, dimensions, mode)
     if human_policy.id == "qa_competitor_compare@0.2-simplified-1022" and not baseline.get("human_bundle_revision"):
         raise HumanError("1022人工基准缺少冻结修订号，不能用当前标准补写历史")
     products = {p["product_id"] for p in baseline["products"]}
@@ -357,6 +360,10 @@ def align_baseline_to_run(baseline: dict, snapshot: dict, mapping: TaskMapping, 
 
 
 def finalize_row(row: dict):
+    if row.get("comparison_kind") == "gsb":
+        from .chitchat_gsb_human import finalize_gsb_row
+        finalize_gsb_row(row)
+        return
     row["identity_accepted"] = row["match_status"] in ("verified","confirmed") and row["result_input_binding"] in ("verified","confirmed")
     row["comparable"] = row["identity_accepted"] and row["compatible"] and row["human_score"] is not None and row["model_score"] is not None
     row["difference"] = row["model_score"]-row["human_score"] if row["comparable"] else None
@@ -378,8 +385,10 @@ class HumanComparisons:
         if len({t.task_id for t in request.tasks}) != len(request.tasks):
             raise HumanError("重复任务")
         baseline = self.store.load_baseline(request.baseline_id,request.version)
-        dimensions = request.dimensions or list(human_dimensions(baseline_protocol(baseline), scores=True))
-        if any(d not in human_dimensions(baseline_protocol(baseline), scores=True) for d in dimensions) or len(set(dimensions)) != len(dimensions):
+        human_policy = baseline_protocol(baseline)
+        allowed = ("overall",) if human_policy.standard_id == "chitchat_gsb_compare" else human_dimensions(human_policy, scores=True)
+        dimensions = request.dimensions or list(allowed)
+        if any(d not in allowed for d in dimensions) or len(set(dimensions)) != len(dimensions):
             raise HumanError("维度必须属于所选人工标准且不能重复")
         request = request.model_copy(update={"dimensions": dimensions})
         first = request.tasks[0]
@@ -409,7 +418,8 @@ class HumanComparisons:
         rows = preview["rows"]
         confirmations = defaultdict(lambda: {"match_ids":[],"binding_ids":[]})
         for row in rows:
-            if row["human_score"] is None:
+            human_missing = row.get("human_gsb") is None if row.get("comparison_kind") == "gsb" else row["human_score"] is None
+            if human_missing:
                 continue
             key=(row["task_id"],row["case_id"],row["product_id"])
             if row["match_status"]=="identity_unverified" and row["result_input_binding"]!="stale_result":
@@ -418,7 +428,8 @@ class HumanComparisons:
                 confirmations[key]["binding_ids"].append(row["match_id"])
         return dict(preview_id=preview["preview_id"],config_sha256=preview["config_sha256"],scope_count=len(preview["scope"]),
                     dimensions=preview["config"]["dimensions"],
-                    human_n=sum(r["human_score"] is not None for r in rows), comparable_n=sum(r["comparable"] for r in rows),
+                    comparison_kind="gsb" if preview["baseline"].get("human_standard_id") == "chitchat_gsb_compare" else "numeric",
+                    human_n=sum((r.get("human_gsb") is not None) if r.get("comparison_kind") == "gsb" else r["human_score"] is not None for r in rows), comparable_n=sum(r["comparable"] for r in rows),
                     matches=dict(Counter(r["match_status"] for r in rows)),bindings=dict(Counter(r["result_input_binding"] for r in rows)),
                     case_matching={s["task_id"]:len({r["case_id"] for r in rows if r["task_id"]==s["task_id"] and
                         r["task_item_index"] is not None and not r["case_key"].startswith("out:")}) for s in preview["snapshots"]},
@@ -495,7 +506,7 @@ class HumanComparisons:
                                               evaluation_profile=s.get("evaluation_profile","")) for s in preview["snapshots"]],
                         model_runtimes=[dict(task_id=s["task_id"], **judge_runtime_summary(s))
                                         for s in preview["snapshots"]],
-                        accuracy_label_count=sum(r["dimension_id"]=="accuracy" and r["score_status"]=="scored" for r in baseline["labels"]),
+                        accuracy_label_count=sum(r["dimension_id"]=="accuracy" and r.get("score_status")=="scored" for r in baseline["labels"]),
                         warnings=self.preview_summary(preview)["warnings"],out_of_scope=preview["out_of_scope"])
             atomic_json(self.store.path("reports",report_id,"report.json"),report)
             output=self.store.path("reports",report_id,"report.xlsx")

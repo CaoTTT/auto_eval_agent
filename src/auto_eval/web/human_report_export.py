@@ -151,6 +151,9 @@ def case_comparison_tables(report: dict) -> tuple[StatisticsTable, StatisticsTab
 
 
 def export_report(report: dict) -> bytes:
+    if report.get("baseline", {}).get("human_standard_id") == "chitchat_gsb_compare":
+        from .chitchat_gsb_human import export_gsb_human_report
+        return export_gsb_human_report(report)
     baseline=report["baseline"]
     protocol = baseline_protocol(baseline)
     dimension_names = baseline.get("dimension_names") or human_dimension_names(protocol)

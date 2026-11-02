@@ -262,6 +262,7 @@ def _task_from_snapshot(snapshot: dict, task_id: str) -> Task:
                            or recover_protocol_identity(snapshot)["is_knowledge_qa"]
                            or recover_protocol_identity(snapshot).get("is_flat_chat")
                            or recover_protocol_identity(snapshot).get("is_dialogue_experience")
+                           or recover_protocol_identity(snapshot).get("is_chitchat_gsb")
                            else snapshot.get("protocol_manifest") or {}),
         judge_runtime=snapshot.get("judge_runtime") or {},
         dataset_name=snapshot.get("dataset_name") or "",
