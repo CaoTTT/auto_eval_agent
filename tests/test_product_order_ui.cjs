@@ -8,6 +8,7 @@ const strip = code => code.replace(/^import[^\n]*\n/gm, '').replace(/^export /gm
 async function main() {
   let app, rootOptions, submitted, parsed;
   const base = {id: 'original', query: '问题', product_count: 2,
+    evidence_mode: 'video_frames',
     video1: 'one.mp4', video2: 'two.mp4', context1: '原产品1背景', context2: '原产品2背景',
     answer1: '原产品1回答', answer2: '原产品2回答'};
   const note = '已互换：裁判位置1=原产品2，裁判位置2=原产品1；产品数据、评分和胜负均按原产品身份展示。';

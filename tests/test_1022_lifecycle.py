@@ -76,7 +76,8 @@ async def test_eval_api_freezes_new_protocol_and_snapshot_restores_it(monkeypatc
     monkeypatch.setattr(server.EVAL_SCHEDULER, "enqueue", lambda *_: 1)
     response = await server.api_eval(server.EvalReq(
         mode="compare", evaluation_profile=V1022_COMPARE_PROTOCOL_ID,
-        items=[{"id": "greeting", "query": "你好", "video1": "a.mp4", "video2": "b.mp4",
+        items=[{"id": "greeting", "query": "你好", "evidence_mode": "video_frames",
+                "video1": "a.mp4", "video2": "b.mp4",
                 "context1": "产品1测试背景", "context2": "产品2测试背景"}],
     ))
     assert response["evaluation_profile"] == V1022_COMPARE_PROTOCOL_ID

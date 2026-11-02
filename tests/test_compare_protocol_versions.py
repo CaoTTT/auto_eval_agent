@@ -156,7 +156,8 @@ async def test_eval_api_freezes_selected_protocol_on_new_task(monkeypatch):
 
     monkeypatch.setattr(server_module, "new_task", fake_new_task)
     monkeypatch.setattr(server_module.EVAL_SCHEDULER, "enqueue", lambda *_: 1)
-    item = {"query": "q", "video1": "a.mp4", "video2": "b.mp4",
+    item = {"query": "q", "evidence_mode": "video_frames",
+            "video1": "a.mp4", "video2": "b.mp4",
             "context1": "产品1测试背景", "context2": "产品2测试背景"}
 
     default_response = await server_module.api_eval(

@@ -27,7 +27,8 @@ DISABLED_IDS = (
 
 
 def compare_item():
-    return {"id": "one", "query": "问题", "video1": "a.mp4", "video2": "b.mp4",
+    return {"id": "one", "query": "问题", "evidence_mode": "video_frames",
+            "video1": "a.mp4", "video2": "b.mp4",
             "context1": "产品1背景", "context2": "产品2背景"}
 
 

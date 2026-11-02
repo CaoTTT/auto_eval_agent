@@ -78,10 +78,10 @@
 
 ### 3.3 兼容和校验规则
 
-- `screenshot1/2/3` 存在时，规范化为 `evidence_mode=long_screenshot`。
-- `video1/2/3` 存在时，规范化为 `evidence_mode=video_frames`。
-- 一个产品同时提供 `videoN` 和 `screenshotN`：输入错误。
-- 同一 Case 内不同产品混用视频和长截图：输入错误，避免证据质量和可观测范围不一致。
+- `evidence_mode` 显式决定规范化后的证据层，所选层的全部产品字段必须齐全。
+- 未声明 `evidence_mode` 时默认 `long_screenshot`；录像输入必须显式声明 `video_frames`。
+- 一个产品可以同时提供 `videoN` 和 `screenshotN`，但同一 Case 只使用显式选中的一层。
+- 同一 Case 内不同产品不能分别使用视频和长截图，避免证据质量和可观测范围不一致。
 - `product_count=2` 时禁止提供产品3的截图、视频、回答或背景字段。
 - 产品数量未显式提供时，`screenshot3` 也应参与三产品推断。
 - `answerN` 是无 Markdown 标记的纯文本，只用于对齐 Query 和辅助理解主要回答，不作为视觉展示、引用、加粗、链接或排版的主要证据。

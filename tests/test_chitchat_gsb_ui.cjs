@@ -138,7 +138,7 @@ const card = html.slice(html.indexOf('<div v-if="chitchatGSBColumn(r,c)"'),html.
 for (const field of ['entry.pairLabel','entry.label','entry.reason','entry.seriousLabel']) assert.ok(card.includes(field));
 assert.match(html,/!chitchatGSBColumn\(r,c\)/);
 assert.match(html,/<human-compare-panel v-if="mode==='compare' && taskId/);
-assert.match(html,/app\.js\?v=[^"]*20261102_chitchat_gsb/);
+assert.match(html,/app\.js\?v=[^"]*explicit_evidence_mode_chitchat_gsb_product_order/);
 assert.match(read('compare-data.js'),/human-compare\.js\?v=20261102_chitchat_gsb/);
 
 app.setTaskProtocol({evaluation_profile:'qa_chat_compare@1.1',protocol_manifest:{result_schema_version:'qa-chat-result-2'}});

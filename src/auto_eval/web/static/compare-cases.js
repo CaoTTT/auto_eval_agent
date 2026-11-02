@@ -8,12 +8,12 @@ export function selectEvidenceMode(item) {
   const count = Number(item.productCount);
   if (count !== 2 && count !== 3) return '';
   if (item.sessionId && ([1,2,3].some(n => item[`video${n}Path`]) || item.screenshotScope !== 'current_turn')) return '';
-  for (const [prefix, mode] of [['screenshot', 'long_screenshot'], ['video', 'video_frames']]) {
-    if (item.sessionId && mode === 'video_frames') continue;
-    if (Array.from({length:count}, (_, index) => item[`${prefix}${index+1}Path`])
-      .every(path => typeof path === 'string' && path.trim())) return mode;
-  }
-  return '';
+  const mode = item.evidenceMode || item.evidence_mode || 'long_screenshot';
+  if (!['long_screenshot', 'video_frames'].includes(mode)) return '';
+  if (item.sessionId && mode === 'video_frames') return '';
+  const prefix = mode === 'long_screenshot' ? 'screenshot' : 'video';
+  return Array.from({length:count}, (_, index) => item[`${prefix}${index+1}Path`])
+    .every(path => typeof path === 'string' && path.trim()) ? mode : '';
 }
 
 export function caseEvidenceMode(item) {
@@ -69,8 +69,8 @@ export function fromDatasetItem(item, index) {
     sessionId:conversation ? item.session_id : '', turnIndex:conversation ? item.turn_index : null,
     screenshotScope:conversation ? item.screenshot_scope || '' : '',
     queryImageMeta: item.query_image_meta || [], productCount: value('product_count') || (value('video3') || value('screenshot3') ? 3 : 2),
-    evidenceMode: item.evidence_mode || (value('screenshot1') ? 'long_screenshot' : 'video_frames'),
-    _savedEvidenceMode: item.evidence_mode || (value('screenshot1') ? 'long_screenshot' : 'video_frames'),
+    evidenceMode: item.evidence_mode || 'long_screenshot',
+    _savedEvidenceMode: item.evidence_mode || 'long_screenshot',
     ...Object.fromEntries([1,2,3].flatMap(n => [
       [`video${n}Path`, value(`video${n}`) || ''], [`screenshot${n}Path`, value(`screenshot${n}`) || ''],
       [`answer${n}`, value(`answer${n}`) || ''], [`context${n}`, productContextValue(contexts, n)],

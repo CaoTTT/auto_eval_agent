@@ -133,7 +133,9 @@ async def test_existing_task_rejects_switching_comparison_profile(monkeypatch, f
         await server.api_eval_items(
             server.EvalItemsReq(
                 task_id=task.id,
-                mode="compare", items=[{"id": "q", "query": "q", "video1": "a", "video2": "b"}],
+                mode="compare", items=[{"id": "q", "query": "q",
+                                        "evidence_mode": "video_frames",
+                                        "video1": "a", "video2": "b"}],
                 evaluation_profile=requested_id,
             ),
         )

@@ -231,25 +231,32 @@ def test_jsonl_and_direct_api_reject_conflicts(updates):
 
 
 @pytest.mark.parametrize("count", [2, 3])
-def test_all_evidence_combinations_use_one_complete_layer(count):
+@pytest.mark.parametrize("declared_mode", [None, "long_screenshot", "video_frames"])
+def test_declared_evidence_mode_controls_selection_and_defaults_to_long_screenshot(
+    count, declared_mode,
+):
     for present in itertools.product((False, True), repeat=count * 2):
         raw = {"id": "mixed", "query": "q", "product_count": count}
+        if declared_mode is not None:
+            raw["evidence_mode"] = declared_mode
         raw.update({f"context{n}": f"产品{n}背景" for n in range(1, count+1)})
         for n in range(count):
             for offset, kind in ((0, "screenshot"), (count, "video")):
                 if present[offset + n]:
                     raw[f"{kind}{n+1}"] = f" {kind}{n+1}.file "
-        expected = ("long_screenshot" if all(present[:count]) else
-                    "video_frames" if all(present[count:]) else None)
+        mode = declared_mode or "long_screenshot"
+        selected_present = present[:count] if mode == "long_screenshot" else present[count:]
+        expected = mode if all(selected_present) else None
         items, errors = parse_jsonl(json.dumps(raw), "compare")
         req = server.EvalReq(mode="compare", items=[dict(raw)])
         if expected is None:
             assert not items and len(errors) == 1
-            assert "Case mixed" in errors[0] and "统一证据层" in errors[0]
+            assert "Case mixed" in errors[0] and f"evidence_mode={mode}" in errors[0]
+            kind_offset = 0 if mode == "long_screenshot" else count
+            kind = "screenshot" if mode == "long_screenshot" else "video"
             for n in range(count):
-                for offset, kind in ((0, "screenshot"), (count, "video")):
-                    if not present[offset + n]:
-                        assert f"{kind}{n+1}" in errors[0]
+                if not present[kind_offset + n]:
+                    assert f"{kind}{n+1}" in errors[0]
             with pytest.raises(HTTPException) as exc:
                 server._validate_eval_request(req, AppConfig(judges=[]))
             assert exc.value.status_code == 422
@@ -270,25 +277,29 @@ def test_mixed_import_reports_rejected_cases_and_layer_counts():
     rows = [
         {"id": "shots", "query": "q", "screenshot1": "a.png", "screenshot2": "b.png",
          "video1": "a.mp4", "video2": "b.mp4", "evidence_mode": "video_frames"},
+        {"id": "default", "query": "q", "screenshot1": "a.png", "screenshot2": "b.png",
+         "video1": "a.mp4", "video2": "b.mp4"},
         {"id": "reject", "query": "q", "screenshot1": "a.png", "video2": "b.mp4"},
-        {"id": "fallback", "query": "q", "screenshot1": "a.png",
+        {"id": "missing-declared-layer", "query": "q", "screenshot1": "a.png",
          "video1": "a.mp4", "video2": "b.mp4", "evidence_mode": "long_screenshot"},
     ]
     for row in rows:
         row.update(context1="产品1背景", context2="产品2背景")
     for content in (json.dumps(rows), "\n".join(map(json.dumps, rows))):
         response = server.api_parse(server.ParseReq(mode="compare", jsonl=content))
-        assert response["count"] == 2 and response["rejected_count"] == 1
+        assert response["count"] == 2 and response["rejected_count"] == 2
         assert response["evidence_counts"] == {"long_screenshot": 1, "video_frames": 1}
-        assert [item["id"] for item in response["items"]] == ["shots", "fallback"]
+        assert [item["id"] for item in response["items"]] == ["shots", "default"]
         assert "Case reject" in response["errors"][0]
-        assert "screenshot2" in response["errors"][0] and "video1" in response["errors"][0]
+        assert "evidence_mode=long_screenshot" in response["errors"][0]
+        assert "screenshot2" in response["errors"][0]
+        assert "missing-declared-layer" in response["errors"][1]
 
 
 def test_direct_api_drops_prepared_evidence_before_selection():
     raw = {"query": "q", "screenshot1": "a.png", "video1": "a.mp4", "video2": "b.mp4",
            "context1": "产品1背景", "context2": "产品2背景",
-           "evidence_mode": "long_screenshot", "frames1": ["stale.png"],
+           "evidence_mode": "video_frames", "frames1": ["stale.png"],
            "screenshot_meta1": {"original_path": "stale.png"}, "video1_path": "stale.mp4"}
     req = server.EvalReq(mode="compare", items=[raw])
     server._validate_eval_request(req, AppConfig(judges=[]))
@@ -327,7 +338,8 @@ async def test_mixed_batch_runner_uses_selected_prompt_for_all_products(tmp_path
     shots = {f"screenshot{n}": str(save_image(tmp_path, f"{n}.png")) for n in range(1, count+1)}
     videos = {f"video{n}": f"{n}.mp4" for n in range(1, count+1)}
     rows = [{"id": "shots", "query": "q", **shots, **videos},
-            {"id": "video", "query": "q", "screenshot1": shots["screenshot1"], **videos}]
+                {"id": "video", "query": "q", "evidence_mode": "video_frames",
+                 "screenshot1": shots["screenshot1"], **videos}]
     for row in rows:
         row.update({f"context{n}": f"产品{n}背景" for n in range(1, count+1)})
     response = server.api_parse(server.ParseReq(mode="compare", jsonl=json.dumps(rows)))
@@ -495,7 +507,8 @@ def test_historical_frames_without_evidence_mode_unchanged():
     streams = history._item_visual_streams(item)
     assert len(streams) == 2 and all(s["evidence_mode"] == "video_frames" for s in streams)
     assert runner._compare_frames_ready(item)
-    items, errors = parse_jsonl(json.dumps({"query":"q", "video1":"a.mp4", "video2":"b.mp4",
+    items, errors = parse_jsonl(json.dumps({"query":"q", "evidence_mode":"video_frames",
+                                           "video1":"a.mp4", "video2":"b.mp4",
                                            "context1":"产品1背景", "context2":"产品2背景"}), "compare")
     assert not errors and items[0]["evidence_mode"] == "video_frames"
 

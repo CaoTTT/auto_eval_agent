@@ -337,6 +337,7 @@ def test_legacy_metadata_import_and_direct_api_remain_single_turn(metadata, evid
                 "context1": "产品1背景", "context2": "产品2背景",
                 f"{evidence}1": "a.mp4" if evidence == "video" else "a.png",
                 f"{evidence}2": "b.mp4" if evidence == "video" else "b.png", **metadata}
+    original["evidence_mode"] = "video_frames" if evidence == "video" else "long_screenshot"
     parsed, errors = parse_jsonl(json.dumps([original]), "compare")
     assert not errors and len(parsed) == 1
     assert not is_conversation(parsed[0])
@@ -361,6 +362,7 @@ def test_legacy_row_with_same_business_id_survives_invalid_multiturn_group(data)
     items[1]["turn_index"] = 0
     legacy = {"id": "legacy", "query": "single", "session_id": "s", "video1": "a.mp4", "video2": "b.mp4",
               "context1": "产品1背景", "context2": "产品2背景"}
+    legacy["evidence_mode"] = "video_frames"
     parsed, errors = parse_jsonl(json.dumps([*items, legacy]), "compare")
     assert errors and len(parsed) == 1
     assert parsed[0]["id"] == "legacy" and not is_conversation(parsed[0])

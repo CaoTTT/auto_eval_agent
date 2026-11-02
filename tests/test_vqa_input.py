@@ -70,7 +70,8 @@ class Client:
 
 @pytest.mark.parametrize("images", [None, "a.png", [""], ["a", "b"], [4]])
 def test_invalid_input_not_silently_text(images):
-    item = {"query": "q", "query_images": images, "video1": "a", "video2": "b",
+    item = {"query": "q", "query_images": images, "evidence_mode": "video_frames",
+            "video1": "a", "video2": "b",
             "context1": "产品1背景", "context2": "产品2背景"}
     parsed, errors = parse_jsonl(json.dumps(item), "compare")
     assert not parsed and errors
@@ -79,7 +80,7 @@ def test_invalid_input_not_silently_text(images):
 
 
 def test_mixed_normalization_and_untrusted_metadata():
-    items = [{"query": "q", "video1": "a", "video2": "b"},
+    items = [{"query": "q", "evidence_mode": "video_frames", "video1": "a", "video2": "b"},
              {"query": "q", "query_images": ["a.png"], "screenshot1": "a", "screenshot2": "b"}]
     for item in items:
         item.update(context1="产品1背景", context2="产品2背景")
@@ -260,7 +261,8 @@ async def test_mixed_runner_failure_cached_frames_recovery_and_exports(setup_ima
         assert len(qrows) == 6
         assert sum(r["status"] == "ok" for r in qrows) == 4
     # Explicit removal clears previous image metadata and scores immediately.
-    merge_items_by_id(task, [{"id": "1", "query": "q", "query_images": [], "video1": "a", "video2": "b"}])
+    merge_items_by_id(task, [{"id": "1", "query": "q", "query_images": [],
+                              "evidence_mode": "video_frames", "video1": "a", "video2": "b"}])
     assert "query_image_meta" not in task.items[1]
     assert not any(r["index"] == 1 for r in task.results)
 
@@ -283,9 +285,14 @@ async def test_replace_requires_explicit_images_and_legacy_rejected(setup_images
     monkeypatch.setattr(server, "get_task", lambda _: task)
     monkeypatch.setattr(server, "cfg", lambda: AppConfig(judges=[JudgeConfig(name="test")], visual_modes={"rich_content": profile}))
     with pytest.raises(HTTPException, match="显式"):
-        await server.api_eval_items(server.EvalItemsReq(task_id="old", items=[{"id": "a", "query": "q", "video1": "a", "video2": "b"}]))
+        await server.api_eval_items(server.EvalItemsReq(
+            task_id="old", items=[{"id": "a", "query": "q", "evidence_mode": "video_frames",
+                                   "video1": "a", "video2": "b"}]))
     with pytest.raises(HTTPException, match="旧任务"):
-        await server.api_eval_items(server.EvalItemsReq(task_id="old", items=[{"id": "a", "query": "q", "query_images": [paths[0]], "video1": "a", "video2": "b"}]))
+        await server.api_eval_items(server.EvalItemsReq(
+            task_id="old", items=[{"id": "a", "query": "q", "query_images": [paths[0]],
+                                   "evidence_mode": "video_frames",
+                                   "video1": "a", "video2": "b"}]))
 
 
 def test_subsets_use_actual_scores_and_denominators():
@@ -370,7 +377,8 @@ async def test_api_replacement_uses_sanitized_normalized_item(setup_images, monk
     monkeypatch.setattr(server, "queue_task_save", lambda *a, **k: None)
     monkeypatch.setattr(server, "spawn_background", lambda coro: coro.close())
     await server.api_eval_items(server.EvalItemsReq(task_id="existing", items=[{
-        "id": "a", "question": "new", "query_images": [], "video1": "a", "video2": "b",
+        "id": "a", "question": "new", "query_images": [], "evidence_mode": "video_frames",
+        "video1": "a", "video2": "b",
         "context1": "产品1背景", "context2": "产品2背景",
         "query_image_meta": [{"sha256": "fake"}], "input_manifest_sha256": "fake",
     }]))
