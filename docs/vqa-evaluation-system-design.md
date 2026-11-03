@@ -169,7 +169,7 @@ flowchart TD
 
 这些路径仅为格式示例，需要替换为真实可访问的文件；当前未实现的新字段不能直接拿来宣称已可运行。
 
-不要求用户同时填写 `evidence_mode/input_modality`。`evidence_mode` 显式决定证据层，未声明时默认 `long_screenshot`；所选层字段不完整时拒绝，不自动回退另一证据层。
+不要求用户同时填写 `evidence_mode/input_modality`。显式 `evidence_mode` 严格决定证据层；未声明时优先使用完整长截图，否则回退完整录屏。两层都不完整时拒绝。
 
 ### 5.2 字段规则
 

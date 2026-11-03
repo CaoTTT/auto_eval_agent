@@ -24,5 +24,5 @@ assert.match(sandbox.Component.template, /record\.judge_product_order_note/);
 assert.match(sandbox.Component.template, /裁判位置 \{\{judgePosition\(entry\)\}\}/);
 assert.match(sandbox.Component.template, /picture\.image_role!=='query_image'/);
 assert.match(read('compare-data.js'), /screenshot-evidence\.js\?v=20261030_product_order/);
-assert.match(read('app.js'), /compare-data\.js\?v=[^"]+_product_order/);
+assert.match(read('app.js'), /compare-data\.js\?v=20261103_evidence_fallback/);
 console.log('Screenshot evidence UI: source product labels, separate judge slots, legacy unknown positions and order note passed');

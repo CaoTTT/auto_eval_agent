@@ -1,4 +1,4 @@
-import { createApp, ref, computed, onMounted, onUnmounted, nextTick, selectEvidenceMode, isRemoteUrl, productContextValue, missingProductContexts } from "./compare-data.js?v=20261102_explicit_evidence_mode_chitchat_gsb_product_order";
+import { createApp, ref, computed, onMounted, onUnmounted, nextTick, selectEvidenceMode, isRemoteUrl, productContextValue, missingProductContexts } from "./compare-data.js?v=20261103_evidence_fallback";
 
 createApp({
   watch: {
@@ -699,7 +699,7 @@ createApp({
     const formatHint = computed(
       () =>
         ({
-          compare: "每个产品的 contextN 背景必填；缺少 context1 字段时兼容读取 context 作为产品1背景。支持文字题与图文题混合导入：query_images、截图和录屏路径可填本地文件或 HTTP(S) URL，URL 在评测时下载并保留原始来源；product_count 为2或3。每题优先使用全产品长截图，否则回退全产品录屏；无法统一证据的题目在导入时拒绝。",
+          compare: "每个产品的 contextN 背景必填；缺少 context1 字段时兼容读取 context 作为产品1背景。支持文字题与图文题混合导入：query_images、截图和录屏路径可填本地文件或 HTTP(S) URL，URL 在评测时下载并保留原始来源；product_count 为2或3。显式 evidence_mode 必须使用对应证据层且不自动回退；未显式声明时优先使用全产品长截图，不完整再尝试全产品录屏；两层都不完整的题目在导入时拒绝。",
           rich_content: "可逐题上传，也可导入 JSON / JSONL / CSV：query、context(可选)、video_path、category/answer_text/task_start_time/task_end_time(均可选)；sessionid 等额外字段会保留到 Excel 导出。普通图片不算挂卡，回答区域蓝色文字按 Superlink 统计。",
         }[mode.value])
     );
@@ -1246,7 +1246,7 @@ createApp({
             item.query_image_meta?.[imageIndex]?.source_url || path),
           queryImageMeta:item.query_image_meta || [],
           productCount:item.product_count || (item.video3 || item.screenshot3 ? 3 : 2),
-          evidenceMode:item.evidence_mode || 'long_screenshot',
+          evidenceMode:item.evidence_mode || (item.screenshot1 ? 'long_screenshot' : 'video_frames'),
           ...Object.fromEntries([1,2,3].flatMap(n => [
             [`video${n}Path`,item[`video${n}`] || ''], [`screenshot${n}Path`,item[`screenshot${n}`] || ''],
             [`answer${n}`,item[`answer${n}`] || ''], [`context${n}`,productContextValue(item, n)],
@@ -1416,7 +1416,7 @@ createApp({
             videoName: String(item.video_path || "").split(/[\\/]/).pop(),
             videoPath: item.video_path || item.video1 || "",
             productCount: item.product_count || (item.video3 || item.screenshot3 ? 3 : 2),
-            evidenceMode: item.evidence_mode || "long_screenshot",
+            evidenceMode: item.evidence_mode || (item.screenshot1 ? "long_screenshot" : "video_frames"),
             screenshot1Path: item.screenshot1 || "",
             screenshot2Path: item.screenshot2 || "",
             screenshot3Path: item.screenshot3 || "",
@@ -2669,7 +2669,7 @@ createApp({
             context: item.context || "", category: item.category || "",
             queryImages: [...(item.query_images || [])], queryImageMeta: item.query_image_meta || [],
             productCount: item.product_count || (item.video3 || item.screenshot3 ? 3 : 2),
-            evidenceMode: item.evidence_mode || "long_screenshot",
+            evidenceMode: item.evidence_mode || (item.screenshot1 ? "long_screenshot" : "video_frames"),
             ...Object.fromEntries([1, 2, 3].flatMap(n => [
               [`video${n}Path`, item[`video${n}`] || ""], [`screenshot${n}Path`, item[`screenshot${n}`] || ""],
               [`answer${n}`, item[`answer${n}`] || ""], [`context${n}`, item[`context${n}`] || ""],

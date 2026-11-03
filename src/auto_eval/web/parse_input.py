@@ -111,25 +111,43 @@ def _compare_product_count(obj: dict) -> int:
 
 
 def compare_evidence_mode(obj: dict) -> tuple[int, str]:
-    """Use the declared evidence layer, defaulting to long screenshots."""
+    """Use an explicit evidence layer, otherwise prefer screenshots then video."""
     normalize_turn(obj)
     count = _compare_product_count(obj)
     declared = obj.get("evidence_mode")
     if declared not in (None, "", "long_screenshot", "video_frames"):
         raise ValueError("evidence_mode 只能是 long_screenshot 或 video_frames")
-    mode = declared or "long_screenshot"
-    kind = "screenshot" if mode == "long_screenshot" else "video"
-    missing = [
-        f"{kind}{n}" for n in range(1, count + 1)
-        if not isinstance(obj.get(f"{kind}{n}"), str)
-        or not obj[f"{kind}{n}"].strip()
-    ]
-    if not missing:
-        return count, mode
+
+    def missing_fields(kind: str) -> list[str]:
+        return [
+            f"{kind}{n}" for n in range(1, count + 1)
+            if not isinstance(obj.get(f"{kind}{n}"), str)
+            or not obj[f"{kind}{n}"].strip()
+        ]
+
+    if declared:
+        kind = "screenshot" if declared == "long_screenshot" else "video"
+        missing = missing_fields(kind)
+        if not missing:
+            return count, declared
+        raise ValueError(
+            f"拒绝测评：显式 evidence_mode={declared}，但以下证据字段缺少或路径无效："
+            + "、".join(missing)
+            + "。显式模式不会回退到另一证据层"
+        )
+
+    screenshot_missing = missing_fields("screenshot")
+    if not screenshot_missing:
+        return count, "long_screenshot"
+    video_missing = missing_fields("video")
+    if not video_missing:
+        return count, "video_frames"
     raise ValueError(
-        f"拒绝测评：evidence_mode={mode}，但以下证据字段缺少或路径无效："
-        + "、".join(missing)
-        + "。同一 Case 的所有产品必须使用显式声明的证据层；未声明时默认 long_screenshot"
+        "拒绝测评：未提供 evidence_mode，且长截图与录屏均不完整；"
+        "长截图缺少或路径无效："
+        + "、".join(screenshot_missing)
+        + "；录屏缺少或路径无效："
+        + "、".join(video_missing)
     )
 
 
