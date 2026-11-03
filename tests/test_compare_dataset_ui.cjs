@@ -76,7 +76,7 @@ async function main(){
   assert.match(app.runError.value,/不会跳过/);
   assert.equal(context.caseMedia(shotDraft).length,0,'incomplete evidence cannot preview mixed layers');
 
-  // Explicit mode selects its own complete layer; absent mode defaults to screenshots.
+  // Explicit mode is strict; absent mode prefers screenshots then falls back to video.
   for(const declared of [undefined,'long_screenshot','video_frames'])
   for(const count of [2,3])for(let mask=0;mask<2**(count*2);mask++){
     const draft={productCount:count,sourceData:{screenshot1:'ignored.png'}};
@@ -86,10 +86,15 @@ async function main(){
       draft[`video${n}Path`]=(mask&(1<<(n-1+count)))?' clip.mp4 ':'';
     }
     const complete=(1<<count)-1;
-    const mode=declared||'long_screenshot';
-    const selectedMask=mode==='long_screenshot'?mask&complete:(mask>>count)&complete;
-    const expected=selectedMask===complete?mode:'';
-    assert.equal(context.selectEvidenceMode(draft),expected);
+    const shotsComplete=(mask&complete)===complete;
+    const videosComplete=((mask>>count)&complete)===complete;
+    const selectedComplete=declared==='long_screenshot'?shotsComplete
+      :declared==='video_frames'?videosComplete
+      :shotsComplete||videosComplete;
+    const mode=declared?(selectedComplete?declared:''):(shotsComplete?'long_screenshot':videosComplete?'video_frames':'');
+    const expected=mode;
+    assert.equal(context.selectEvidenceMode(draft),expected,
+      `declared=${declared} count=${count} mask=${mask}`);
   }
   assert.equal(context.selectEvidenceMode({productCount:2,screenshot1Path:[],screenshot2Path:'x'}),'');
   assert.equal(context.selectEvidenceMode({productCount:4,screenshot1Path:'x',screenshot2Path:'x'}),'');
@@ -105,8 +110,8 @@ async function main(){
     video1:'a.mp4',video2:'b.mp4'},0);
   assert.equal(explicitShots._savedEvidenceMode,'long_screenshot');
   assert.equal(context.caseMedia(explicitShots).length,0,'explicit screenshot history must not fall back to videos');
-  assert.equal(context.selectEvidenceMode({productCount:2,video1Path:'a.mp4',video2Path:'b.mp4'}),'',
-    'new drafts without a mode still require screenshots');
+  assert.equal(context.selectEvidenceMode({productCount:2,video1Path:'a.mp4',video2Path:'b.mp4'}),
+    'video_frames','new drafts without a mode fall back to complete videos');
   const boundVideo=context.fromDatasetItem({product_count:2,evidence_mode:'video_frames',video1:'a.mp4',video2:'b.mp4',
     video_source1:{input_path:'a.mp4',path:'C:/data/a.mp4',sha256:'video-sha'}},0);
   assert.equal(context.caseMedia(boundVideo)[0].meta.original_sha256,'video-sha');

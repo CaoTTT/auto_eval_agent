@@ -1,5 +1,5 @@
 import {createApp as vueCreateApp, ref, computed, watch, onMounted, onUnmounted, nextTick} from "https://unpkg.com/vue@3/dist/vue.esm-browser.js";
-import {CompareCaseList, fromDatasetItem, caseMedia, caseEvidenceMode, selectEvidenceMode, isRemoteUrl, productContextValue, missingProductContexts} from "./compare-cases.js?v=20261102_explicit_evidence_mode";
+import {CompareCaseList, fromDatasetItem, caseMedia, caseEvidenceMode, selectEvidenceMode, isRemoteUrl, productContextValue, missingProductContexts} from "./compare-cases.js?v=20261103_evidence_fallback";
 import {HumanComparePanel} from "./human-compare.js?v=20261102_chitchat_gsb";
 import {ScreenshotEvidence} from "./screenshot-evidence.js?v=20261030_product_order";
 export {ref, computed, onMounted, onUnmounted, nextTick};
@@ -85,7 +85,7 @@ export const CompareDatasetPanel = {
         <button @click="toggleHistory" :aria-expanded="historyOpen" :disabled="busy">{{historyOpen?'收起历史数据':'选择历史数据'}}</button>
         <span v-if="busy" class="hint">正在解析…</span>
       </div>
-      <details class="dataset-format-help"><summary>JSON / JSONL · 查看格式与证据选择规则</summary><p>JSON 支持数组或单个对象，JSONL 每行一个 Case。各产品必须提供非空 context1、context2，三产品还需 context3。仅当 context1 字段不存在时，兼容读取 context 作为产品1背景；显式空值不回退。任何 Case 缺少产品背景时整份导入暂停，请补齐后重新导入。可同时填写 screenshot1/2 与 video1/2；screenshotN、videoN 和 query_images 均可填本地路径或 HTTP(S) URL，URL 在评测时由后端下载并保留原始来源。所有产品长截图齐全时优先使用长截图，否则只有所有产品录屏齐全才回退录屏。无法统一证据层的 Case 拒绝导入，其余 Case 正常载入。可选 query_images 单张提问原图；三产品填写 product_count: 3 及产品3字段。证据选择按路径字段是否完整判断，文件可用性可在下方检查。相对路径以服务器项目目录为基准。自定义字段会保留到 Excel 导出。</p></details>
+      <details class="dataset-format-help"><summary>JSON / JSONL · 查看格式与证据选择规则</summary><p>JSON 支持数组或单个对象，JSONL 每行一个 Case。各产品必须提供非空 context1、context2，三产品还需 context3。仅当 context1 字段不存在时，兼容读取 context 作为产品1背景；显式空值不回退。任何 Case 缺少产品背景时整份导入暂停，请补齐后重新导入。可同时填写 screenshot1/2 与 video1/2；screenshotN、videoN 和 query_images 均可填本地路径或 HTTP(S) URL，URL 在评测时由后端下载并保留原始来源。显式 evidence_mode 必须使用对应证据层，即使另一层齐全也不切换；未显式声明时优先使用所有产品齐全的长截图，否则尝试所有产品齐全的录屏。两层都不完整的 Case 拒绝导入，其余 Case 正常载入。可选 query_images 单张提问原图；三产品填写 product_count: 3 及产品3字段。证据选择按路径字段是否完整判断，文件可用性可在下方检查。相对路径以服务器项目目录为基准。自定义字段会保留到 Excel 导出。</p></details>
       <section v-if="historyOpen" class="dataset-history">
         <div class="dataset-toolbar"><strong>历史测评数据</strong><input v-model="search" placeholder="搜索文件名、备注或任务编号" @keyup.enter="loadDatasets(1)" aria-label="搜索历史数据"><button @click="loadDatasets(1)">搜索 / 刷新</button></div>
         <p class="hint">复用该次任务提交的数据；同名文件的不同任务分别保留，不会覆盖原结果。</p>

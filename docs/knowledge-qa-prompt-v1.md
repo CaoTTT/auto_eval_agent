@@ -8,7 +8,7 @@
 
 当前链路为 `web/parse_input.py::parse_jsonl` → `web/runner.py` → `judges/visual_compare_judge.py::VisualCompareJudge.evaluate`。裁判单次调用，无联网和工具。
 
-外部数据继续使用 `query`（兼容`question`）、逐产品非空`contextN`、`answerN`及`screenshotN`或`videoN`，支持2/3产品。`id`由程序管理。当前导入要求各产品背景非空；确无额外背景时如实填写“无额外背景”，不编造条件。截图齐全优先采用长截图，否则走原有录屏校验；同一条记录不混用两种证据。可选题图和多轮结构保持原有规则。
+外部数据继续使用 `query`（兼容`question`）、逐产品非空`contextN`、`answerN`及`screenshotN`或`videoN`，支持2/3产品。`id`由程序管理。当前导入要求各产品背景非空；确无额外背景时如实填写“无额外背景”，不编造条件。显式`evidence_mode`严格使用对应证据层；未声明时截图齐全优先采用长截图，否则走原有录屏校验；同一条记录不混用两种证据。可选题图和多轮结构保持原有规则。
 
 单轮模板可获得的变量全部沿用现有接口：
 

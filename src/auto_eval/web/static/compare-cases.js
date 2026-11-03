@@ -8,12 +8,18 @@ export function selectEvidenceMode(item) {
   const count = Number(item.productCount);
   if (count !== 2 && count !== 3) return '';
   if (item.sessionId && ([1,2,3].some(n => item[`video${n}Path`]) || item.screenshotScope !== 'current_turn')) return '';
-  const mode = item.evidenceMode || item.evidence_mode || 'long_screenshot';
-  if (!['long_screenshot', 'video_frames'].includes(mode)) return '';
-  if (item.sessionId && mode === 'video_frames') return '';
-  const prefix = mode === 'long_screenshot' ? 'screenshot' : 'video';
-  return Array.from({length:count}, (_, index) => item[`${prefix}${index+1}Path`])
-    .every(path => typeof path === 'string' && path.trim()) ? mode : '';
+  const complete = prefix => Array.from({length:count}, (_, index) =>
+    item[`${prefix}${index+1}Path`]).every(path => typeof path === 'string' && path.trim());
+  const declared = item.evidenceMode || item.evidence_mode || '';
+  if (declared) {
+    if (!['long_screenshot', 'video_frames'].includes(declared)) return '';
+    if (item.sessionId && declared === 'video_frames') return '';
+    const prefix = declared === 'long_screenshot' ? 'screenshot' : 'video';
+    return complete(prefix) ? declared : '';
+  }
+  if (complete('screenshot')) return 'long_screenshot';
+  if (!item.sessionId && complete('video')) return 'video_frames';
+  return '';
 }
 
 export function caseEvidenceMode(item) {
@@ -61,8 +67,8 @@ export function fromDatasetItem(item, index) {
   const contexts = {...source, ...item};
   const value = key => item[key] ?? source[key];
   const conversation = item.session_id && Number.isInteger(item.turn_index) && item.turn_index >= 1;
-  // Only readonly history retains legacy inference; new drafts default to screenshots.
-  const evidenceMode = item.evidence_mode || (value('screenshot1') ? 'long_screenshot' : 'video_frames');
+  const inferredMode = item.evidence_mode
+    || (value('screenshot1') ? 'long_screenshot' : value('video1') ? 'video_frames' : '');
   return {
     _uiKey: `preview-${index}`, id: value('id') || '', query: value('query') || value('question') || '',
     context: value('context') || '',
@@ -71,8 +77,8 @@ export function fromDatasetItem(item, index) {
     sessionId:conversation ? item.session_id : '', turnIndex:conversation ? item.turn_index : null,
     screenshotScope:conversation ? item.screenshot_scope || '' : '',
     queryImageMeta: item.query_image_meta || [], productCount: value('product_count') || (value('video3') || value('screenshot3') ? 3 : 2),
-    evidenceMode,
-    _savedEvidenceMode: evidenceMode,
+    evidenceMode: inferredMode,
+    _savedEvidenceMode: inferredMode,
     ...Object.fromEntries([1,2,3].flatMap(n => [
       [`video${n}Path`, value(`video${n}`) || ''], [`screenshot${n}Path`, value(`screenshot${n}`) || ''],
       [`answer${n}`, value(`answer${n}`) || ''], [`context${n}`, productContextValue(contexts, n)],
@@ -200,7 +206,7 @@ export const CompareCaseList = {
               <label>编辑证据类型 <select v-model="entry.item.evidenceMode"><option value="video_frames">录屏视频</option><option value="long_screenshot">回答长截图</option></select></label>
               <label>产品数 <select v-model.number="entry.item.productCount"><option :value="2">2</option><option :value="3">3</option></select></label>
             </div>
-            <p v-if="!readonly" :class="caseEvidenceMode(entry.item)?'hint':'err'">{{caseEvidenceMode(entry.item)==='long_screenshot'?'实际评估：所有产品统一使用长截图（长截图齐全时优先）。':caseEvidenceMode(entry.item)==='video_frames'?'实际评估：所有产品统一使用录屏采样帧（长截图不齐全，回退录屏）。':'证据不齐全：请为所有产品补齐长截图或录屏，当前 Case 无法提交。'}}</p>
+            <p v-if="!readonly" :class="caseEvidenceMode(entry.item)?'hint':'err'">{{caseEvidenceMode(entry.item)==='long_screenshot'?'实际评估：所有产品统一使用长截图。':caseEvidenceMode(entry.item)==='video_frames'?'实际评估：所有产品统一使用录屏采样帧。':'证据不齐全：请为所有产品补齐长截图或录屏，当前 Case 无法提交。'}}</p>
             <div class="case-products"><div v-for="n in entry.item.productCount" :key="n" class="case-product">
               <strong>产品 {{n}}</strong><label class="dataset-label">回答文字</label><p v-if="readonly" class="case-text">{{entry.item['answer'+n] || '未填写'}}</p><textarea v-else v-model="entry.item['answer'+n]" rows="3" placeholder="产品回答文字（可选）"></textarea>
               <label class="dataset-label">产品 {{n}} 背景（context{{n}}，必填）</label><p v-if="readonly" class="case-text">{{entry.item['context'+n] || '未填写，复用后需补齐'}}</p><textarea v-else v-model="entry.item['context'+n]" rows="3" required :aria-label="'产品'+n+'背景 context'+n" :aria-invalid="!entry.item['context'+n]?.trim()" placeholder="填写本产品的已知条件、交互或采集时间、能力及参考资料；仅用于本产品"></textarea>

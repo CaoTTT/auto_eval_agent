@@ -54,7 +54,7 @@
 | 模块 | 基线实现 | 多轮缺口 |
 | --- | --- | --- |
 | `web/parse_input.py` | `compare` 按独立题解析，附加原始字段进入 `source_data` | 会话字段必须进入正式输入结构，不能只留在原始导出字段中 |
-| `compare_evidence_mode()` | 显式声明决定证据层，未声明时默认长截图；同一 Case 不混用 | 多轮必须在该选择与字段清理之前识别并拒绝录屏 |
+| `compare_evidence_mode()` | 显式声明严格决定证据层；未声明时优先长截图、再尝试录屏；同一 Case 不混用 | 多轮必须在该选择与字段清理之前识别并拒绝录屏，不执行录屏回退 |
 | `parse_csv()` | 仅用于 `rich_content`；合成 `session_group`，轮次从 0 开始 | 不能直接套用为新的 `compare` 输入协议 |
 | `web/runner.py` | 现有会话编排主要服务 `rich_content`，依赖 `turn_summary` 注入 | `compare` 需要原始历史构建；全量、恢复、补跑、增量须统一 |
 | `query_images.py` | 每题最多一张题图；进行路径校验、固化、哈希和预算检查 | 放开多轮路径的多图数量，建立跨轮身份，保留历史图 |

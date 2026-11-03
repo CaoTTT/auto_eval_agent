@@ -232,7 +232,7 @@ def test_jsonl_and_direct_api_reject_conflicts(updates):
 
 @pytest.mark.parametrize("count", [2, 3])
 @pytest.mark.parametrize("declared_mode", [None, "long_screenshot", "video_frames"])
-def test_declared_evidence_mode_controls_selection_and_defaults_to_long_screenshot(
+def test_explicit_evidence_mode_is_strict_and_omitted_mode_falls_back(
     count, declared_mode,
 ):
     for present in itertools.product((False, True), repeat=count * 2):
@@ -244,19 +244,38 @@ def test_declared_evidence_mode_controls_selection_and_defaults_to_long_screensh
             for offset, kind in ((0, "screenshot"), (count, "video")):
                 if present[offset + n]:
                     raw[f"{kind}{n+1}"] = f" {kind}{n+1}.file "
-        mode = declared_mode or "long_screenshot"
-        selected_present = present[:count] if mode == "long_screenshot" else present[count:]
-        expected = mode if all(selected_present) else None
+        screenshots_complete = all(present[:count])
+        videos_complete = all(present[count:])
+        if declared_mode:
+            selected_present = (
+                present[:count] if declared_mode == "long_screenshot"
+                else present[count:]
+            )
+            expected = declared_mode if all(selected_present) else None
+        else:
+            expected = (
+                "long_screenshot" if screenshots_complete
+                else "video_frames" if videos_complete
+                else None
+            )
         items, errors = parse_jsonl(json.dumps(raw), "compare")
         req = server.EvalReq(mode="compare", items=[dict(raw)])
         if expected is None:
             assert not items and len(errors) == 1
-            assert "Case mixed" in errors[0] and f"evidence_mode={mode}" in errors[0]
-            kind_offset = 0 if mode == "long_screenshot" else count
-            kind = "screenshot" if mode == "long_screenshot" else "video"
-            for n in range(count):
-                if not present[kind_offset + n]:
-                    assert f"{kind}{n+1}" in errors[0]
+            assert "Case mixed" in errors[0]
+            if declared_mode:
+                assert f"显式 evidence_mode={declared_mode}" in errors[0]
+                kind_offset = 0 if declared_mode == "long_screenshot" else count
+                kind = "screenshot" if declared_mode == "long_screenshot" else "video"
+                for n in range(count):
+                    if not present[kind_offset + n]:
+                        assert f"{kind}{n+1}" in errors[0]
+            else:
+                assert "未提供 evidence_mode" in errors[0]
+                for kind, offset in (("screenshot", 0), ("video", count)):
+                    for n in range(count):
+                        if not present[offset + n]:
+                            assert f"{kind}{n+1}" in errors[0]
             with pytest.raises(HTTPException) as exc:
                 server._validate_eval_request(req, AppConfig(judges=[]))
             assert exc.value.status_code == 422
@@ -279,6 +298,8 @@ def test_mixed_import_reports_rejected_cases_and_layer_counts():
          "video1": "a.mp4", "video2": "b.mp4", "evidence_mode": "video_frames"},
         {"id": "default", "query": "q", "screenshot1": "a.png", "screenshot2": "b.png",
          "video1": "a.mp4", "video2": "b.mp4"},
+        {"id": "fallback-video", "query": "q",
+         "video1": "a.mp4", "video2": "b.mp4"},
         {"id": "reject", "query": "q", "screenshot1": "a.png", "video2": "b.mp4"},
         {"id": "missing-declared-layer", "query": "q", "screenshot1": "a.png",
          "video1": "a.mp4", "video2": "b.mp4", "evidence_mode": "long_screenshot"},
@@ -287,12 +308,14 @@ def test_mixed_import_reports_rejected_cases_and_layer_counts():
         row.update(context1="产品1背景", context2="产品2背景")
     for content in (json.dumps(rows), "\n".join(map(json.dumps, rows))):
         response = server.api_parse(server.ParseReq(mode="compare", jsonl=content))
-        assert response["count"] == 2 and response["rejected_count"] == 2
-        assert response["evidence_counts"] == {"long_screenshot": 1, "video_frames": 1}
-        assert [item["id"] for item in response["items"]] == ["shots", "default"]
+        assert response["count"] == 3 and response["rejected_count"] == 2
+        assert response["evidence_counts"] == {"long_screenshot": 1, "video_frames": 2}
+        assert [item["id"] for item in response["items"]] == [
+            "shots", "default", "fallback-video",
+        ]
         assert "Case reject" in response["errors"][0]
-        assert "evidence_mode=long_screenshot" in response["errors"][0]
         assert "screenshot2" in response["errors"][0]
+        assert "video1" in response["errors"][0]
         assert "missing-declared-layer" in response["errors"][1]
 
 
