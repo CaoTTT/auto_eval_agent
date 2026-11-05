@@ -1,4 +1,7 @@
 import json
+import shutil
+import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -6,6 +9,7 @@ from auto_eval.judges.compare_protocols import (
     V02_PRIOR_KNOWLEDGE_COMPARE_PROTOCOL_ID,
     resolve_compare_protocol,
 )
+from auto_eval.web import server
 from auto_eval.web.parse_input import normalize_compare_evidence, parse_jsonl, parse_prior_bool
 
 
@@ -60,6 +64,14 @@ def test_normalize_compare_evidence_parses_prior_knowledge_flag():
     assert normalized["include_prior_knowledge"] is True
 
 
+def test_server_request_normalization_preserves_prior_knowledge_flag():
+    item = _compare_item(include_prior_knowledge=True)
+
+    server._normalize_compare_item(item)
+
+    assert item["include_prior_knowledge"] is True
+
+
 def test_parse_jsonl_parses_prior_knowledge_flag():
     items, errors = parse_jsonl(
         json.dumps(_compare_item(include_prior_knowledge="否"), ensure_ascii=False),
@@ -105,3 +117,17 @@ def test_prior_knowledge_protocol_is_selectable():
 
     assert protocol.display == "垂域先验知识测试"
     assert protocol.selectable is True
+
+
+def test_include_prior_knowledge_survives_frontend_submission():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js required for frontend regression")
+    result = subprocess.run(
+        [node, str(Path(__file__).with_name("test_include_prior_knowledge_ui.cjs"))],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

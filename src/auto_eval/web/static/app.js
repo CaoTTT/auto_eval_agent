@@ -1,4 +1,4 @@
-import { createApp, ref, computed, onMounted, onUnmounted, nextTick, selectEvidenceMode, isRemoteUrl, productContextValue, missingProductContexts } from "./compare-data.js?v=20261103_evidence_fallback";
+import { createApp, ref, computed, onMounted, onUnmounted, nextTick, selectEvidenceMode, isRemoteUrl, productContextValue, missingProductContexts } from "./compare-data.js?v=20261103_partial_eval";
 
 createApp({
   watch: {
@@ -1221,12 +1221,13 @@ createApp({
 
     // —— 视频评测：逐题卡片（query + 可选 context + 视频上传 + 可选 answer_text）——
     function newOpItem() {
-      return { _uiKey: ++opItemSequence, id: "", query: "", queryImages: [], queryImageMeta: [], queryUploading: false, queryUploadError: "", evidenceMode: "long_screenshot", screenshot1Path: "", screenshot2Path: "", screenshot3Path: "", context: "", category: "", productCount: 2, videoName: "", videoPath: "", video1Path: "", video2Path: "", video3Path: "", frames: [], frameCount: 0, duration: 0, answer: "", answer1: "", answer2: "", answer3: "", context1: "", context2: "", context3: "", taskStartTime: null, taskEndTime: null, sourceLine: null, sourceData: null, sessionGroup: null, turnIndex: null, uploading: false, uploadError: "" };
+      return { _uiKey: ++opItemSequence, id: "", query: "", queryImages: [], queryImageMeta: [], queryUploading: false, queryUploadError: "", evidenceMode: "long_screenshot", screenshot1Path: "", screenshot2Path: "", screenshot3Path: "", context: "", category: "", productCount: 2, videoName: "", videoPath: "", video1Path: "", video2Path: "", video3Path: "", frames: [], frameCount: 0, duration: 0, answer: "", answer1: "", answer2: "", answer3: "", context1: "", context2: "", context3: "", includePriorKnowledge: false, taskStartTime: null, taskEndTime: null, sourceLine: null, sourceData: null, sessionGroup: null, turnIndex: null, uploading: false, uploadError: "" };
     }
     function draftFingerprint() {
       const keys = ['id','query','queryImages','context','category','productCount','evidenceMode',
         'taskStartTime','taskEndTime','video1Path','video2Path','video3Path','screenshot1Path',
-        'screenshot2Path','screenshot3Path','answer1','answer2','answer3','context1','context2','context3'];
+        'screenshot2Path','screenshot3Path','answer1','answer2','answer3','context1','context2','context3',
+        'includePriorKnowledge'];
       return JSON.stringify(opItems.value.map(item => Object.fromEntries(keys.map(key => [key,item[key]]))));
     }
     function confirmDatasetReplacement() {
@@ -1252,7 +1253,8 @@ createApp({
             [`answer${n}`,item[`answer${n}`] || ''], [`context${n}`,productContextValue(item, n)],
             [`screenshotMeta${n}`,item[`screenshot_meta${n}`] || {}],
             [`videoSource${n}`,item[`video_source${n}`] || {}],
-          ])), taskStartTime:item.task_start_time ?? null, taskEndTime:item.task_end_time ?? null,
+          ])), includePriorKnowledge:item.include_prior_knowledge === true,
+          taskStartTime:item.task_start_time ?? null, taskEndTime:item.task_end_time ?? null,
           sourceLine:item.source_line ?? null, sourceData:raw.source_data || null,
           sessionId:conversation ? raw.session_id : '', screenshotScope:conversation ? raw.screenshot_scope || '' : '',
           sessionGroup:conversation ? raw.session_group ?? null : null, turnIndex:conversation ? raw.turn_index : null};
@@ -1517,6 +1519,7 @@ createApp({
           item.context2 = (it.context2 || "").trim();
           item.answer1 = (it.answer1 || it.answer || "").trim();
           item.answer2 = (it.answer2 || "").trim();
+          item.include_prior_knowledge = it.includePriorKnowledge === true;
           if (productCount === 3) {
             item.context3 = (it.context3 || "").trim();
             item.answer3 = (it.answer3 || "").trim();
@@ -1592,10 +1595,21 @@ createApp({
         loadHistory();
         return;
       }
+      const rejectedItems = Array.isArray(d.rejected_items) ? d.rejected_items : [];
+      const acceptedItems = Array.isArray(d.accepted_indexes)
+        ? d.accepted_indexes
+          .filter(index => Number.isInteger(index) && index >= 0 && index < submittedItems.length)
+          .map(index => submittedItems[index])
+        : submittedItems;
+      const visibleItems = acceptedItems.length ? acceptedItems : submittedItems;
       closeActiveStream();
-      items.value = submittedItems;
+      items.value = visibleItems;
       datasetBaseline = draftFingerprint();
-      errors.value = [];
+      errors.value = rejectedItems.map((item, index) => {
+        const position = Number.isInteger(item.position) ? item.position : index + 1;
+        const caseId = item.id || `#${Number.isInteger(item.index) ? item.index + 1 : position}`;
+        return `第 ${position} 条（Case ${caseId}）：${item.error || "不符合评测要求"}`;
+      });
       results.value = [];
       summary.value = null;
       progressEvents.value = {};
@@ -1603,9 +1617,9 @@ createApp({
       resetResultFilters();
       setAllReasonsExpanded(false);
       progress.value = 0;
-      total.value = submittedItems.length;
+      total.value = visibleItems.length;
       itemProgress.value = Object.fromEntries(
-        submittedItems.map((item, index) => [
+        visibleItems.map((item, index) => [
           index,
           {
             item_index: index,
@@ -1630,9 +1644,11 @@ createApp({
       activeRetry.value = null;
       selectedRetryIndexes.value = [];
       selectedTaskStatus.value = d.status || "queued";
-      queueNotice.value = d.queue_position > 1
+      const queueMessage = d.queue_position > 1
         ? `已加入队列，当前排在第 ${d.queue_position} 位。`
         : "任务已提交，等待调度器启动。";
+      queueNotice.value = queueMessage
+        + (rejectedItems.length ? ` 已跳过 ${rejectedItems.length} 条不符合要求的条目。` : "");
       connectSSE(taskId.value);
       loadQueue();
       loadHistory();
