@@ -88,6 +88,10 @@ from .visual_compare_prompt_timeliness import (
     VISUAL_COMPARE_SYSTEM as TIMELINESS_SYSTEM,
     VISUAL_COMPARE_USER as TIMELINESS_USER,
 )
+from .visual_compare_prompt_timeliness_p02 import (
+    VISUAL_COMPARE_SYSTEM as TIMELINESS_P02_SYSTEM,
+    VISUAL_COMPARE_USER as TIMELINESS_P02_USER,
+)
 from .knowledge_qa_schema import (
     KNOWLEDGE_QA_STANDARD_ID, KNOWLEDGE_QA_COMPARE_PROTOCOL_ID,
     KNOWLEDGE_QA_RESULT_SCHEMA_VERSION, KNOWLEDGE_QA_DIMENSIONS,
@@ -116,6 +120,7 @@ V03_COMPARE_PROTOCOL_ID = f"{STANDARD_ID}@0.3"
 V02_CALIBRATED_COMPARE_PROTOCOL_ID = f"{STANDARD_ID}@0.2-simplified-calibrated"
 V02_THINKING_EXPOSURE_COMPARE_PROTOCOL_ID = f"{STANDARD_ID}@0.2-simplified-thinking-exposure"
 QA_CHAT_V2_CALIBRATED_COMPARE_PROTOCOL_ID = f"{QA_CHAT_STANDARD_ID}@1.1-demand-calibrated"
+TIMELINESS_P02_COMPARE_PROTOCOL_ID = f"{TIMELINESS_STANDARD_ID}@1.0-p02"
 V1022_COMPARE_PROTOCOL_ID = f"{STANDARD_ID}@{STANDARD_VERSION_1022}"
 DIMENSIONS = (
     "understanding",
@@ -299,6 +304,26 @@ class CompareProtocol:
         return {key: metadata[key] for key in legacy_keys}
 
 
+_TIMELINESS_P01 = CompareProtocol(
+    id=TIMELINESS_COMPARE_PROTOCOL_ID,
+    standard_id=TIMELINESS_STANDARD_ID,
+    standard_version="1.0",
+    bundle_revision="1.0.2",
+    display="时效性评估V1·1-3分（候选）",
+    status="experimental",
+    system_template=TIMELINESS_SYSTEM,
+    user_template=TIMELINESS_USER,
+    observation_model=TimelinessObservation,
+    require_response_pass=False,
+    score_min=1,
+    score_max=3,
+    dimensions=TIMELINESS_DIMENSIONS,
+    dimension_names=dict(TIMELINESS_DIMENSION_NAMES),
+    score_dimensions=TIMELINESS_DIMENSIONS,
+    result_schema_version=TIMELINESS_RESULT_SCHEMA_VERSION,
+)
+
+
 _PROTOCOLS = {
     DEFAULT_COMPARE_PROTOCOL_ID: CompareProtocol(
         id=DEFAULT_COMPARE_PROTOCOL_ID,
@@ -460,23 +485,15 @@ _PROTOCOLS = {
         score_dimensions=CHITCHAT_FLAT_DIMENSIONS,
         result_schema_version=CHITCHAT_FLAT_RESULT_SCHEMA_VERSION,
     ),
-    TIMELINESS_COMPARE_PROTOCOL_ID: CompareProtocol(
-        id=TIMELINESS_COMPARE_PROTOCOL_ID,
-        standard_id=TIMELINESS_STANDARD_ID,
-        standard_version="1.0",
-        bundle_revision="1.0.2",
-        display="时效性评估V1·1-3分（候选）",
-        status="experimental",
-        system_template=TIMELINESS_SYSTEM,
-        user_template=TIMELINESS_USER,
-        observation_model=TimelinessObservation,
-        require_response_pass=False,
-        score_min=1,
-        score_max=3,
-        dimensions=TIMELINESS_DIMENSIONS,
-        dimension_names=dict(TIMELINESS_DIMENSION_NAMES),
-        score_dimensions=TIMELINESS_DIMENSIONS,
-        result_schema_version=TIMELINESS_RESULT_SCHEMA_VERSION,
+    TIMELINESS_COMPARE_PROTOCOL_ID: _TIMELINESS_P01,
+    TIMELINESS_P02_COMPARE_PROTOCOL_ID: replace(
+        _TIMELINESS_P01,
+        id=TIMELINESS_P02_COMPARE_PROTOCOL_ID,
+        standard_version="1.0-p02",
+        bundle_revision="1.0.3",
+        display="时效性评估V1·1-3分（P02 实验）",
+        system_template=TIMELINESS_P02_SYSTEM,
+        user_template=TIMELINESS_P02_USER,
     ),
     KNOWLEDGE_QA_COMPARE_PROTOCOL_ID: CompareProtocol(
         id=KNOWLEDGE_QA_COMPARE_PROTOCOL_ID,

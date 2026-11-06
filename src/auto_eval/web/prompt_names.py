@@ -23,6 +23,8 @@ _PROMPT_NAMES = {
         "闲聊对比 | 标准S1.0 | Prompt P04 | Qwen3.8-Flash | 实验",
     ("timeliness_compare@1.0", "1.0.2"):
         "时效性对比 | 标准S1.0 | Prompt P01 | Qwen3.8-Flash | 生产",
+    ("timeliness_compare@1.0-p02", "1.0.3"):
+        "时效性对比 | 标准S1.0 | Prompt P02 | Qwen3.8-Flash | 实验",
     ("knowledge_qa_compare@1.0", "1.0.0"):
         "知识问答（测试部） | 标准S1.0 | Prompt P01 | Qwen3.8-Flash | 实验",
     ("qa_competitor_compare@0.3", "0.3.1"):

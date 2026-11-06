@@ -17,6 +17,7 @@ APPROVED = [
     ("qa_chat_compare@1.1-demand-calibrated", "1.1.3", "闲聊对比 | 标准S1.0 | Prompt P03 | Qwen3.8-Flash | 实验"),
     ("chitchat_evidence_first_flat@1.1", "1.1.1", "闲聊对比 | 标准S1.0 | Prompt P04 | Qwen3.8-Flash | 实验"),
     ("timeliness_compare@1.0", "1.0.2", "时效性对比 | 标准S1.0 | Prompt P01 | Qwen3.8-Flash | 生产"),
+    ("timeliness_compare@1.0-p02", "1.0.3", "时效性对比 | 标准S1.0 | Prompt P02 | Qwen3.8-Flash | 实验"),
     ("knowledge_qa_compare@1.0", "1.0.0", "知识问答（测试部） | 标准S1.0 | Prompt P01 | Qwen3.8-Flash | 实验"),
     ("qa_competitor_compare@0.3", "0.3.1", "问答对比 | 标准S0.3 | Prompt P01 | Qwen3.8-Flash | 实验"),
     ("qa_competitor_compare@0.2-simplified-calibrated", "0.2.3", "问答对比 | 标准S1.0 | Prompt P04 | Qwen3.8-Flash | 实验"),
@@ -28,7 +29,7 @@ APPROVED = [
 
 VERSION_CODES = [
     "QA-S1.0-P01", "QA-S1.0-P02", "QA-S1.0-P03", "CHAT-S1.0-P02",
-    "CHAT-S1.0-P03", "CHAT-S1.0-P04", "TIME-S1.0-P01", "KQA-S1.0-P01",
+    "CHAT-S1.0-P03", "CHAT-S1.0-P04", "TIME-S1.0-P01", "TIME-S1.0-P02", "KQA-S1.0-P01",
     "QA-S0.3-P01", "QA-S1.0-P04", "QA-S1.0-P05", "CHAT-S1.0-P01",
     "EXP-S1.0-P01",
     "CHATGSB-S1.0-P01",
@@ -77,7 +78,7 @@ def test_catalog_matches_current_identities_and_reads_availability_from_registry
     for protocol in list_compare_protocols():
         if (protocol.id, protocol.bundle_revision) not in approved_ids:
             assert prompt_name(protocol.id, protocol.bundle_revision, fallback=protocol.display) == protocol.display
-    assert len({r["canonical_name"] for r in records}) == 14
+    assert len({r["canonical_name"] for r in records}) == len(APPROVED)
     for record in records:
         protocol = resolve_compare_protocol(record["evaluation_profile"], record["bundle_revision"])
         assert record["legacy_name"] == protocol.display

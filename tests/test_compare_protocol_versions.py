@@ -13,6 +13,7 @@ from auto_eval.judges.compare_protocols import (
     QA_CHAT_V2_COMPARE_PROTOCOL_ID,
     QA_CHAT_V2_CALIBRATED_COMPARE_PROTOCOL_ID,
     TIMELINESS_COMPARE_PROTOCOL_ID,
+    TIMELINESS_P02_COMPARE_PROTOCOL_ID,
     KNOWLEDGE_QA_COMPARE_PROTOCOL_ID,
     CHITCHAT_FLAT_COMPARE_PROTOCOL_ID,
     DIALOGUE_EXPERIENCE_COMPARE_PROTOCOL_ID,
@@ -58,6 +59,7 @@ def test_registry_defaults_to_stable_v02_and_exposes_experimental_versions():
         QA_CHAT_V2_CALIBRATED_COMPARE_PROTOCOL_ID,
         CHITCHAT_FLAT_COMPARE_PROTOCOL_ID,
         TIMELINESS_COMPARE_PROTOCOL_ID,
+        TIMELINESS_P02_COMPARE_PROTOCOL_ID,
         KNOWLEDGE_QA_COMPARE_PROTOCOL_ID,
         V1022_COMPARE_PROTOCOL_ID,
         DIALOGUE_EXPERIENCE_COMPARE_PROTOCOL_ID,
@@ -206,6 +208,7 @@ async def test_eval_api_freezes_selected_protocol_on_new_task(monkeypatch):
         QA_CHAT_V2_CALIBRATED_COMPARE_PROTOCOL_ID,
         CHITCHAT_FLAT_COMPARE_PROTOCOL_ID,
         TIMELINESS_COMPARE_PROTOCOL_ID,
+        TIMELINESS_P02_COMPARE_PROTOCOL_ID,
         KNOWLEDGE_QA_COMPARE_PROTOCOL_ID,
         V1022_COMPARE_PROTOCOL_ID,
         DIALOGUE_EXPERIENCE_COMPARE_PROTOCOL_ID,
@@ -214,17 +217,20 @@ async def test_eval_api_freezes_selected_protocol_on_new_task(monkeypatch):
     assert [p["id"] for p in public if p["status"] == "stable"] == [
         DEFAULT_COMPARE_PROTOCOL_ID, V02_PLUS_COMPARE_PROTOCOL_ID,
     ]
-    timeliness_response = await server_module.api_eval(
-        server_module.EvalReq(
-            mode="compare", items=[item], evaluation_profile=TIMELINESS_COMPARE_PROTOCOL_ID,
+    for protocol_id, revision in (
+        (TIMELINESS_COMPARE_PROTOCOL_ID, "1.0.2"),
+        (TIMELINESS_P02_COMPARE_PROTOCOL_ID, "1.0.3"),
+    ):
+        timeliness_response = await server_module.api_eval(
+            server_module.EvalReq(mode="compare", items=[item], evaluation_profile=protocol_id)
         )
-    )
-    assert timeliness_response["evaluation_profile"] == TIMELINESS_COMPARE_PROTOCOL_ID
-    manifest = created[-1].protocol_manifest
-    assert manifest["bundle_revision"] == "1.0.2"
-    assert manifest["result_schema_version"] == "timeliness-result-3"
-    assert manifest["score_range"] == [1, 3]
-    assert [dim["key"] for dim in manifest["dimensions"]] == ["understanding", "authority", "timeliness"]
+        assert timeliness_response["evaluation_profile"] == protocol_id
+        manifest = created[-1].protocol_manifest
+        assert manifest["id"] == protocol_id
+        assert manifest["bundle_revision"] == revision
+        assert manifest["result_schema_version"] == "timeliness-result-3"
+        assert manifest["score_range"] == [1, 3]
+        assert [dim["key"] for dim in manifest["dimensions"]] == ["understanding", "authority", "timeliness"]
 
     with pytest.raises(HTTPException) as exc_info:
         await server_module.api_eval(

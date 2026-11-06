@@ -77,8 +77,8 @@ def test_configuration_exposes_aliases_separately_from_frozen_protocol_metadata(
     catalog = response["prompt_name_catalog"]
     assert catalog == prompt_name_catalog()
     names = {(row["evaluation_profile"], row["bundle_revision"]): row for row in catalog}
-    assert len(names) == 14
-    assert len(response["evaluation_profiles"]) == 15
+    assert len(names) == 15
+    assert len(response["evaluation_profiles"]) == 16
     for profile in response["evaluation_profiles"]:
         protocol = resolve_compare_protocol(profile["id"])
         record = names.get((protocol.id, protocol.bundle_revision))
@@ -125,6 +125,8 @@ def test_missing_or_unknown_revision_keeps_the_original_label(revision):
     (V1022_COMPARE_PROTOCOL_ID, "current"),
     (CHITCHAT_FLAT_COMPARE_PROTOCOL_ID, "current"),
     (DIALOGUE_EXPERIENCE_COMPARE_PROTOCOL_ID, "current"),
+    (TIMELINESS_COMPARE_PROTOCOL_ID, "current"),
+    ("timeliness_compare@1.0-p02", "current"),
     (V02_PLUS_COMPARE_PROTOCOL_ID, "0.2.2"),
     (CHITCHAT_FLAT_COMPARE_PROTOCOL_ID, "1.1.0"),
     (DEFAULT_COMPARE_PROTOCOL_ID, None),

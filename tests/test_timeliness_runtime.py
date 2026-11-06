@@ -26,6 +26,32 @@ def profile():
 
 
 @pytest.mark.asyncio
+async def test_p02_runs_the_new_rule_with_its_own_frozen_identity():
+    p02_id = "timeliness_compare@1.0-p02"
+    rule = (
+        "11.先根据 Query 确定用户需要了解哪个时间点或时段的情况，再通过联网核实答案中的相关事实在该时间是否仍然有效。"
+        "仅当信息过期或遗漏关键更新，且影响用户所需结论时，才按整体评分标准扣时效分。"
+        "较早发布的信息仍能准确回答 Query 的，不因其发布日期早于最新报道而扣分。"
+    )
+    p01_client = FakeClient(payload())
+    p02_client = FakeClient(payload())
+    p01 = await VisualCompareJudge(p01_client, profile(), PROFILE).evaluate(question="今天几点开放？")
+    p02 = await VisualCompareJudge(p02_client, profile(), p02_id).evaluate(question="今天几点开放？")
+
+    assert len(p01_client.calls) == len(p02_client.calls) == 1
+    p01_system, p01_user, _ = p01_client.calls[0]
+    p02_system, p02_user, _ = p02_client.calls[0]
+    boundary = "\n\n【七、判档与结构一致性】"
+    assert p02_system == p01_system.replace(boundary, f"\n{rule}{boundary}", 1)
+    assert p02_user == p01_user
+    assert p01["evaluation_profile"] == PROFILE and p01["bundle_revision"] == "1.0.2"
+    assert p02["evaluation_profile"] == p02_id and p02["bundle_revision"] == "1.0.3"
+    assert p02["standard_id"] == "timeliness_compare"
+    assert p02["result_schema_version"] == p01["result_schema_version"] == "timeliness-result-3"
+    assert p02["test_time_policy"] == p01["test_time_policy"] == "provided_evidence_only"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("count", [2, 3])
 @pytest.mark.parametrize("mode", ["video_frames", "long_screenshot"])
 async def test_original_media_is_sent_once_with_explicit_product_roles(tmp_path, count, mode):

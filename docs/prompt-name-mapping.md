@@ -1,6 +1,6 @@
 # Prompt 展示名称映射
 
-本表依据用户提供的《评估标准与Prompt版本命名表.xlsx》（2026-11-02）更新，保留版本代号、规范展示名称、原展示名称及精确协议身份的对应关系。界面名称逐字采用 Excel 的“文字标签”列，“版本代号”列保留在本表供查询。命名只作用于界面展示；协议 ID、`standard_version`、`bundle_revision`、原 `CompareProtocol.display`、协议状态、公开元数据、请求元数据和 prompt 正文保持原值。
+本表依据用户提供的《评估标准与Prompt版本命名表.xlsx》（2026-11-02）整理，并补充后续新增的时效性 P02，保留版本代号、规范展示名称、原展示名称及精确协议身份的对应关系。命名只作用于界面展示。
 
 文字标签结构为“标准名称 | 标准S版本 | Prompt P序号 | 裁判模型 | 状态”，版本代号结构为“类别代码-S标准版本-P两位序号”，例如 `QA-S1.0-P01`。`S1.0`、`S0.3`、Prompt 序号、模型名称及“生产／实验”均为表格规定的展示文字，不据此改写实际标准版本、实现修订、执行模型或协议状态。思考暴露版对应 `QA-S1.0-P05`。
 
@@ -13,6 +13,7 @@
 | qa_chat_compare@1.1-demand-calibrated | 1.1.3 | 1.1-demand-calibrated | 问答闲聊V2·需求与分档校准·1-5分（候选） | CHAT-S1.0-P03 | 闲聊对比 \| 标准S1.0 \| Prompt P03 \| Qwen3.8-Flash \| 实验 | 是 |
 | chitchat_evidence_first_flat@1.1 | 1.1.1 | 1.1 | 闲聊七维·证据先行·1-5分（候选） | CHAT-S1.0-P04 | 闲聊对比 \| 标准S1.0 \| Prompt P04 \| Qwen3.8-Flash \| 实验 | 是 |
 | timeliness_compare@1.0 | 1.0.2 | 1.0 | 时效性评估V1·1-3分（候选） | TIME-S1.0-P01 | 时效性对比 \| 标准S1.0 \| Prompt P01 \| Qwen3.8-Flash \| 生产 | 是 |
+| timeliness_compare@1.0-p02 | 1.0.3 | 1.0-p02 | 时效性评估V1·1-3分（P02 实验） | TIME-S1.0-P02 | 时效性对比 \| 标准S1.0 \| Prompt P02 \| Qwen3.8-Flash \| 实验 | 是 |
 | knowledge_qa_compare@1.0 | 1.0.0 | 1.0 | 知识问答V1·0-2分（候选） | KQA-S1.0-P01 | 知识问答（测试部） \| 标准S1.0 \| Prompt P01 \| Qwen3.8-Flash \| 实验 | 是 |
 | qa_competitor_compare@0.3 | 0.3.1 | 0.3 | V0.3（实验） | QA-S0.3-P01 | 问答对比 \| 标准S0.3 \| Prompt P01 \| Qwen3.8-Flash \| 实验 | 否 |
 | qa_competitor_compare@0.2-simplified-calibrated | 0.2.3 | 0.2-simplified-calibrated | V0.2 简化版·评分校准（实验） | QA-S1.0-P04 | 问答对比 \| 标准S1.0 \| Prompt P04 \| Qwen3.8-Flash \| 实验 | 否 |

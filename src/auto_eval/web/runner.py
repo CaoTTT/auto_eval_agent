@@ -787,7 +787,9 @@ def _make_item_evaluator(
                 }
             if task.mode == "compare":
                 res.update(product_order_metadata(reverse_product_order, _compare_product_count(item_dict)))
-                if task.evaluation_profile in {"timeliness_compare@1.0", "knowledge_qa_compare@1.0", "dialogue_experience_compare@1.0", "chitchat_gsb_compare@1.0"}:
+                if compare_protocol.standard_id in {
+                    "timeliness_compare", "knowledge_qa_compare", "dialogue_experience_compare", "chitchat_gsb_compare",
+                }:
                     # This is audit metadata, never the product's test date.
                     res.setdefault("evaluation_run_at", datetime.now().astimezone().isoformat(timespec="seconds"))
                 else:
@@ -1055,8 +1057,14 @@ async def run_resume(task: Task, cfg: AppConfig) -> None:
 async def run_retry(task: Task, cfg: AppConfig, retry_id: str) -> None:
     """执行人工失败补跑；候选成功才写回原任务，失败仅进入 attempt 审计。"""
     retry = task.retry_runs[retry_id]
-    shared_chat_output = (task.evaluation_profile in {"qa_chat_compare@1.1", "qa_chat_compare@1.1-demand-calibrated", "timeliness_compare@1.0", "knowledge_qa_compare@1.0"} or
-                          task.protocol_manifest.get("result_schema_version") in {"qa-chat-result-2", "timeliness-result-1", "timeliness-result-2", "timeliness-result-3", "knowledge-qa-result-2", "chitchat-flat-result-1", "dialogue-experience-result-1", "chitchat-gsb-result-1"})
+    shared_chat_output = (
+        task.evaluation_profile in {"qa_chat_compare@1.1", "qa_chat_compare@1.1-demand-calibrated", "knowledge_qa_compare@1.0"}
+        or (task.evaluation_profile or "").startswith("timeliness_compare@")
+        or task.protocol_manifest.get("result_schema_version") in {
+            "qa-chat-result-2", "timeliness-result-1", "timeliness-result-2", "timeliness-result-3",
+            "knowledge-qa-result-2", "chitchat-flat-result-1", "dialogue-experience-result-1", "chitchat-gsb-result-1",
+        }
+    )
     retry["status"] = "running"
     retry["started_at"] = time.time()
     task.repair_status = "running"

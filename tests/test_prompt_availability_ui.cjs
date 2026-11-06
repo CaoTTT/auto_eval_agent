@@ -36,6 +36,7 @@ async function main() {
     'qa_chat_compare@1.0',
     'qa_chat_compare@1.1',
     'timeliness_compare@1.0',
+    'timeliness_compare@1.0-p02',
     'qa_competitor_compare@0.2-simplified-1022',
   ];
   const disabled = new Set(ids.slice(2, 6));
@@ -47,7 +48,7 @@ async function main() {
   const enabledIds = ids.filter(id => !disabled.has(id));
   assert.deepEqual(Array.from(app.compareProfiles.value, profile => profile.id),
     [...enabledIds, ...ids.filter(id => disabled.has(id))],
-    'all nine remain visible, enabled first, with stable order inside both groups');
+    'all profiles remain visible, enabled first, with stable order inside both groups');
   assert.deepEqual(profiles.map(profile => profile.id), ids, 'display ordering does not mutate config order');
   profiles[4].display = 'V0.2 简化版·思考暴露优化（可用）';
   assert.equal(app.evaluationProfileOptionLabel(profiles[4]), 'V0.2 简化版·思考暴露优化');
