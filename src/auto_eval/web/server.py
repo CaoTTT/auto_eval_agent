@@ -270,6 +270,158 @@ def _resolve_operation_video_path(raw_path: str) -> Path:
     return resolve_operation_video_path(raw_path, base_dir=BASE_DIR)
 
 
+def _normalize_compare_item(item: dict) -> None:
+    if not is_conversation(item):
+        # Preserve legacy metadata, but don't let it activate the runner's
+        # conversation path after request validation.
+        if "session_id" in item or "turn_index" in item:
+            item.setdefault("source_data", {key: value for key, value in item.items() if key != "source_data"})
+        for field in ("session_id", "turn_index", "session_group"):
+            item.pop(field, None)
+    item.update(normalize_turn(item, external=True))
+    for field in DIAGNOSTIC_FIELDS - {"session_id", "session_group", "turn_index", "input_schema_version"}:
+        item.pop(field, None)
+    item.pop("conversation_assets", None)
+    item.pop("screenshot_evidence", None)
+    item.update(normalize_query_input(item))
+    for field in PREPARED_FIELDS:
+        item.pop(field, None)
+    for field in ("media", "frame_count", "video_source", *(f"{prefix}{n}" for n in (1, 2, 3)
+                  for prefix in ("frames", "duration", "screenshot_meta", "video_source"))):
+        item.pop(field, None)
+    for n in (1, 2, 3):
+        item.pop(f"video{n}_path", None)
+    normalized = normalize_compare_evidence(item)
+    # Preserve unused input paths for provenance, never prepared evidence.
+    normalized.setdefault("source_data", {key: value for key, value in item.items()
+                                           if key != "source_data"})
+    item.clear()
+    item.update(normalized)
+
+
+def _case_validation_error(index: int, item: dict, error: object) -> str:
+    case_id = item.get("id")
+    case_label = f"（Case {case_id.strip()}）" if isinstance(case_id, str) and case_id.strip() else ""
+    return f"第{index}条{case_label} {error}"
+
+
+def _rejected_item(index: int, item: dict, error: object) -> dict:
+    case_id = item.get("id")
+    return {
+        "index": index,
+        "position": index + 1,
+        "id": case_id if isinstance(case_id, str) else "",
+        "error": str(error),
+    }
+
+
+def _validate_eval_request_partial(req: EvalReq) -> tuple[list[int], list[dict]]:
+    """Validate compare items independently and reject invalid sessions atomically."""
+    try:
+        validate_product_order(req.mode, req.items, req.options)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    for item in req.items:
+        item.pop(TEMPORARY_DOWNLOAD_PATHS_FIELD, None)
+    if req.mode != "compare":
+        return list(range(len(req.items))), []
+
+    _compare_protocol_or_422(req.evaluation_profile)
+    originals = list(req.items)
+    normalized: dict[int, dict] = {}
+    item_errors: dict[int, str] = {}
+    for index, source in enumerate(originals):
+        candidate = copy.deepcopy(source)
+        try:
+            _normalize_compare_item(candidate)
+        except ValueError as exc:
+            item_errors[index] = _case_validation_error(index + 1, source, exc)
+        else:
+            normalized[index] = candidate
+
+    session_members: dict[str, list[int]] = {}
+    for index, item in enumerate(originals):
+        session_id = item.get("session_id")
+        if is_conversation(item) and isinstance(session_id, str) and session_id.strip():
+            session_members.setdefault(session_id.strip(), []).append(index)
+
+    def reject_sessions(session_ids: set[str], reason: str | None = None) -> None:
+        for session_id in session_ids:
+            for index in session_members.get(session_id, []):
+                item_errors.setdefault(
+                    index,
+                    reason or f"会话 {session_id} 存在无效条目，整组未提交",
+                )
+
+    invalid_sessions: set[str] = set()
+    for index in item_errors:
+        item = originals[index]
+        session_id = item.get("session_id")
+        if is_conversation(item) and isinstance(session_id, str) and session_id.strip():
+            invalid_sessions.add(session_id.strip())
+
+    items_by_id: dict[str, list[int]] = {}
+    for index, item in enumerate(originals):
+        case_id = item.get("id")
+        if isinstance(case_id, str) and case_id:
+            items_by_id.setdefault(case_id, []).append(index)
+    for case_id, indexes in items_by_id.items():
+        if len(indexes) < 2 or not any(is_conversation(originals[index]) for index in indexes):
+            continue
+        for index in indexes:
+            item_errors.setdefault(
+                index,
+                f"conversation_structure_invalid: id 重复 {case_id}",
+            )
+            item = originals[index]
+            session_id = item.get("session_id")
+            if is_conversation(item) and isinstance(session_id, str) and session_id.strip():
+                invalid_sessions.add(session_id.strip())
+
+    reject_sessions(invalid_sessions)
+    groups: dict[str, list[int]] = {}
+    for index, item in normalized.items():
+        if is_conversation(item):
+            groups.setdefault(item["session_id"], []).append(index)
+    for session_id, indexes in groups.items():
+        if session_id in invalid_sessions:
+            reject_sessions({session_id})
+            continue
+        try:
+            validate_conversations([normalized[index] for index in indexes])
+        except ValueError as exc:
+            invalid_sessions.add(session_id)
+            reason = f"会话 {session_id} 已拒绝：{exc}"
+            reject_sessions({session_id}, reason)
+    if invalid_sessions:
+        # A validation failure can reveal another member of the same session,
+        # so apply the session boundary once more.
+        reject_sessions(invalid_sessions)
+
+    rejected = [
+        _rejected_item(index, originals[index], error)
+        for index, error in sorted(item_errors.items())
+    ]
+    accepted_indexes = [index for index in range(len(originals)) if index not in item_errors]
+    if not accepted_indexes:
+        preview = "；".join(
+            _case_validation_error(index + 1, originals[index], item_errors[index])
+            for index in sorted(item_errors)[:8]
+        )
+        suffix = "……" if len(item_errors) > 8 else ""
+        raise HTTPException(
+            422,
+            f"垂域视觉对比输入不完整，没有可提交的条目：{preview}{suffix}",
+        )
+    req.items = [normalized[index] for index in accepted_indexes]
+    req.options.setdefault("reverse_product_order", False)
+    try:
+        validate_product_order(req.mode, req.items, req.options)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return accepted_indexes, rejected
+
+
 def _validate_eval_request(req: EvalReq, app_cfg, *, previous_items=None) -> None:
     """提交前校验：compare 模式支持完整的2或3产品同类视觉证据。"""
     try:
@@ -292,36 +444,9 @@ def _validate_eval_request(req: EvalReq, app_cfg, *, previous_items=None) -> Non
     invalid: list[str] = []
     for index, item in enumerate(req.items, 1):
         try:
-            if not is_conversation(item):
-                # Preserve legacy metadata, but don't let it activate the runner's
-                # conversation path after request validation.
-                if "session_id" in item or "turn_index" in item:
-                    item.setdefault("source_data", {key: value for key, value in item.items() if key != "source_data"})
-                for field in ("session_id", "turn_index", "session_group"):
-                    item.pop(field, None)
-            item.update(normalize_turn(item, external=True))
-            for field in DIAGNOSTIC_FIELDS - {"session_id", "session_group", "turn_index", "input_schema_version"}:
-                item.pop(field, None)
-            item.pop("conversation_assets", None)
-            item.pop("screenshot_evidence", None)
-            item.update(normalize_query_input(item))
-            for field in PREPARED_FIELDS:
-                item.pop(field, None)
-            for field in ("media", "frame_count", "video_source", *(f"{prefix}{n}" for n in (1, 2, 3)
-                          for prefix in ("frames", "duration", "screenshot_meta", "video_source"))):
-                item.pop(field, None)
-            for n in (1, 2, 3):
-                item.pop(f"video{n}_path", None)
-            normalized = normalize_compare_evidence(item)
-            # Preserve unused input paths for provenance, never prepared evidence.
-            normalized.setdefault("source_data", {key: value for key, value in item.items()
-                                                   if key != "source_data"})
-            item.clear()
-            item.update(normalized)
+            _normalize_compare_item(item)
         except ValueError as exc:
-            case_id = item.get("id")
-            case_label = f"（Case {case_id.strip()}）" if isinstance(case_id, str) and case_id.strip() else ""
-            invalid.append(f"第{index}条{case_label} {exc}")
+            invalid.append(_case_validation_error(index, item, exc))
     try:
         validate_conversations([*(previous_items or []), *req.items])
     except ValueError as exc:
@@ -572,7 +697,12 @@ async def api_eval(req: EvalReq):
     if not req.items:
         raise HTTPException(400, "items 为空")
     app_cfg = cfg()
-    _validate_eval_request(req, app_cfg)
+    if req.mode == "compare":
+        accepted_indexes, rejected_items = _validate_eval_request_partial(req)
+    else:
+        _validate_eval_request(req, app_cfg)
+        accepted_indexes = list(range(len(req.items)))
+        rejected_items = []
     judge_runtime, judges = _new_judge_runtime(app_cfg, req.options)
     # 模型调用并发统一由全局 MODEL_LIMITER 决定，不再从每个任务的 options 单独设置。
     protocol = (
@@ -600,6 +730,10 @@ async def api_eval(req: EvalReq):
         "task_id": task.id,
         "status": "queued",
         "queue_position": queue_position,
+        "accepted_indexes": accepted_indexes,
+        "accepted_count": len(accepted_indexes),
+        "rejected_count": len(rejected_items),
+        "rejected_items": rejected_items,
         "evaluation_profile": task.evaluation_profile,
         "protocol_manifest": task.protocol_manifest,
         **prompt_display_fields({"mode": task.mode, "evaluation_profile": task.evaluation_profile,

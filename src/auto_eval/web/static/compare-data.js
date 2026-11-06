@@ -1,5 +1,5 @@
 import {createApp as vueCreateApp, ref, computed, watch, onMounted, onUnmounted, nextTick} from "https://unpkg.com/vue@3/dist/vue.esm-browser.js";
-import {CompareCaseList, fromDatasetItem, caseMedia, caseEvidenceMode, selectEvidenceMode, isRemoteUrl, productContextValue, missingProductContexts} from "./compare-cases.js?v=20261103_evidence_fallback";
+import {CompareCaseList, fromDatasetItem, caseMedia, caseEvidenceMode, selectEvidenceMode, isRemoteUrl, productContextValue, missingProductContexts} from "./compare-cases.js?v=20261103_partial_eval";
 import {HumanComparePanel} from "./human-compare.js?v=20261102_chitchat_gsb";
 import {ScreenshotEvidence} from "./screenshot-evidence.js?v=20261030_product_order";
 export {ref, computed, onMounted, onUnmounted, nextTick};
